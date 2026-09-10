@@ -95,3 +95,50 @@ This keeps the project on one shared firmware codebase while allowing reliable d
 ### Next Step
 
 Begin the physical hardware assembly and bring-up phase by starting from the known-working ESP32-C3 PlatformIO foundation and adding hardware modules one at a time, beginning with the basic input stage before moving to the GY-291 ADXL345.
+
+## 2026-09-10
+
+### Completed
+
+* Improved PlatformIO tooling so Bubu and Dudu are selected reliably for both upload and serial monitoring
+* Replaced repeated `esptool read_mac` probing with USB serial-number based board identification
+* Added `.pio/ports.ini` generation so PlatformIO's built-in Monitor and Upload-and-Monitor tasks open the correct board
+* Added a safe `monitor_auto` custom task that resolves the requested board's port live
+* Added busy-port detection using `lsof` and clear error messages when another process is holding the serial port
+* Removed the previous JSON port-cache approach
+* Validated ADXL345 communication over I²C on both Bubu and Dudu
+* Confirmed both accelerometers respond at I²C address `0x53`
+* Confirmed both boards independently produce live X/Y/Z acceleration data
+* Hardware debugging on Bubu identified an incorrect SDA/SCL connection; after correcting the wiring, I²C communication worked normally
+
+### Problems Solved
+
+PlatformIO uploads were already routed to the correct ESP32, but the built-in serial monitor could still open the wrong board. The reason was that `pio device monitor` runs independently from PlatformIO's SCons build process, so `extra_scripts` did not execute and the dynamically selected monitor port was never applied.
+
+The tooling now identifies Bubu and Dudu using the USB serial number exposed by macOS, writes the resolved monitor ports into `.pio/ports.ini`, and loads that file through `platformio.ini`. The script also refuses to silently fall back to another ESP32 and reports when a serial port is already occupied.
+
+During ADXL345 bring-up, Dudu communicated successfully while Bubu initially showed no I²C devices. Swapping the accelerometer modules showed that the failure stayed with Bubu, proving the sensor module itself was not the problem. The issue was traced to incorrect wiring on Bubu: SDA had been connected to an unconnected ESP32 pin and SCL had been connected to GPIO0. After correcting the wiring to SDA → GPIO0 and SCL → GPIO1, both devices detected their ADXL345 at `0x53` and produced independent acceleration readings.
+
+### Current Working State
+
+Both Bubu and Dudu now have working ADXL345 communication over the shared I²C pin assignment:
+
+* GPIO0 → SDA
+* GPIO1 → SCL
+* ADXL345 address → `0x53`
+
+Both boards can be uploaded to and monitored independently without manually selecting serial ports.
+
+The current ADXL345 test firmware reads the six acceleration data registers and prints raw X, Y and Z values to the serial monitor.
+
+### Git Commits
+
+* `c6efb58` — `tooling: reliably select per-board upload and monitor ports` on `main`
+* `84316f5` — same tooling change on `feature/adxl345`
+* `dfa68ac` — `feat: validate ADXL345 I2C communication` on `feature/adxl345`
+
+### Next Step
+
+Understand the ADXL345 acceleration data before adding more functionality: determine what the raw X/Y/Z values represent, how gravity appears in the readings, how the sensor's measurement range and resolution affect the values, and then decide the correct configuration for BubuDudu.
+
+After the basic measurements are understood, continue toward ADXL345 activity/inactivity detection and the interrupt-based motion wake design.
