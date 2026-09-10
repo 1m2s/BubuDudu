@@ -1,33 +1,46 @@
-# Runs inside PlatformIO's own Python (penv), so pyserial is available.
-import json, os, re, subprocess, sys, time
+# Runs inside PlatformIO's own Python (penv) as an extra_script -> pyserial is available.
+import os, re, shutil, signal, subprocess, sys, time
 from serial.tools import list_ports
 from SCons.Script import COMMAND_LINE_TARGETS
 
 Import("env")
 
-ESPRESSIF_VID = 0x303A          # native USB Serial/JTAG on ESP32-C3
-CACHE = os.path.join(env.subst("$PROJECT_DIR"), ".pio", "port_cache.json")
-NEEDS_PORT = {"upload", "uploadfs", "monitor"}
+ESPRESSIF_VID = 0x303A
+UPLOAD_TARGETS = {"upload", "uploadfs", "uploadfsota"}
+PORTS_INI = os.path.join(env.subst("$PROJECT_DIR"), ".pio", "ports.ini")
+MAIN_INI = os.path.join(env.subst("$PROJECT_DIR"), "platformio.ini")
+
 
 def log(msg):
     print(f"[select_port] {msg}")
+
 
 def fail(msg):
     sys.stderr.write(f"\n[select_port] ERROR: {msg}\n\n")
     env.Exit(1)
 
-def norm(mac):
-    return mac.strip().upper().replace("-", ":")
 
-def candidate_ports():
+def norm(mac):
+    """Accepts 'e8-f6-0a-12-4c-a4', 'E8F60A124CA4', ... -> 'E8:F6:0A:12:4C:A4' ('' if not a MAC)."""
+    h = re.sub(r"[^0-9A-Fa-f]", "", mac or "").upper()
+    return ":".join(h[i:i + 2] for i in range(0, 12, 2)) if len(h) == 12 else ""
+
+
+def expected_mac():
+    mac = norm(env.GetProjectOption("custom_device_mac", ""))
+    if not mac:
+        fail(f"custom_device_mac missing or invalid for env '{env['PIOENV']}'")
+    return mac
+
+
+def espressif_ports():
     return sorted(
-        p.device for p in list_ports.comports()
-        if p.vid == ESPRESSIF_VID and p.device.startswith("/dev/cu.")
-    )
+        (p for p in list_ports.comports()
+         if p.vid == ESPRESSIF_VID and p.device.startswith("/dev/cu.")),
+        key=lambda p: p.device)
+
 
 def wait_for_port(port, timeout=5.0):
-    # After esptool's hard_reset the C3 re-enumerates over USB; the
-    # /dev/cu.* node disappears for ~1 s. Wait for it to come back.
     t0 = time.time()
     while time.time() - t0 < timeout:
         if os.path.exists(port):
@@ -35,7 +48,9 @@ def wait_for_port(port, timeout=5.0):
         time.sleep(0.2)
     return False
 
-def read_mac(port):
+
+def read_mac_with_esptool(port):
+    """Fallback only. Resets that one board."""
     esptool_dir = env.PioPlatform().get_package_dir("tool-esptoolpy")
     cmd = [env.subst("$PYTHONEXE"), os.path.join(esptool_dir, "esptool.py"),
            "--chip", "esp32c3", "--port", port, "--no-stub",
@@ -43,70 +58,109 @@ def read_mac(port):
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
     except subprocess.TimeoutExpired:
-        return None
+        return ""
     m = re.search(r"^MAC:\s*([0-9A-Fa-f:]{17})", out, re.M)
-    mac = norm(m.group(1)) if m else None
     wait_for_port(port)
-    return mac
+    return norm(m.group(1)) if m else ""
 
-def load_cache():
-    try:
-        with open(CACHE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_cache(c):
-    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-    with open(CACHE, "w") as f:
-        json.dump(c, f, indent=2)
 
 def find_port(expected):
-    ports = candidate_ports()
+    ports = espressif_ports()
     if not ports:
         fail("No Espressif USB devices connected.")
-    cache = load_cache()
 
-    # 1. Try the last known port first (avoids rebooting the other board).
-    cached = cache.get(expected)
-    if cached in ports:
-        log(f"checking cached port {cached} ...")
-        if read_mac(cached) == expected:
-            return cached
+    # 1) Fast path: macOS exposes the ESP32 MAC as the USB serial number.
+    matches = [p.device for p in ports if norm(p.serial_number) == expected]
+    if len(matches) > 1:
+        fail(f"MAC {expected} appears on several ports: {', '.join(matches)}")
+    if matches:
+        return matches[0]
 
-    # 2. Full scan, stop at first match.
-    for port in ports:
-        if port == cached:
+    # 2) Fallback: only probe ports that expose NO serial number (never resets a known board).
+    for p in ports:
+        if norm(p.serial_number):
             continue
-        log(f"probing {port} ...")
-        if read_mac(port) == expected:
-            cache[expected] = port
-            save_cache(cache)
-            return port
+        log(f"{p.device} has no USB serial number; probing with esptool (resets that board) ...")
+        if read_mac_with_esptool(p.device) == expected:
+            return p.device
 
-    fail(f"No connected board has MAC {expected} "
-         f"(env '{env['PIOENV']}'). Ports seen: {', '.join(ports)}")
+    seen = ", ".join(f"{p.device} (SER={p.serial_number})" for p in ports)
+    fail(f"No connected board has MAC {expected} (env '{env['PIOENV']}'). Seen: {seen}")
 
-# ---- main -------------------------------------------------------------
-targets = set(COMMAND_LINE_TARGETS)
-if targets & NEEDS_PORT:
-    if env.GetProjectOption("upload_port", None) or env.GetProjectOption("monitor_port", None):
-        fail("Remove upload_port/monitor_port from platformio.ini; ports are resolved by MAC.")
-    expected = norm(env.GetProjectOption("custom_device_mac", ""))
-    if not expected:
-        fail(f"custom_device_mac missing for env '{env['PIOENV']}'")
+
+def port_holders(port):
+    """Text listing processes that currently have `port` open, or '' if free / unknown."""
+    if not shutil.which("lsof"):
+        return ""
+    try:
+        r = subprocess.run(["lsof", "-w", port], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def ensure_free(port, name):
+    who = port_holders(port)
+    if who:
+        fail(f"{name}'s port {port} is busy. Close the other monitor/terminal first.\n"
+             f"Held by:\n{who}")
+
+
+def write_ports_file():
+    """Write each board's current port to .pio/ports.ini so the BUILT-IN
+    Monitor button opens the right board. Uses USB serial numbers only (no resets)."""
+    config = env.GetProjectConfig()
+    ports = espressif_ports()
+    lines = ["; AUTO-GENERATED by tools/pio_select_port.py - do not edit"]
+    for e in config.envs():
+        mac = norm(config.get(f"env:{e}", "custom_device_mac", ""))
+        if not mac:
+            continue
+        match = [p.device for p in ports if norm(p.serial_number) == mac]
+        if len(match) == 1:
+            lines += [f"[env:{e}]", f"monitor_port = {match[0]}"]
+            config.set(f"env:{e}", "monitor_port", match[0])  # for Upload+Monitor in this same run
+    content = "\n".join(lines) + "\n"
+    old = open(PORTS_INI).read() if os.path.exists(PORTS_INI) else ""
+    if content != old:
+        os.makedirs(os.path.dirname(PORTS_INI), exist_ok=True)
+        with open(PORTS_INI, "w") as f:
+            f.write(content)
+        log(f"updated {PORTS_INI}")
+
+
+write_ports_file()
+
+
+# ---- Upload: resolve the port before the upload step runs ----
+if set(COMMAND_LINE_TARGETS) & UPLOAD_TARGETS:
+    if env.GetProjectOption("upload_port", None):
+        fail("Remove upload_port from platformio.ini; ports are resolved by MAC.")
+    expected = expected_mac()
     port = find_port(expected)
-    log(f"env '{env['PIOENV']}' ({expected}) -> {port}")
-    env.Replace(UPLOAD_PORT=port, MONITOR_PORT=port)
+    ensure_free(port, env["PIOENV"])
+    log(f"upload: env '{env['PIOENV']}' ({expected}) -> {port}")
+    env.Replace(UPLOAD_PORT=port)
 
-# Extra Project Task: "Monitor (auto port)" under each env.
+# ---- Monitor: custom target, runs inside SCons so this script can pick the port ----
 def monitor_task(*_, **__):
-    expected = norm(env.GetProjectOption("custom_device_mac", ""))
+    expected = expected_mac()
     port = find_port(expected)
-    return env.Execute(
-        f'"{env.subst("$PYTHONEXE")}" -m platformio device monitor '
-        f'-p {port} -b {env.GetProjectOption("monitor_speed", "115200")}')
+    ensure_free(port, env["PIOENV"])
+    speed = str(env.GetProjectOption("monitor_speed", "115200"))
+    log(f"monitor: env '{env['PIOENV']}' ({expected}) -> {port} @ {speed}")
+    cmd = [env.subst("$PYTHONEXE"), "-m", "platformio", "device", "monitor",
+           "--environment", env["PIOENV"], "--port", port, "--baud", speed]
+    # Let Ctrl+C go to the monitor (which quits cleanly), not to SCons.
+    old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        return subprocess.call(
+            cmd, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+    finally:
+        signal.signal(signal.SIGINT, old)
+
 
 env.AddCustomTarget(
     "monitor_auto", None, monitor_task,
-    title="Monitor (auto port)", description="Find the board by MAC, then open a monitor")
+    title=f"Monitor {env['PIOENV']} (auto port)",
+    description="Find this board by MAC (USB serial number), then open only its port")
