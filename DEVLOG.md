@@ -52,3 +52,46 @@ The theoretical GPIO pin map remains separate on the `design/pin-map` branch and
 ### Next Step
 
 Continue hardware validation of the theoretical pin map, starting with the ESP32-C3 GPIO constraints and the GY-291 ADXL345 interface and wake-interrupt requirements.
+
+## 2026-09-09
+
+### Completed
+
+* Improved the dual-device PlatformIO workflow for working with Bubu and Dudu at the same time
+
+* Identified the permanent Wi-Fi MAC address of each ESP32-C3 Super Mini
+
+* Confirmed the physical device identities:
+
+  * Bubu: `E8:F6:0A:12:4C:A4`
+  * Dudu: `E8:F6:0A:12:5B:84`
+
+* Confirmed the current USB serial-port mapping for both connected boards
+
+* Created a new `tools/` directory for project development utilities
+
+* Added `tools/flash_device.py`
+
+* Implemented automatic device detection by reading the connected ESP32-C3 MAC addresses
+
+* Added logic that determines whether a connected board is Bubu or Dudu based on its MAC address
+
+* Integrated the Python flashing script into the PlatformIO development workflow
+
+* Verified that both ESP32-C3 boards can remain connected simultaneously while the flashing tool automatically identifies the correct physical device
+
+* Verified automatic flashing of the correct Bubu or Dudu PlatformIO environment without manually selecting the board by USB port
+
+### Current Working State
+
+The project now has a working automated dual-board development workflow.
+
+Bubu and Dudu can both be connected to the computer simultaneously, and the tooling can identify each physical ESP32-C3 by its permanent MAC address instead of relying on changing USB serial-port names.
+
+The `tools/flash_device.py` utility is integrated into the PlatformIO workflow and can select the appropriate Bubu or Dudu firmware environment for the detected board.
+
+This keeps the project on one shared firmware codebase while allowing reliable development and flashing of the two physical devices independently.
+
+### Next Step
+
+Begin the physical hardware assembly and bring-up phase by starting from the known-working ESP32-C3 PlatformIO foundation and adding hardware modules one at a time, beginning with the basic input stage before moving to the GY-291 ADXL345.
