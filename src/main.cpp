@@ -2,7 +2,6 @@
 #include <Wire.h>
 
 #include "esp_sleep.h"
-#include "driver/gpio.h"
 
 // ======================================================
 // Hardware
@@ -10,7 +9,6 @@
 
 const uint8_t ADXL345_ADDRESS = 0x53;
 
-// ADXL345 INT1 -> ESP32-C3 GPIO3
 const gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
 
@@ -31,7 +29,7 @@ const uint8_t DATA_FORMAT   = 0x31;
 
 
 // ======================================================
-// Interrupt flag
+// ISR flag
 // ======================================================
 
 volatile bool adxlInterruptOccurred = false;
@@ -39,8 +37,6 @@ volatile bool adxlInterruptOccurred = false;
 
 // ======================================================
 // ISR
-//
-// Runs when ADXL345 INT1 causes GPIO3 to rise.
 // ======================================================
 
 void IRAM_ATTR handleAdxlInterrupt()
@@ -50,7 +46,7 @@ void IRAM_ATTR handleAdxlInterrupt()
 
 
 // ======================================================
-// Write one ADXL345 register
+// ADXL345 register write
 // ======================================================
 
 void writeRegister(uint8_t reg, uint8_t value)
@@ -63,7 +59,7 @@ void writeRegister(uint8_t reg, uint8_t value)
 
 
 // ======================================================
-// Read one ADXL345 register
+// ADXL345 register read
 // ======================================================
 
 uint8_t readRegister(uint8_t reg)
@@ -84,51 +80,110 @@ uint8_t readRegister(uint8_t reg)
 
 
 // ======================================================
-// Enter ESP32 light sleep
+// Configure ADXL345
 // ======================================================
 
-void enterLightSleep()
+void configureADXL345()
+{
+    // Disable interrupts while configuring
+    writeRegister(INT_ENABLE, 0x00);
+
+    // FULL_RES + +/-4 g
+    writeRegister(DATA_FORMAT, 0x09);
+
+    // Activity:
+    // 4 * 0.0625 g = 0.25 g
+    writeRegister(THRESH_ACT, 4);
+
+    // Inactivity:
+    // 2 * 0.0625 g = 0.125 g
+    writeRegister(THRESH_INACT, 2);
+
+    // 3 seconds inactivity
+    writeRegister(TIME_INACT, 3);
+
+    // AC-coupled activity/inactivity
+    // X Y Z enabled
+    writeRegister(ACT_INACT_CTL, 0xFF);
+
+    // Send events to INT1
+    writeRegister(INT_MAP, 0x00);
+
+    // LINK + MEASURE
+    //
+    // 0x28 = 0010 1000
+    writeRegister(POWER_CTL, 0x28);
+
+    // Clear old event
+    readRegister(INT_SOURCE);
+
+    // Enable activity + inactivity
+    writeRegister(INT_ENABLE, 0x18);
+}
+
+
+// ======================================================
+// Enter deep sleep
+// ======================================================
+
+void enterDeepSleep()
 {
     Serial.println();
-    Serial.println(">>> ESP32 entering LIGHT SLEEP");
+    Serial.println(">>> ESP32 entering DEEP SLEEP");
     Serial.println("Move Bubu to wake it.");
 
-    // --------------------------------------------------
-    // We don't need the normal awake ISR while sleeping.
-    //
-    // Sleep hardware will watch GPIO3 instead.
-    // --------------------------------------------------
-
-    detachInterrupt(digitalPinToInterrupt((int)ADXL_INT_PIN));
+    // We no longer need the normal awake ISR.
+    detachInterrupt(
+        digitalPinToInterrupt((int)ADXL_INT_PIN)
+    );
 
     adxlInterruptOccurred = false;
 
 
     // --------------------------------------------------
-    // Configure GPIO3 as a wake-up source.
+    // Safety check
     //
-    // ADXL345 INT1 is active HIGH.
+    // Wake is HIGH-level triggered.
     //
-    // Therefore:
-    //
-    // GPIO3 HIGH -> wake ESP32
+    // If INT1 is already HIGH when we try sleeping,
+    // the ESP32 could immediately wake again.
     // --------------------------------------------------
 
-    gpio_wakeup_enable(
-        ADXL_INT_PIN,
-        GPIO_INTR_HIGH_LEVEL
-    );
-
-
-    // --------------------------------------------------
-    // Enable GPIO wake-up for light sleep.
-    // --------------------------------------------------
-
-    esp_err_t wakeResult = esp_sleep_enable_gpio_wakeup();
-
-    if (wakeResult != ESP_OK)
+    if (digitalRead((int)ADXL_INT_PIN) == HIGH)
     {
-        Serial.println("ERROR: Could not enable GPIO wake.");
+        Serial.println(
+            "INT1 is still HIGH - clearing interrupt first."
+        );
+
+        readRegister(INT_SOURCE);
+
+        delay(10);
+    }
+
+
+    // --------------------------------------------------
+    // Configure GPIO3 as DEEP-SLEEP wake source.
+    //
+    // 1ULL << 3 creates a bit mask selecting GPIO3.
+    //
+    // Wake when GPIO3 becomes HIGH.
+    // --------------------------------------------------
+
+    uint64_t wakePinMask =
+        1ULL << ADXL_INT_PIN;
+
+    esp_err_t result =
+        esp_deep_sleep_enable_gpio_wakeup(
+            wakePinMask,
+            ESP_GPIO_WAKEUP_GPIO_HIGH
+        );
+
+
+    if (result != ESP_OK)
+    {
+        Serial.println(
+            "ERROR: Could not configure deep-sleep wake."
+        );
 
         attachInterrupt(
             digitalPinToInterrupt((int)ADXL_INT_PIN),
@@ -140,98 +195,19 @@ void enterLightSleep()
     }
 
 
-    // Make sure Serial output is sent before CPU sleeps.
     Serial.flush();
 
 
     // ==================================================
-    // ESP32 GOES TO SLEEP HERE
+    // DEEP SLEEP STARTS HERE
     //
-    // Program execution pauses at this line.
+    // THIS FUNCTION NEVER RETURNS.
     // ==================================================
 
-    esp_light_sleep_start();
+    esp_deep_sleep_start();
 
 
-    // ==================================================
-    // Execution continues HERE after waking.
-    // ==================================================
-
-
-    // --------------------------------------------------
-    // Find out WHY the ESP32 woke.
-    // --------------------------------------------------
-
-    esp_sleep_wakeup_cause_t wakeCause =
-        esp_sleep_get_wakeup_cause();
-
-
-    Serial.println();
-    Serial.println(">>> ESP32 WOKE UP");
-
-
-    if (wakeCause == ESP_SLEEP_WAKEUP_GPIO)
-    {
-        Serial.println("Wake source: ADXL345 GPIO3");
-    }
-    else
-    {
-        Serial.print("Unexpected wake source: ");
-        Serial.println((int)wakeCause);
-    }
-
-
-    // --------------------------------------------------
-    // Disable sleep wake configuration now that
-    // the ESP32 is awake again.
-    // --------------------------------------------------
-
-    esp_sleep_disable_wakeup_source(
-        ESP_SLEEP_WAKEUP_GPIO
-    );
-
-    gpio_wakeup_disable(ADXL_INT_PIN);
-
-
-    // --------------------------------------------------
-    // INT1 should still be HIGH because the ADXL345
-    // activity event is latched.
-    //
-    // Read INT_SOURCE:
-    //
-    // 1. Discover what event caused wake.
-    // 2. Clear the ADXL345 interrupt.
-    // --------------------------------------------------
-
-    uint8_t interruptSource =
-        readRegister(INT_SOURCE);
-
-
-    if (interruptSource & 0x10)
-    {
-        Serial.println(">>> STATE: ACTIVE");
-    }
-
-
-    if (interruptSource & 0x08)
-    {
-        Serial.println(">>> STATE: INACTIVE");
-    }
-
-
-    // --------------------------------------------------
-    // Restore normal awake interrupt handling.
-    // --------------------------------------------------
-
-    attachInterrupt(
-        digitalPinToInterrupt((int)ADXL_INT_PIN),
-        handleAdxlInterrupt,
-        RISING
-    );
-
-
-    Serial.println("Normal execution resumed.");
-    Serial.println();
+    // Nothing below this line will ever execute.
 }
 
 
@@ -246,101 +222,116 @@ void setup()
 
 
     // --------------------------------------------------
-    // I2C
+    // Ask ESP32:
     //
-    // SDA = GPIO0
-    // SCL = GPIO1
+    // "Why did I boot?"
+    //
+    // This must happen after every deep-sleep wake
+    // because setup() starts again from scratch.
+    // --------------------------------------------------
+
+    esp_sleep_wakeup_cause_t wakeCause =
+        esp_sleep_get_wakeup_cause();
+
+
+    Serial.println();
+    Serial.println("BubuDudu deep-sleep test");
+    Serial.println("------------------------");
+
+
+    // --------------------------------------------------
+    // Start I2C again.
+    //
+    // Deep sleep destroyed the normal digital peripheral
+    // state, so initialization must happen again.
     // --------------------------------------------------
 
     Wire.begin(0, 1);
-
-
-    // --------------------------------------------------
-    // Interrupt input
-    // --------------------------------------------------
 
     pinMode((int)ADXL_INT_PIN, INPUT);
 
 
     // --------------------------------------------------
-    // Disable ADXL interrupts while configuring
+    // Was this a normal startup?
     // --------------------------------------------------
 
-    writeRegister(INT_ENABLE, 0x00);
+    if (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED)
+    {
+        Serial.println("Boot reason: NORMAL STARTUP");
+    }
 
 
     // --------------------------------------------------
-    // Measurement format
+    // Was this a GPIO deep-sleep wake?
+    // --------------------------------------------------
+
+    else if (wakeCause == ESP_SLEEP_WAKEUP_GPIO)
+    {
+        Serial.println(
+            "Boot reason: DEEP-SLEEP GPIO WAKE"
+        );
+
+        uint64_t wakePins =
+            esp_sleep_get_gpio_wakeup_status();
+
+        Serial.print("Wake GPIO mask: 0x");
+        Serial.println(
+            (unsigned long)wakePins,
+            HEX
+        );
+
+
+        // ----------------------------------------------
+        // ADXL345 stayed powered while ESP32 slept.
+        //
+        // The activity event which woke us may still
+        // be stored inside INT_SOURCE.
+        // ----------------------------------------------
+
+        uint8_t source =
+            readRegister(INT_SOURCE);
+
+
+        if (source & 0x10)
+        {
+            Serial.println(
+                "ADXL345 wake event: ACTIVITY"
+            );
+        }
+
+
+        if (source & 0x08)
+        {
+            Serial.println(
+                "ADXL345 wake event: INACTIVITY"
+            );
+        }
+    }
+
+
+    // --------------------------------------------------
+    // Some other wake source
+    // --------------------------------------------------
+
+    else
+    {
+        Serial.print("Other wake cause: ");
+        Serial.println((int)wakeCause);
+    }
+
+
+    // --------------------------------------------------
+    // Deep sleep rebooted the ESP32.
     //
-    // FULL_RES
-    // +/-4 g
+    // Therefore we initialize our sensor configuration
+    // again from a known state.
     // --------------------------------------------------
 
-    writeRegister(DATA_FORMAT, 0x09);
-
-
-    // --------------------------------------------------
-    // Activity threshold
-    //
-    // 4 * 0.0625 g = 0.25 g
-    // --------------------------------------------------
-
-    writeRegister(THRESH_ACT, 4);
+    configureADXL345();
 
 
     // --------------------------------------------------
-    // Inactivity threshold
-    //
-    // 2 * 0.0625 g = 0.125 g
-    // --------------------------------------------------
-
-    writeRegister(THRESH_INACT, 2);
-
-
-    // --------------------------------------------------
-    // Require approximately 3 seconds of inactivity
-    // --------------------------------------------------
-
-    writeRegister(TIME_INACT, 3);
-
-
-    // --------------------------------------------------
-    // Activity / inactivity:
-    //
-    // AC coupled
-    // X Y Z enabled
-    // --------------------------------------------------
-
-    writeRegister(ACT_INACT_CTL, 0xFF);
-
-
-    // --------------------------------------------------
-    // Activity and inactivity -> INT1
-    // --------------------------------------------------
-
-    writeRegister(INT_MAP, 0x00);
-
-
-    // --------------------------------------------------
-    // LINK + MEASURE
-    //
-    // 0x28 = 0010 1000
-    //
-    // This gives us:
-    //
-    // ACTIVE -> wait for INACTIVE
-    // INACTIVE -> wait for ACTIVE
-    // --------------------------------------------------
-
-    writeRegister(POWER_CTL, 0x28);
-
-
-    // Clear old interrupt
-    readRegister(INT_SOURCE);
-
-
-    // --------------------------------------------------
-    // Normal awake ISR
+    // Restore normal awake ISR behavior.
     // --------------------------------------------------
 
     attachInterrupt(
@@ -350,25 +341,16 @@ void setup()
     );
 
 
-    // --------------------------------------------------
-    // Enable activity + inactivity
-    //
-    // Activity   = bit 4
-    // Inactivity = bit 3
-    //
-    // 0x18
-    // --------------------------------------------------
-
-    writeRegister(INT_ENABLE, 0x18);
-
-
     Serial.println();
-    Serial.println("BubuDudu light-sleep test");
-    Serial.println("-------------------------");
+    Serial.println(">>> STATE: ACTIVE");
     Serial.println();
     Serial.println("Leave Bubu still.");
-    Serial.println("After inactivity, ESP32 should sleep.");
-    Serial.println("Move Bubu to wake it.");
+    Serial.println(
+        "After ~3 seconds it should deep sleep."
+    );
+    Serial.println(
+        "Then move it to cause a full wake/reboot."
+    );
     Serial.println();
 }
 
@@ -384,39 +366,30 @@ void loop()
         adxlInterruptOccurred = false;
 
 
-        // ------------------------------------------------
-        // Ask ADXL345 what caused INT1.
-        // ------------------------------------------------
-
-        uint8_t interruptSource =
+        // Ask ADXL345 why INT1 fired.
+        uint8_t source =
             readRegister(INT_SOURCE);
 
 
         // ------------------------------------------------
-        // ACTIVITY
+        // ACTIVE
         // ------------------------------------------------
 
-        if (interruptSource & 0x10)
+        if (source & 0x10)
         {
             Serial.println(">>> STATE: ACTIVE");
         }
 
 
         // ------------------------------------------------
-        // INACTIVITY
+        // INACTIVE
         // ------------------------------------------------
 
-        if (interruptSource & 0x08)
+        if (source & 0x08)
         {
             Serial.println(">>> STATE: INACTIVE");
 
-            // This is our first actual power transition.
-            enterLightSleep();
+            enterDeepSleep();
         }
     }
-
-
-    // No GPIO polling.
-    //
-    // Eventually normal BubuDudu work will happen here.
 }
