@@ -44,3 +44,27 @@ The current BubuDudu architecture requires all 10 of these GPIOs.
 Therefore the initial theoretical design has no unused preferred GPIOs.
 
 MOSFET control is intentionally not assigned a GPIO at this stage. A GPIO will only be allocated if subsystem power gating or another justified use is introduced later.
+
+### ADXL345 Accelerometer
+
+| ADXL345 Signal | Connection     | Status      | Purpose                                            |
+| -------------- | -------------- | ----------- | -------------------------------------------------- |
+| SDA            | ESP32-C3 GPIO0 | ✅ Validated | I²C data                                           |
+| SCL            | ESP32-C3 GPIO1 | ✅ Validated | I²C clock                                          |
+| INT1           | ESP32-C3 GPIO3 | ✅ Validated | Activity/inactivity interrupt and ESP32 sleep wake |
+| CS             | 3.3 V          | ✅ Validated | Held HIGH to operate the ADXL345 in I²C mode       |
+| VCC            | 3.3 V          | ✅ Validated | Sensor power                                       |
+| GND            | GND            | ✅ Validated | Common ground                                      |
+
+**I²C address:** `0x53`
+
+#### Validation notes
+
+* GPIO0/GPIO1 successfully communicate with the ADXL345 over I²C.
+* `CS` is tied to 3.3 V so the ADXL345 operates using I²C rather than SPI.
+* Both Bubu and Dudu ADXL345 modules were successfully detected at address `0x53`.
+* GPIO3 was tested with the ADXL345 `INT1` output.
+* Activity and inactivity interrupts were successfully received on GPIO3.
+* GPIO3 successfully woke the ESP32-C3 from both light sleep and deep sleep.
+* The ADXL345 remains powered while the ESP32 is in deep sleep and can monitor motion and wake the controller.
+* GPIO0, GPIO1 and GPIO3 should now be treated as reserved for the motion subsystem when assigning the remaining BubuDudu pins.
