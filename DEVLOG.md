@@ -142,3 +142,141 @@ The current ADXL345 test firmware reads the six acceleration data registers and 
 Understand the ADXL345 acceleration data before adding more functionality: determine what the raw X/Y/Z values represent, how gravity appears in the readings, how the sensor's measurement range and resolution affect the values, and then decide the correct configuration for BubuDudu.
 
 After the basic measurements are understood, continue toward ADXL345 activity/inactivity detection and the interrupt-based motion wake design.
+
+## 2026-09-12
+
+### Completed
+
+* Continued ADXL345 development on `feature/adxl345`
+* Verified and understood raw X/Y/Z acceleration readings
+* Confirmed stationary acceleration measurements are dominated by gravity and depend on sensor orientation
+* Converted raw ADXL345 readings into acceleration values in `g`
+* Configured the ADXL345 explicitly for:
+
+  * full-resolution mode
+  * ±4 g measurement range
+* Verified that approximately 1 raw count corresponds to 0.0039 g in the selected full-resolution configuration
+* Observed normal sensor noise while stationary and confirmed that activity/inactivity thresholds must tolerate small measurement variations
+* Configured ADXL345 hardware activity/inactivity detection
+* Initial test thresholds:
+
+  * activity threshold: 0.25 g
+  * inactivity threshold: 0.125 g
+  * inactivity time: 3 seconds
+* Enabled activity/inactivity detection on X, Y and Z
+* Verified activity and inactivity events by reading `INT_SOURCE` over I²C
+* Connected ADXL345 `INT1` to ESP32-C3 GPIO3
+* Debugged an initial interrupt failure caused by an incorrect physical INT1 connection
+* Verified that the ADXL345 physically drives its interrupt output and that GPIO3 receives the signal
+* Replaced GPIO polling with an ESP32 interrupt service routine (ISR)
+* Kept the ISR intentionally minimal by only setting an event flag and handling I²C/Serial work in normal program execution
+* Enabled ADXL345 LINK mode so activity and inactivity detection alternate cleanly instead of repeatedly generating identical activity events
+* Verified stable transitions between:
+
+  * ACTIVE
+  * INACTIVE
+* Implemented and tested ESP32 light-sleep wake using the ADXL345 interrupt
+* Verified the sequence:
+
+  * ACTIVE
+  * INACTIVE
+  * light sleep
+  * motion
+  * GPIO3 wake
+  * ACTIVE
+* Implemented and tested ESP32 deep-sleep wake using ADXL345 `INT1`
+* Verified that GPIO3 successfully wakes the ESP32-C3 from deep sleep
+* Verified the wake reason after reboot:
+
+  * `ESP_SLEEP_WAKEUP_GPIO`
+* Confirmed the GPIO wake mask identifies GPIO3
+* Confirmed that the ADXL345 activity event remains available after the ESP32 wakes
+* Verified the complete power-management sequence:
+
+  * ACTIVE
+  * inactivity detected
+  * ESP32 enters deep sleep
+  * ADXL345 remains active and monitors motion
+  * movement generates an activity interrupt
+  * GPIO3 wakes the ESP32
+  * firmware boots again
+  * motion wake is identified
+  * system returns to ACTIVE
+* Refactored the ADXL345 implementation out of `main.cpp`
+* Added a dedicated `Motion` module:
+
+  * `src/Motion.h`
+  * `src/Motion.cpp`
+* The `Motion` module now owns:
+
+  * ADXL345 register configuration
+  * activity/inactivity thresholds
+  * ADXL345 interrupt handling
+  * ISR event flag
+  * activity/inactivity event reporting
+* `main.cpp` now reacts to high-level `MotionEvent` values instead of directly managing ADXL345 registers
+* Added a pre-sleep interrupt check to avoid entering deep sleep if motion occurs during the transition into sleep
+* Verified that the refactored Motion module preserves the previously working deep-sleep motion-wake behavior
+
+### Current Working State
+
+The primary ADXL345 power-management functionality is now operational.
+
+Bubu can:
+
+1. detect when it has remained inactive
+2. generate a hardware inactivity interrupt
+3. place the ESP32-C3 into deep sleep
+4. leave the ADXL345 powered and monitoring motion
+5. detect movement while the ESP32 is asleep
+6. drive `INT1`
+7. wake the ESP32 through GPIO3
+8. identify the wake as a motion-triggered GPIO wake
+9. resume in the ACTIVE state
+
+Current validated connections:
+
+* ADXL345 SDA → GPIO0
+* ADXL345 SCL → GPIO1
+* ADXL345 INT1 → GPIO3
+* ADXL345 I²C address → `0x53`
+
+The ADXL345 is currently configured for full-resolution ±4 g operation with LINK-mode activity/inactivity detection.
+
+### Known Issue / Development Annoyance
+
+The current test firmware automatically places the ESP32 into deep sleep after approximately three seconds of inactivity.
+
+Because of this, Bubu can enter deep sleep while PlatformIO is compiling or preparing an upload. When the ESP32 is already sleeping, `esptool` may fail to connect and report:
+
+`Failed to connect to ESP32-C3: No serial data received.`
+
+For now, the practical workaround is to keep moving/shaking the ADXL345 while starting an upload so the device remains in the ACTIVE state until `esptool` establishes the connection.
+
+This is acceptable during development but should eventually be improved so firmware upload/debug workflows are not affected by automatic power management.
+
+### Problems Solved
+
+* ADXL345 raw data interpretation
+* gravity/orientation behavior
+* raw-to-`g` conversion
+* stationary sensor noise handling
+* activity/inactivity threshold configuration
+* ADXL345 internal event detection
+* physical `INT1` interrupt wiring
+* ESP32 ISR handling
+* repeated activity interrupt flooding using ADXL345 LINK mode
+* ESP32 light-sleep motion wake
+* ESP32 deep-sleep motion wake
+* wake-cause identification
+* separation of ADXL345 logic into a dedicated Motion module
+
+### Next Step
+
+Pause further ADXL345 feature expansion for now.
+
+The primary ADXL345 purpose — motion-based power management — has been validated.
+
+Do not add gestures yet.
+
+Continue with the next BubuDudu hardware subsystem while preserving the current working Motion module and deep-sleep wake implementation.
