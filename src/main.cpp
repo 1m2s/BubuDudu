@@ -1,11 +1,17 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "esp_sleep.h"
+#include "driver/gpio.h"
+
 // ======================================================
-// ADXL345 I2C address
+// Hardware
 // ======================================================
 
 const uint8_t ADXL345_ADDRESS = 0x53;
+
+// ADXL345 INT1 -> ESP32-C3 GPIO3
+const gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
 
 // ======================================================
@@ -19,14 +25,218 @@ const uint8_t ACT_INACT_CTL = 0x27;
 
 const uint8_t POWER_CTL     = 0x2D;
 const uint8_t INT_ENABLE    = 0x2E;
+const uint8_t INT_MAP       = 0x2F;
 const uint8_t INT_SOURCE    = 0x30;
-
 const uint8_t DATA_FORMAT   = 0x31;
-const uint8_t DATAX0        = 0x32;
 
 
 // ======================================================
-// setup()
+// Interrupt flag
+// ======================================================
+
+volatile bool adxlInterruptOccurred = false;
+
+
+// ======================================================
+// ISR
+//
+// Runs when ADXL345 INT1 causes GPIO3 to rise.
+// ======================================================
+
+void IRAM_ATTR handleAdxlInterrupt()
+{
+    adxlInterruptOccurred = true;
+}
+
+
+// ======================================================
+// Write one ADXL345 register
+// ======================================================
+
+void writeRegister(uint8_t reg, uint8_t value)
+{
+    Wire.beginTransmission(ADXL345_ADDRESS);
+    Wire.write(reg);
+    Wire.write(value);
+    Wire.endTransmission();
+}
+
+
+// ======================================================
+// Read one ADXL345 register
+// ======================================================
+
+uint8_t readRegister(uint8_t reg)
+{
+    Wire.beginTransmission(ADXL345_ADDRESS);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+
+    Wire.requestFrom(ADXL345_ADDRESS, (uint8_t)1);
+
+    if (Wire.available())
+    {
+        return Wire.read();
+    }
+
+    return 0;
+}
+
+
+// ======================================================
+// Enter ESP32 light sleep
+// ======================================================
+
+void enterLightSleep()
+{
+    Serial.println();
+    Serial.println(">>> ESP32 entering LIGHT SLEEP");
+    Serial.println("Move Bubu to wake it.");
+
+    // --------------------------------------------------
+    // We don't need the normal awake ISR while sleeping.
+    //
+    // Sleep hardware will watch GPIO3 instead.
+    // --------------------------------------------------
+
+    detachInterrupt(digitalPinToInterrupt((int)ADXL_INT_PIN));
+
+    adxlInterruptOccurred = false;
+
+
+    // --------------------------------------------------
+    // Configure GPIO3 as a wake-up source.
+    //
+    // ADXL345 INT1 is active HIGH.
+    //
+    // Therefore:
+    //
+    // GPIO3 HIGH -> wake ESP32
+    // --------------------------------------------------
+
+    gpio_wakeup_enable(
+        ADXL_INT_PIN,
+        GPIO_INTR_HIGH_LEVEL
+    );
+
+
+    // --------------------------------------------------
+    // Enable GPIO wake-up for light sleep.
+    // --------------------------------------------------
+
+    esp_err_t wakeResult = esp_sleep_enable_gpio_wakeup();
+
+    if (wakeResult != ESP_OK)
+    {
+        Serial.println("ERROR: Could not enable GPIO wake.");
+
+        attachInterrupt(
+            digitalPinToInterrupt((int)ADXL_INT_PIN),
+            handleAdxlInterrupt,
+            RISING
+        );
+
+        return;
+    }
+
+
+    // Make sure Serial output is sent before CPU sleeps.
+    Serial.flush();
+
+
+    // ==================================================
+    // ESP32 GOES TO SLEEP HERE
+    //
+    // Program execution pauses at this line.
+    // ==================================================
+
+    esp_light_sleep_start();
+
+
+    // ==================================================
+    // Execution continues HERE after waking.
+    // ==================================================
+
+
+    // --------------------------------------------------
+    // Find out WHY the ESP32 woke.
+    // --------------------------------------------------
+
+    esp_sleep_wakeup_cause_t wakeCause =
+        esp_sleep_get_wakeup_cause();
+
+
+    Serial.println();
+    Serial.println(">>> ESP32 WOKE UP");
+
+
+    if (wakeCause == ESP_SLEEP_WAKEUP_GPIO)
+    {
+        Serial.println("Wake source: ADXL345 GPIO3");
+    }
+    else
+    {
+        Serial.print("Unexpected wake source: ");
+        Serial.println((int)wakeCause);
+    }
+
+
+    // --------------------------------------------------
+    // Disable sleep wake configuration now that
+    // the ESP32 is awake again.
+    // --------------------------------------------------
+
+    esp_sleep_disable_wakeup_source(
+        ESP_SLEEP_WAKEUP_GPIO
+    );
+
+    gpio_wakeup_disable(ADXL_INT_PIN);
+
+
+    // --------------------------------------------------
+    // INT1 should still be HIGH because the ADXL345
+    // activity event is latched.
+    //
+    // Read INT_SOURCE:
+    //
+    // 1. Discover what event caused wake.
+    // 2. Clear the ADXL345 interrupt.
+    // --------------------------------------------------
+
+    uint8_t interruptSource =
+        readRegister(INT_SOURCE);
+
+
+    if (interruptSource & 0x10)
+    {
+        Serial.println(">>> STATE: ACTIVE");
+    }
+
+
+    if (interruptSource & 0x08)
+    {
+        Serial.println(">>> STATE: INACTIVE");
+    }
+
+
+    // --------------------------------------------------
+    // Restore normal awake interrupt handling.
+    // --------------------------------------------------
+
+    attachInterrupt(
+        digitalPinToInterrupt((int)ADXL_INT_PIN),
+        handleAdxlInterrupt,
+        RISING
+    );
+
+
+    Serial.println("Normal execution resumed.");
+    Serial.println();
+}
+
+
+// ======================================================
+// setup
 // ======================================================
 
 void setup()
@@ -34,234 +244,179 @@ void setup()
     Serial.begin(115200);
     delay(1000);
 
-    // Start I2C
-    // GPIO0 = SDA
-    // GPIO1 = SCL
+
+    // --------------------------------------------------
+    // I2C
+    //
+    // SDA = GPIO0
+    // SCL = GPIO1
+    // --------------------------------------------------
+
     Wire.begin(0, 1);
 
 
     // --------------------------------------------------
-    // 1. Measurement format
-    //
-    // FULL_RES enabled
-    // +/-4 g range
+    // Interrupt input
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(DATA_FORMAT);
-    Wire.write(0x09);
-    Wire.endTransmission();
+    pinMode((int)ADXL_INT_PIN, INPUT);
 
 
     // --------------------------------------------------
-    // 2. Activity threshold
+    // Disable ADXL interrupts while configuring
+    // --------------------------------------------------
+
+    writeRegister(INT_ENABLE, 0x00);
+
+
+    // --------------------------------------------------
+    // Measurement format
     //
-    // 1 register count = 0.0625 g
+    // FULL_RES
+    // +/-4 g
+    // --------------------------------------------------
+
+    writeRegister(DATA_FORMAT, 0x09);
+
+
+    // --------------------------------------------------
+    // Activity threshold
     //
     // 4 * 0.0625 g = 0.25 g
-    //
-    // Motion must change by roughly 0.25 g
-    // to count as activity.
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(THRESH_ACT);
-    Wire.write(4);
-    Wire.endTransmission();
+    writeRegister(THRESH_ACT, 4);
 
 
     // --------------------------------------------------
-    // 3. Inactivity threshold
+    // Inactivity threshold
     //
     // 2 * 0.0625 g = 0.125 g
-    //
-    // Small sensor noise such as 0.01 g is therefore
-    // still safely considered stationary.
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(THRESH_INACT);
-    Wire.write(2);
-    Wire.endTransmission();
+    writeRegister(THRESH_INACT, 2);
 
 
     // --------------------------------------------------
-    // 4. Inactivity time
-    //
-    // Must remain below inactivity threshold
-    // for approximately 3 seconds.
+    // Require approximately 3 seconds of inactivity
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(TIME_INACT);
-    Wire.write(3);
-    Wire.endTransmission();
+    writeRegister(TIME_INACT, 3);
 
 
     // --------------------------------------------------
-    // 5. Activity / inactivity axis configuration
+    // Activity / inactivity:
     //
-    // 0xFF = 1111 1111
-    //
-    // Activity:
-    // AC coupled
-    // X Y Z enabled
-    //
-    // Inactivity:
     // AC coupled
     // X Y Z enabled
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(ACT_INACT_CTL);
-    Wire.write(0xFF);
-    Wire.endTransmission();
+    writeRegister(ACT_INACT_CTL, 0xFF);
 
 
     // --------------------------------------------------
-    // 6. Measurement mode
+    // Activity and inactivity -> INT1
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(POWER_CTL);
-    Wire.write(0x08);
-    Wire.endTransmission();
+    writeRegister(INT_MAP, 0x00);
 
 
     // --------------------------------------------------
-    // 7. Enable activity + inactivity events
+    // LINK + MEASURE
     //
-    // 0x18 = 0001 1000
+    // 0x28 = 0010 1000
     //
-    // Bit 4 = activity
-    // Bit 3 = inactivity
+    // This gives us:
+    //
+    // ACTIVE -> wait for INACTIVE
+    // INACTIVE -> wait for ACTIVE
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(INT_ENABLE);
-    Wire.write(0x18);
-    Wire.endTransmission();
+    writeRegister(POWER_CTL, 0x28);
+
+
+    // Clear old interrupt
+    readRegister(INT_SOURCE);
 
 
     // --------------------------------------------------
-    // Read INT_SOURCE once to clear any old event
-    // that may already be stored.
+    // Normal awake ISR
     // --------------------------------------------------
 
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(INT_SOURCE);
-    Wire.endTransmission(false);
+    attachInterrupt(
+        digitalPinToInterrupt((int)ADXL_INT_PIN),
+        handleAdxlInterrupt,
+        RISING
+    );
 
-    Wire.requestFrom(ADXL345_ADDRESS, (uint8_t)1);
 
-    if (Wire.available())
-    {
-        Wire.read();
-    }
+    // --------------------------------------------------
+    // Enable activity + inactivity
+    //
+    // Activity   = bit 4
+    // Inactivity = bit 3
+    //
+    // 0x18
+    // --------------------------------------------------
+
+    writeRegister(INT_ENABLE, 0x18);
 
 
     Serial.println();
-    Serial.println("ADXL345 activity test");
-    Serial.println("---------------------");
-
-    Serial.println("Range: +/-4 g");
-    Serial.println("FULL_RES: enabled");
-
+    Serial.println("BubuDudu light-sleep test");
+    Serial.println("-------------------------");
     Serial.println();
-    Serial.println("Activity threshold: 0.25 g");
-    Serial.println("Inactivity threshold: 0.125 g");
-    Serial.println("Inactivity time: 3 seconds");
-
-    Serial.println();
-    Serial.println("Leave Bubu still for >3 seconds.");
-    Serial.println("Then move it.");
+    Serial.println("Leave Bubu still.");
+    Serial.println("After inactivity, ESP32 should sleep.");
+    Serial.println("Move Bubu to wake it.");
     Serial.println();
 }
 
 
 // ======================================================
-// loop()
+// loop
 // ======================================================
 
 void loop()
 {
-    // ==================================================
-    // READ INTERRUPT SOURCE REGISTER
-    //
-    // We are NOT using the physical interrupt pin yet.
-    //
-    // The ESP32 simply asks the ADXL345 through I2C:
-    //
-    // "Did anything happen?"
-    // ==================================================
-
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(INT_SOURCE);
-    Wire.endTransmission(false);
-
-    Wire.requestFrom(ADXL345_ADDRESS, (uint8_t)1);
-
-
-    if (Wire.available())
+    if (adxlInterruptOccurred)
     {
-        uint8_t interruptSource = Wire.read();
+        adxlInterruptOccurred = false;
 
 
-        // ----------------------------------------------
-        // Bit 4 = ACTIVITY
-        // ----------------------------------------------
+        // ------------------------------------------------
+        // Ask ADXL345 what caused INT1.
+        // ------------------------------------------------
+
+        uint8_t interruptSource =
+            readRegister(INT_SOURCE);
+
+
+        // ------------------------------------------------
+        // ACTIVITY
+        // ------------------------------------------------
 
         if (interruptSource & 0x10)
         {
-            Serial.println(">>> ACTIVITY detected");
+            Serial.println(">>> STATE: ACTIVE");
         }
 
 
-        // ----------------------------------------------
-        // Bit 3 = INACTIVITY
-        // ----------------------------------------------
+        // ------------------------------------------------
+        // INACTIVITY
+        // ------------------------------------------------
 
         if (interruptSource & 0x08)
         {
-            Serial.println(">>> INACTIVITY detected");
+            Serial.println(">>> STATE: INACTIVE");
+
+            // This is our first actual power transition.
+            enterLightSleep();
         }
     }
 
 
-    // ==================================================
-    // READ NORMAL X/Y/Z DATA
-    // ==================================================
-
-    Wire.beginTransmission(ADXL345_ADDRESS);
-    Wire.write(DATAX0);
-    Wire.endTransmission(false);
-
-    Wire.requestFrom(ADXL345_ADDRESS, (uint8_t)6);
-
-
-    if (Wire.available() == 6)
-    {
-        int16_t x = Wire.read() | (Wire.read() << 8);
-        int16_t y = Wire.read() | (Wire.read() << 8);
-        int16_t z = Wire.read() | (Wire.read() << 8);
-
-        float xG = x * 0.0039f;
-        float yG = y * 0.0039f;
-        float zG = z * 0.0039f;
-
-
-        Serial.print("X: ");
-        Serial.print(xG, 3);
-
-        Serial.print(" g   Y: ");
-        Serial.print(yG, 3);
-
-        Serial.print(" g   Z: ");
-        Serial.print(zG, 3);
-
-        Serial.println(" g");
-    }
-
-
-    delay(100);
+    // No GPIO polling.
+    //
+    // Eventually normal BubuDudu work will happen here.
 }
