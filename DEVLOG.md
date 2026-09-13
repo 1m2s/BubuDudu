@@ -280,3 +280,33 @@ The primary ADXL345 purpose — motion-based power management — has been valid
 Do not add gestures yet.
 
 Continue with the next BubuDudu hardware subsystem while preserving the current working Motion module and deep-sleep wake implementation.
+
+## 2026-09-13
+
+### Completed
+
+- Added Adafruit NeoPixel library through PlatformIO
+- Wired WS2812B LEDs to GPIO21
+- Validated WS2812B control on Bubu
+- Reworked soldered WS2812B assemblies
+- Validated WS2812B control on Dudu
+- Confirmed RGB color changes on both devices
+- GPIO21 is now validated for the WS2812B subsystem on both Bubu and Dudu
+
+### Problems Solved
+
+- Initial WS2812B tests failed due to hardware/power and soldering issues
+- One LED assembly showed unstable behavior after excessive heating
+- Re-soldered and rebuilt the LED connections
+- Verified ESP32 GPIO21 output and WS2812B power independently
+- Final assemblies now work correctly on both devices
+
+### Current Working State
+
+Bubu and Dudu now both have working WS2812B LEDs on GPIO21.
+
+The ADXL345 Motion subsystem remains complete and validated.
+
+### Next Step
+
+Integrate the WS2812B control with the existing Motion subsystem, then begin implementing the heartbeat-style LED pulse.
