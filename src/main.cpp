@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <U8g2lib.h>
 
 #include "esp_sleep.h"
 
@@ -18,6 +20,8 @@ constexpr uint8_t I2C_SCL_PIN = 1;
 
 constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
+constexpr uint8_t OLED_ADDRESS = 0x3C;
+
 
 // ======================================================
 // Subsystems
@@ -25,6 +29,185 @@ constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
 Motion motion;
 LED led;
+
+
+// ======================================================
+// OLED
+//
+// SH1106
+// 128 x 64
+//
+// IMPORTANT:
+// Motion initializes the shared I2C bus first.
+// U8g2 will use that existing hardware I2C bus.
+// ======================================================
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(
+    U8G2_R0,
+    U8X8_PIN_NONE
+);
+
+
+// ======================================================
+// I2C scanner
+// ======================================================
+
+void scanI2C()
+{
+    Serial.println();
+    Serial.println("Scanning I2C bus...");
+    Serial.println("-------------------");
+
+    uint8_t deviceCount = 0;
+
+
+    for (
+        uint8_t address = 1;
+        address < 127;
+        address++
+    )
+    {
+        Wire.beginTransmission(address);
+
+        uint8_t error =
+            Wire.endTransmission();
+
+
+        if (error == 0)
+        {
+            Serial.print(
+                "Found I2C device at 0x"
+            );
+
+
+            if (address < 0x10)
+            {
+                Serial.print("0");
+            }
+
+
+            Serial.println(
+                address,
+                HEX
+            );
+
+
+            deviceCount++;
+        }
+    }
+
+
+    Serial.println("-------------------");
+
+    Serial.print(
+        "Devices found: "
+    );
+
+    Serial.println(
+        deviceCount
+    );
+
+    Serial.println();
+}
+
+
+// ======================================================
+// OLED basic test
+// ======================================================
+
+void testOLED()
+{
+    Serial.println();
+    Serial.println(
+        "Starting OLED test..."
+    );
+
+
+    // --------------------------------------------------
+    // Slow I2C down to 100 kHz for first bring-up.
+    // --------------------------------------------------
+
+    Wire.setClock(
+        100000
+    );
+
+
+    // --------------------------------------------------
+    // U8g2 uses an 8-bit form of the I2C address.
+    // Physical device address is 0x3C.
+    // --------------------------------------------------
+
+    oled.setI2CAddress(
+        OLED_ADDRESS << 1
+    );
+
+
+    Serial.println(
+        "About to call oled.begin()..."
+    );
+
+
+    // --------------------------------------------------
+    // Initialize display controller.
+    // --------------------------------------------------
+
+    oled.begin();
+
+
+    Serial.println(
+        "oled.begin() returned successfully."
+    );
+
+
+    // --------------------------------------------------
+    // Build image in ESP32 framebuffer.
+    // --------------------------------------------------
+
+    Serial.println(
+        "Preparing framebuffer..."
+    );
+
+
+    oled.clearBuffer();
+
+
+    oled.setFont(
+        u8g2_font_6x12_tf
+    );
+
+
+    oled.drawStr(
+        0,
+        15,
+        "BubuDudu"
+    );
+
+
+    oled.drawStr(
+        0,
+        32,
+        "OLED works!"
+    );
+
+
+    // --------------------------------------------------
+    // Send framebuffer over I2C to OLED.
+    // --------------------------------------------------
+
+    Serial.println(
+        "Sending framebuffer..."
+    );
+
+
+    oled.sendBuffer();
+
+
+    Serial.println(
+        "OLED test complete."
+    );
+
+    Serial.println();
+}
 
 
 // ======================================================
@@ -47,6 +230,7 @@ void ledTask(void *parameter)
 void enterDeepSleep()
 {
     Serial.println();
+
     Serial.println(
         ">>> ESP32 entering DEEP SLEEP"
     );
@@ -150,8 +334,6 @@ void enterDeepSleep()
 
     // ==================================================
     // Deep sleep begins.
-    //
-    // This function never returns.
     // ==================================================
 
     esp_deep_sleep_start();
@@ -170,12 +352,13 @@ void setup()
 
 
     Serial.println();
+
     Serial.println(
-        "BubuDudu Motion + Heartbeat test"
+        "BubuDudu Motion + Heartbeat + OLED test"
     );
 
     Serial.println(
-        "--------------------------------"
+        "---------------------------------------"
     );
 
 
@@ -227,7 +410,12 @@ void setup()
 
 
     // --------------------------------------------------
-    // Initialize Motion subsystem
+    // Initialize Motion subsystem.
+    //
+    // This initializes Wire using:
+    //
+    // SDA -> GPIO0
+    // SCL -> GPIO1
     // --------------------------------------------------
 
     bool motionReady =
@@ -246,6 +434,7 @@ void setup()
             "ERROR: ADXL345 not detected."
         );
 
+
         while (true)
         {
             delay(1000);
@@ -256,6 +445,20 @@ void setup()
     Serial.println(
         "Motion subsystem ready."
     );
+
+
+    // --------------------------------------------------
+    // Verify both devices exist on shared I2C bus.
+    // --------------------------------------------------
+
+    scanI2C();
+
+
+    // --------------------------------------------------
+    // OLED test
+    // --------------------------------------------------
+
+    testOLED();
 
 
     // --------------------------------------------------
