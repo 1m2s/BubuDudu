@@ -311,162 +311,287 @@ The ADXL345 Motion subsystem remains complete and validated.
 
 Integrate the WS2812B control with the existing Motion subsystem, then begin implementing the heartbeat-style LED pulse.
 
-**## 2026-09-14**
+## 2026-09-14
 
-**### Completed**
+### Completed
 
-- Continued WS2812B integration with the existing Motion subsystem
+* Continued WS2812B integration with the existing Motion subsystem
 
-- Tuned the ADXL345 motion sensitivity based on hardware testing
+* Tuned the ADXL345 motion sensitivity based on hardware testing
 
-- Updated ADXL345 settings to:
+* Updated ADXL345 activity/inactivity configuration to:
 
-- activity threshold: 3.0 g
+  * activity threshold: 3.0 g
 
-- inactivity threshold: 0.25 g
+  * inactivity threshold: 0.25 g
 
-- inactivity time: 3 seconds
+  * inactivity time: 3 seconds
 
-- Verified that the new activity/inactivity settings behave more reliably during normal handling
+* Verified that the updated motion thresholds behave more reliably during normal device handling
 
-- Added a dedicated LED module:
+* Added a dedicated LED module:
 
-- `src/LED.h`
+  * `include/LED.h`
 
-- `src/LED.cpp`
+  * `src/LED.cpp`
 
-- Moved WS2812B control and heartbeat behavior out of `main.cpp` into the LED module
+* Moved WS2812B control and heartbeat behavior out of `main.cpp` into the LED module
 
-- Verified the heartbeat animation on the physical WS2812B hardware
+* Verified the heartbeat animation on the physical WS2812B hardware
 
-- Updated the project pin-map documentation to include the validated WS2812B configuration
+* Updated the pin-map documentation with the validated WS2812B connection:
 
-- Added the WS2812B data connection to the pin map:
+  * WS2812B DIN → GPIO21 through 330 ohm series resistor
 
-- WS2812B DIN → GPIO21
+* Confirmed that the existing Motion subsystem, inactivity detection, deep sleep, motion wake, and heartbeat continue to operate together
 
-- Confirmed the currently validated hardware pin assignments:
+* Confirmed that FreeRTOS is already included through the Arduino-ESP32 / ESP-IDF environment and does not require a separate manual installation
 
-- ADXL345 SDA → GPIO0
+* Created the `feature/freertos` branch for the first FreeRTOS integration
 
-- ADXL345 SCL → GPIO1
+* Added a temporary FreeRTOS test task to verify task scheduling on the ESP32-C3
 
-- ADXL345 INT1 → GPIO3
+* Verified that the test task executes alongside the existing Arduino application flow
 
-- WS2812B DIN → GPIO21
+* Verified that FreeRTOS tasks stop when the ESP32 enters deep sleep and are recreated after wake and reboot
 
-- Confirmed that the existing Motion subsystem, deep-sleep behavior, motion wake, and heartbeat continue to operate together
+* Removed the temporary test task after FreeRTOS operation was confirmed
 
-- Confirmed that no separate manual FreeRTOS installation is required for the PlatformIO + Arduino ESP32-C3 project
+* Added the first real BubuDudu FreeRTOS task
 
-- Confirmed that FreeRTOS is already provided through the Arduino-ESP32 / ESP-IDF environment
+* Moved the existing blocking heartbeat animation from the Arduino application flow into a dedicated LED task using `xTaskCreate()`
 
-- Created a dedicated `feature/freertos` branch
+* Kept the existing heartbeat implementation unchanged during the RTOS migration
 
-- Added a temporary FreeRTOS test task to verify task scheduling on the ESP32-C3
+* Verified that heartbeat delays now block only the LED task rather than the Motion/system flow
 
-- Verified that the temporary task runs alongside the existing Arduino application flow
+* Verified that Motion events continue to be processed while the heartbeat animation is running
 
-- Verified that FreeRTOS tasks stop during deep sleep and are recreated after the ESP32 wakes and boots again
+* Verified inactivity detection, deep sleep, motion wake, and LED behavior after FreeRTOS integration
 
-- Removed the temporary FreeRTOS test task after validation
+* Did not introduce queues, mutexes, semaphores, event groups, or task notifications because no current requirement justifies them
 
-- Added the first real BubuDudu FreeRTOS task
+* Created the `feature/oled` branch for OLED hardware and software bring-up
 
-- Moved the existing blocking heartbeat execution from `loop()` into a dedicated LED task
+* Connected the 1.3-inch 128×64 SH1106 OLED to the existing I²C bus
 
-- Created the LED task using `xTaskCreate()`
+* Validated OLED wiring:
 
-- Kept the existing blocking heartbeat implementation unchanged
+  * SDA → GPIO0
 
-- Confirmed that the blocking heartbeat now blocks only the LED task instead of blocking the main application flow
+  * SCK / SCL → GPIO1
 
-- Verified that Motion event handling continues while the heartbeat animation is running
+  * VDD → 3.3 V
 
-- Verified inactivity detection, deep sleep, motion wake, and LED behavior after the FreeRTOS integration
+  * GND → common GND
 
-- No queues, mutexes, semaphores, event groups, or task notifications have been introduced yet
+* Ran an I²C scan with the ADXL345 and OLED connected simultaneously
 
-**### Problems Solved**
+* Confirmed both devices are visible on the same I²C bus:
 
-- ADXL345 motion detection sensitivity was adjusted to produce more useful real-world activity/inactivity behavior
+  * OLED → `0x3C`
 
-- WS2812B control was separated from `main.cpp` into a dedicated LED module
+  * ADXL345 → `0x53`
 
-- The project pin map was updated to reflect the now hardware-validated WS2812B GPIO21 assignment
+* Added the U8g2 display library through PlatformIO
 
-- The blocking heartbeat previously occupied the main application flow
+* Successfully initialized the SH1106 OLED
 
-- The heartbeat now runs independently inside a FreeRTOS LED task
+* Successfully displayed test text on the physical OLED
 
-- Confirmed that manually adding the downloaded FreeRTOS source code to the project is unnecessary
+* Verified that the ADXL345 Motion subsystem continues operating while the OLED is connected
 
-- Established the first FreeRTOS application structure without creating unnecessary tasks or RTOS abstractions
+* Verified that inactivity detection, deep sleep, motion wake, WS2812B heartbeat, and OLED operation continue to work together
 
-**### Current Working State**
+* Added a dedicated Display module:
 
-The project currently has working ADXL345 motion-based power management and WS2812B heartbeat output.
+  * `include/Display.h`
 
-Current validated connections:
+  * `src/Display.cpp`
 
-- ADXL345 SDA → GPIO0
+* Moved OLED-specific implementation details out of `main.cpp`
 
-- ADXL345 SCL → GPIO1
+* Kept the Display subsystem synchronous
 
-- ADXL345 INT1 → GPIO3
+* Did not create a dedicated Display FreeRTOS task because the current display behavior does not require independent execution
 
-- WS2812B DIN → GPIO21
+* Reorganized module headers into PlatformIO's `include/` directory
 
-The pin-map documentation has been updated to include the validated WS2812B GPIO21 assignment.
+* Current module header layout now includes:
+
+  * `include/Motion.h`
+
+  * `include/LED.h`
+
+  * `include/Display.h`
+
+* Applied the header-directory cleanup to the relevant development branches
+
+* Updated the pin-map documentation with the validated OLED configuration
+
+* Confirmed that the OLED consumes no additional ESP32-C3 GPIO pins because it shares the existing GPIO0/GPIO1 I²C bus with the ADXL345
+
+
+### Problems Solved
+
+* Adjusted ADXL345 motion thresholds to produce more useful real-world activity/inactivity behavior
+
+* Separated WS2812B control from `main.cpp` into a dedicated LED module
+
+* Removed the blocking heartbeat animation from the main application flow by moving it into a FreeRTOS LED task
+
+* Verified that FreeRTOS support is already provided by the ESP32 Arduino environment and that the separately downloaded FreeRTOS source code is unnecessary
+
+* Established the first useful FreeRTOS architecture without introducing unnecessary RTOS mechanisms
+
+* Verified that the ADXL345 and OLED can share the same SDA/SCL lines because they use different I²C addresses
+
+* Confirmed simultaneous I²C communication with the OLED at `0x3C` and ADXL345 at `0x53`
+
+* Debugged initial OLED initialization while preserving the already-working Motion subsystem
+
+* Separated OLED implementation details from `main.cpp` into a dedicated Display module
+
+* Corrected the project source layout by moving module header files from `src/` into PlatformIO's `include/` directory
+
+* Updated the hardware pin-map documentation to reflect the validated WS2812B and OLED configurations
+
+
+### Current Working State
+
+The project currently has working ADXL345 motion-based power management, WS2812B heartbeat output, FreeRTOS LED execution, and SH1106 OLED output.
+
+Current validated hardware connections:
+
+* GPIO0 → shared I²C SDA
+
+  * ADXL345 SDA
+
+  * OLED SDA
+
+* GPIO1 → shared I²C SCL
+
+  * ADXL345 SCL
+
+  * OLED SCK / SCL
+
+* GPIO3 → ADXL345 INT1 / deep-sleep wake
+
+* GPIO21 → WS2812B DIN through 330 ohm series resistor
+
+Validated I²C addresses:
+
+* ADXL345 → `0x53`
+
+* OLED → `0x3C`
+
+Current software modules:
+
+* `Motion`
+
+* `LED`
+
+* `Display`
+
+Current project structure uses:
+
+* `include/Motion.h`
+
+* `include/LED.h`
+
+* `include/Display.h`
+
+* `src/Motion.cpp`
+
+* `src/LED.cpp`
+
+* `src/Display.cpp`
+
+* `src/main.cpp`
 
 The current FreeRTOS structure consists of:
 
-- Arduino `loopTask`
+* Arduino `loopTask`
 
-- Motion event handling
+  * Motion event handling
 
-- activity/inactivity handling
+  * inactivity handling
 
-- deep-sleep control
+  * deep-sleep control
 
-- LED task
+  * current synchronous Display operations
 
-- blocking heartbeat animation
+* LED task
 
-The heartbeat animation still intentionally uses blocking delays, but these delays now only block the LED task.
+  * blocking heartbeat animation
+
+The heartbeat animation still intentionally contains blocking delays, but those delays now block only the LED task.
 
 The main application flow can continue processing Motion events while the heartbeat is running.
 
-The existing deep-sleep and ADXL345 motion-wake functionality remains operational.
+The Display subsystem does not currently have its own FreeRTOS task.
 
-**### Known Issue to Monitor**
+This is intentional because the current display behavior does not require independent execution.
+
+The OLED hardware, I²C communication, SH1106 initialization, and basic text output have been validated.
+
+The final BubuDudu OLED user interface and diagnostic behavior have not yet been designed.
+
+The ADXL345 deep-sleep and motion-wake functionality remains operational with the LED and OLED subsystems connected.
+
+
+### Known Issue to Monitor
 
 During one test, the WS2812B remained illuminated after the ESP32 entered deep sleep even though `led.off()` is called before entering deep sleep.
 
-This has currently only been observed once and has not been confirmed as a repeatable problem.
+This has only been observed once and has not been confirmed as a repeatable problem.
 
-No change will be made yet.
+No change will be made unless the behavior becomes reproducible.
 
-If the issue happens again or becomes reproducible, investigate the interaction between the LED FreeRTOS task, `led.off()`, and the transition into ESP32 deep sleep.
+If it occurs again, investigate the interaction between the LED FreeRTOS task, `led.off()`, and the transition into ESP32 deep sleep.
 
-**### Git Commits**
 
-- `c5e13df` — `tune: adjust ADXL345 motion sensitivity`
+### Git Commits
 
-- `db1492a` — `refactor: add LED module`
+* `c5e13df` — `tune: adjust ADXL345 motion sensitivity`
 
-- FreeRTOS LED-task integration committed on `feature/freertos`
+* `db1492a` — `refactor: add LED module`
 
-**### Next Step**
+* `88bff75` — `feat: run heartbeat in FreeRTOS LED task`
 
-The current FreeRTOS foundation is sufficient for now.
+* `39fc271` — `feat: validate OLED on shared I2C bus`
 
-Do not continue creating additional tasks or RTOS synchronization mechanisms without a real requirement.
+* `947d6e7` — `refactor: move headers to include directory`
 
-Continue hardware bring-up with the next BubuDudu subsystem.
+* Display module refactor committed on `feature/oled`
 
-Begin OLED bring-up.
+* OLED shared-I²C pin-map validation committed on `design/pin-map`
 
-Connect the OLED to the existing I²C bus shared with the ADXL345 and verify that both devices can operate on the same SDA/SCL lines.
 
-Determine the OLED I²C address, initialize the display, and verify basic text output before integrating diagnostic information into the main system.
+### Next Step
+
+Continue development on `feature/oled`.
+
+The OLED hardware bring-up is complete, so the next goal is to replace the temporary test text with a purposeful BubuDudu diagnostic interface.
+
+Determine which system information should eventually be displayed, including candidates such as:
+
+* device identity
+
+* peer online/offline state
+
+* RSSI / proximity state
+
+* active communication radio
+
+* message ID
+
+* ACK state
+
+* power state
+
+Keep the Display subsystem synchronous for now.
+
+Do not create a Display FreeRTOS task, mutex, queue, semaphore, event group, or task notification unless later system behavior creates a real requirement.
+
+Preserve the current working Motion, deep-sleep wake, LED task, and OLED functionality while continuing development.
