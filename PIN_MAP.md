@@ -96,3 +96,28 @@ MOSFET control is intentionally not assigned a GPIO at this stage. A GPIO will o
 * The heartbeat-style LED animation was successfully tested using the WS2812B.
 
 * GPIO21 should now be treated as reserved for the LED subsystem when assigning the remaining BubuDudu pins.
+
+### OLED Display
+
+| OLED Signal | ESP32-C3 Connection | Status       | Purpose          |
+|-------------|----------------------|--------------|------------------|
+| SDA         | GPIO0                | ✅ Validated | I²C data         |
+| SCK / SCL   | GPIO1                | ✅ Validated | I²C clock        |
+| VDD         | 3.3 V                | ✅ Validated | Power supply     |
+| GND         | Common GND           | ✅ Validated | Ground reference |
+
+**Module:** 1.3-inch 128×64 OLED  
+**Controller:** SH1106  
+**I²C address:** `0x3C`
+
+The OLED shares the same I²C bus as the ADXL345:
+
+- GPIO0 → SDA
+- GPIO1 → SCL
+
+Hardware validation confirmed both devices operate simultaneously:
+
+- OLED detected at `0x3C`
+- ADXL345 detected at `0x53`
+- OLED text output works while the ADXL345 motion subsystem remains operational
+- No additional ESP32-C3 GPIO pins are required for the OLED
