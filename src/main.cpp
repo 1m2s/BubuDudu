@@ -5,6 +5,9 @@
 #include "Motion.h"
 #include "LED.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 
 // ======================================================
 // Hardware configuration
@@ -22,6 +25,19 @@ constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
 Motion motion;
 LED led;
+
+
+// ======================================================
+// LED FreeRTOS task
+// ======================================================
+
+void ledTask(void *parameter)
+{
+    while (true)
+    {
+        led.heartbeat();
+    }
+}
 
 
 // ======================================================
@@ -274,6 +290,20 @@ void setup()
     );
 
     Serial.println();
+
+
+    // --------------------------------------------------
+    // Start LED FreeRTOS task
+    // --------------------------------------------------
+
+    xTaskCreate(
+        ledTask,
+        "LED Task",
+        2048,
+        nullptr,
+        1,
+        nullptr
+    );
 }
 
 
@@ -318,11 +348,4 @@ void loop()
 
         enterDeepSleep();
     }
-
-
-    // --------------------------------------------------
-    // LED subsystem
-    // --------------------------------------------------
-
-    led.heartbeat();
 }
