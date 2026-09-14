@@ -1,11 +1,11 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <U8g2lib.h>
 
 #include "esp_sleep.h"
 
 #include "Motion.h"
 #include "LED.h"
+#include "Display.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,8 +20,6 @@ constexpr uint8_t I2C_SCL_PIN = 1;
 
 constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 
-constexpr uint8_t OLED_ADDRESS = 0x3C;
-
 
 // ======================================================
 // Subsystems
@@ -29,27 +27,13 @@ constexpr uint8_t OLED_ADDRESS = 0x3C;
 
 Motion motion;
 LED led;
-
-
-// ======================================================
-// OLED
-//
-// SH1106
-// 128 x 64
-//
-// IMPORTANT:
-// Motion initializes the shared I2C bus first.
-// U8g2 will use that existing hardware I2C bus.
-// ======================================================
-
-U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(
-    U8G2_R0,
-    U8X8_PIN_NONE
-);
+Display display;
 
 
 // ======================================================
 // I2C scanner
+//
+// Temporary bring-up/debug tool.
 // ======================================================
 
 void scanI2C()
@@ -112,105 +96,6 @@ void scanI2C()
 
 
 // ======================================================
-// OLED basic test
-// ======================================================
-
-void testOLED()
-{
-    Serial.println();
-    Serial.println(
-        "Starting OLED test..."
-    );
-
-
-    // --------------------------------------------------
-    // Slow I2C down to 100 kHz for first bring-up.
-    // --------------------------------------------------
-
-    Wire.setClock(
-        100000
-    );
-
-
-    // --------------------------------------------------
-    // U8g2 uses an 8-bit form of the I2C address.
-    // Physical device address is 0x3C.
-    // --------------------------------------------------
-
-    oled.setI2CAddress(
-        OLED_ADDRESS << 1
-    );
-
-
-    Serial.println(
-        "About to call oled.begin()..."
-    );
-
-
-    // --------------------------------------------------
-    // Initialize display controller.
-    // --------------------------------------------------
-
-    oled.begin();
-
-
-    Serial.println(
-        "oled.begin() returned successfully."
-    );
-
-
-    // --------------------------------------------------
-    // Build image in ESP32 framebuffer.
-    // --------------------------------------------------
-
-    Serial.println(
-        "Preparing framebuffer..."
-    );
-
-
-    oled.clearBuffer();
-
-
-    oled.setFont(
-        u8g2_font_6x12_tf
-    );
-
-
-    oled.drawStr(
-        0,
-        15,
-        "BubuDudu"
-    );
-
-
-    oled.drawStr(
-        0,
-        32,
-        "OLED works!"
-    );
-
-
-    // --------------------------------------------------
-    // Send framebuffer over I2C to OLED.
-    // --------------------------------------------------
-
-    Serial.println(
-        "Sending framebuffer..."
-    );
-
-
-    oled.sendBuffer();
-
-
-    Serial.println(
-        "OLED test complete."
-    );
-
-    Serial.println();
-}
-
-
-// ======================================================
 // LED FreeRTOS task
 // ======================================================
 
@@ -241,7 +126,7 @@ void enterDeepSleep()
 
 
     // --------------------------------------------------
-    // Stop normal awake ISR handling.
+    // Stop normal awake interrupt handling.
     // --------------------------------------------------
 
     motion.pauseInterrupt();
@@ -249,7 +134,7 @@ void enterDeepSleep()
 
     // --------------------------------------------------
     // Movement may have happened between detecting
-    // inactivity and actually entering deep sleep.
+    // inactivity and entering deep sleep.
     // --------------------------------------------------
 
     if (
@@ -312,6 +197,7 @@ void enterDeepSleep()
             "ERROR: Could not configure deep-sleep wake."
         );
 
+
         motion.resumeInterrupt();
 
         return;
@@ -326,6 +212,7 @@ void enterDeepSleep()
         "Turning WS2812 off."
     );
 
+
     led.off();
 
 
@@ -334,6 +221,8 @@ void enterDeepSleep()
 
     // ==================================================
     // Deep sleep begins.
+    //
+    // This function does not return.
     // ==================================================
 
     esp_deep_sleep_start();
@@ -354,24 +243,24 @@ void setup()
     Serial.println();
 
     Serial.println(
-        "BubuDudu Motion + Heartbeat + OLED test"
+        "BubuDudu subsystem integration test"
     );
 
     Serial.println(
-        "---------------------------------------"
+        "-----------------------------------"
     );
 
 
-    // --------------------------------------------------
-    // Initialize LED subsystem
-    // --------------------------------------------------
+    // ==================================================
+    // LED
+    // ==================================================
 
     led.begin();
 
 
-    // --------------------------------------------------
-    // Why did ESP32 boot?
-    // --------------------------------------------------
+    // ==================================================
+    // Determine boot reason
+    // ==================================================
 
     esp_sleep_wakeup_cause_t wakeCause =
         esp_sleep_get_wakeup_cause();
@@ -409,14 +298,15 @@ void setup()
     }
 
 
-    // --------------------------------------------------
-    // Initialize Motion subsystem.
+    // ==================================================
+    // Motion
     //
-    // This initializes Wire using:
+    // Motion currently owns initialization of the
+    // shared I2C bus:
     //
     // SDA -> GPIO0
     // SCL -> GPIO1
-    // --------------------------------------------------
+    // ==================================================
 
     bool motionReady =
         motion.begin(
@@ -447,23 +337,47 @@ void setup()
     );
 
 
-    // --------------------------------------------------
-    // Verify both devices exist on shared I2C bus.
-    // --------------------------------------------------
+    // ==================================================
+    // Temporary shared I2C bus verification
+    //
+    // Expected:
+    // OLED    -> 0x3C
+    // ADXL345 -> 0x53
+    // ==================================================
 
     scanI2C();
 
 
-    // --------------------------------------------------
-    // OLED test
-    // --------------------------------------------------
+    // ==================================================
+    // Display
+    //
+    // Display uses the already initialized I2C bus.
+    // ==================================================
 
-    testOLED();
+    bool displayReady =
+        display.begin();
 
 
-    // --------------------------------------------------
-    // Check event responsible for motion wake.
-    // --------------------------------------------------
+    if (!displayReady)
+    {
+        Serial.println(
+            "ERROR: Display initialization failed."
+        );
+
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+
+    display.showTest();
+
+
+    // ==================================================
+    // Check event responsible for motion wake
+    // ==================================================
 
     if (
         wakeCause ==
@@ -495,9 +409,9 @@ void setup()
     Serial.println();
 
 
-    // --------------------------------------------------
+    // ==================================================
     // Start LED FreeRTOS task
-    // --------------------------------------------------
+    // ==================================================
 
     xTaskCreate(
         ledTask,
@@ -520,9 +434,9 @@ void loop()
         motion.getEvent();
 
 
-    // --------------------------------------------------
+    // ==================================================
     // Activity
-    // --------------------------------------------------
+    // ==================================================
 
     if (
         event ==
@@ -535,9 +449,9 @@ void loop()
     }
 
 
-    // --------------------------------------------------
+    // ==================================================
     // Inactivity
-    // --------------------------------------------------
+    // ==================================================
 
     else if (
         event ==
