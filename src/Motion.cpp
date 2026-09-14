@@ -200,40 +200,32 @@ bool Motion::begin(
     );
 
 
-    // --------------------------------------------------
     // Activity threshold
     //
-    // 4 * 0.0625 g = 0.25 g
-    // --------------------------------------------------
-
+    // 48 * 0.0625 g = 3.0 g
+    //
     writeRegister(
         THRESH_ACT,
+        48
+    );
+
+    // Inactivity threshold
+    //
+    // 4 * 0.0625 g = 0.25 g
+    //
+    writeRegister(
+        THRESH_INACT,
         4
     );
 
 
-    // --------------------------------------------------
-    // Inactivity threshold
-    //
-    // 2 * 0.0625 g = 0.125 g
-    // --------------------------------------------------
-
-    writeRegister(
-        THRESH_INACT,
-        2
-    );
-
-
-    // --------------------------------------------------
-    // Inactivity must last approximately 3 seconds
-    // --------------------------------------------------
-
+    // Must remain inactive for 3 seconds
     writeRegister(
         TIME_INACT,
         3
     );
 
-
+    
     // --------------------------------------------------
     // AC-coupled activity/inactivity
     // X/Y/Z enabled
