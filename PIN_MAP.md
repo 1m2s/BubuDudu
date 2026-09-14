@@ -68,3 +68,31 @@ MOSFET control is intentionally not assigned a GPIO at this stage. A GPIO will o
 * GPIO3 successfully woke the ESP32-C3 from both light sleep and deep sleep.
 * The ADXL345 remains powered while the ESP32 is in deep sleep and can monitor motion and wake the controller.
 * GPIO0, GPIO1 and GPIO3 should now be treated as reserved for the motion subsystem when assigning the remaining BubuDudu pins.
+
+### WS2812B RGB LED
+
+| WS2812B Signal | Connection | Status | Purpose |
+| -------------- | ---------- | ------ | ------- |
+| DIN | ESP32-C3 GPIO21 through 330 Ω resistor | ✅ Validated | Digital LED data signal |
+| 5V | 5 V supply | ✅ Validated | LED power |
+| GND | GND | ✅ Validated | Common ground |
+
+#### Validation notes
+
+* GPIO21 successfully controls the WS2812B data input.
+
+* A 330 Ω series resistor is placed between ESP32-C3 GPIO21 and the WS2812B `DIN` pin.
+
+* The 330 Ω resistor is used to improve signal integrity and help protect the WS2812B data input from sharp signal transitions.
+
+* The WS2812B is powered from 5 V.
+
+* The WS2812B ground is connected to the ESP32-C3 ground so both devices share the same electrical reference for the data signal.
+
+* WS2812B control was successfully tested on both Bubu and Dudu.
+
+* RGB color output was successfully validated on both devices.
+
+* The heartbeat-style LED animation was successfully tested using the WS2812B.
+
+* GPIO21 should now be treated as reserved for the LED subsystem when assigning the remaining BubuDudu pins.
