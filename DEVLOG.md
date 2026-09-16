@@ -595,3 +595,181 @@ Keep the Display subsystem synchronous for now.
 Do not create a Display FreeRTOS task, mutex, queue, semaphore, event group, or task notification unless later system behavior creates a real requirement.
 
 Preserve the current working Motion, deep-sleep wake, LED task, and OLED functionality while continuing development.
+
+## 2026-09-16
+
+### CC1101 SPI bring-up
+
+Started hardware bring-up of the CC1101 433 MHz secondary radio.
+
+Created development branch:
+
+- `feature/cc1101`
+
+The branch was created from the validated `feature/oled` state. The OLED branch has not been merged into `main`.
+
+### CC1101 hardware verification
+
+Reviewed the actual 8-pin CC1101 module instead of relying blindly on the seller's wiring diagram.
+
+The Amazon listing contained documentation for both an 8-pin and a different 10-pin CC1101 breakout, creating ambiguity around the power pins.
+
+Verified the actual module using a multimeter:
+
+- CC1101 pin 1 -> GND
+- CC1101 pin 2 -> VCC
+- pin 1 had continuity with the SMA connector outer shield
+- pin 2 did not
+
+Validated CC1101 supply voltage at the module:
+
+- approximately 3.3 V
+
+Validated continuity of all SPI connections.
+
+Current CC1101 wiring on Bubu:
+
+- GND -> GND
+- VCC -> 3.3 V
+- CSN -> GPIO10
+- SCK -> GPIO6
+- MOSI -> GPIO7
+- MISO/GDO1 -> GPIO20
+
+Currently unused:
+
+- GDO0
+- GDO2
+
+### Raw SPI bring-up
+
+Temporarily replaced the integrated application `main.cpp` with a minimal CC1101 SPI test program.
+
+The first milestone is intentionally limited to reading known CC1101 registers before attempting any RF transmission.
+
+Attempted to read:
+
+- IOCFG2
+- PARTNUM
+- VERSION
+
+Initial reads returned unstable values instead of stable identification values.
+
+Examples included changing PARTNUM and VERSION values on every read.
+
+Added the CC1101 SRES reset sequence.
+
+Reset currently reports:
+
+`RESET ERROR: CC1101 did not finish reset.`
+
+Register values remain unstable.
+
+No RF transmission has been attempted.
+
+### Logic analyzer bring-up
+
+Used the 8-channel 24 MHz USB logic analyzer for the first time.
+
+Initial PulseView nightly build crashed on macOS.
+
+Installed the stable PulseView 0.4.2 build instead.
+
+The analyzer was detected by macOS as:
+
+- Vendor ID: `0x0925`
+- Product ID: `0x3881`
+
+PulseView successfully detected it using the `fx2lafw` driver as:
+
+- Saleae Logic with 8 channels
+
+Connected logic analyzer channels:
+
+- D0 / physical CH1 -> CSN
+- D1 / physical CH2 -> SCK
+- D2 / physical CH3 -> MOSI
+- D3 / physical CH4 -> MISO
+
+Captured real CC1101 SPI traffic.
+
+The raw capture confirmed:
+
+- CSN changes state during transactions
+- SCK produces regular clock pulses
+- MOSI carries structured data
+- MISO is electrically active and carries structured transitions
+
+This ruled out several simple failure cases such as completely missing clock activity or a permanently floating MISO line.
+
+### SPI decoder investigation
+
+Configured the PulseView SPI protocol decoder.
+
+Current decoder configuration:
+
+- CLK -> D1
+- MOSI -> D2
+- MISO -> D3
+- CS -> D0
+- CS active low
+- MSB first
+- 8-bit words
+
+The decoded MOSI values currently appear as:
+
+- `00 00`
+- `E0 00`
+- `E2 00`
+
+The firmware intended commands equivalent to approximately:
+
+- `80 00`
+- `F0 00`
+- `F1 00`
+
+The decoded values therefore appear to be shifted by approximately one bit.
+
+MISO also produced structured decoded values such as:
+
+- `1E A4`
+- `1E 84`
+- `1E FF`
+
+This suggests the next debugging step should be to verify SPI decoder timing / clock phase and compare the decoded bytes against the raw waveform before concluding that the CC1101 itself is faulty.
+
+### Current status
+
+CC1101 SPI communication is not yet validated.
+
+Confirmed working:
+
+- module receives 3.3 V
+- wiring continuity
+- ESP32 generates CSN activity
+- ESP32 generates SPI clock
+- MOSI activity reaches the bus
+- MISO is electrically active
+- logic analyzer works
+- PulseView SPI captures work
+
+Still unresolved:
+
+- CC1101 reset completion
+- unstable register values
+- apparent one-bit shift in decoded MOSI data
+- reliable PARTNUM / VERSION identification
+
+### Next step
+
+Resume on `feature/cc1101`.
+
+Before changing hardware or attempting RF transmission:
+
+1. restore the CC1101 bring-up code
+2. verify PulseView SPI clock phase / sampling edge
+3. determine why intended MOSI bytes such as `0x80`, `0xF0`, and `0xF1` decode as `0x00`, `0xE0`, and `0xE2`
+4. compare analyzer-decoded MISO data with values received by the ESP32
+5. obtain stable believable CC1101 register values
+
+Do not continue to RF transmission until the SPI identification milestone is working reliably.
