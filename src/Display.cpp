@@ -62,10 +62,14 @@ bool Display::begin()
 
 
 // ======================================================
-// Temporary display test
+// Show current system status
 // ======================================================
 
-void Display::showTest()
+void Display::showStatus(
+    const char* deviceName,
+    bool active,
+    bool motionWake
+)
 {
     oled.clearBuffer();
 
@@ -75,18 +79,61 @@ void Display::showTest()
     );
 
 
+    // --------------------------------------------------
+    // Device identity
+    // --------------------------------------------------
+
     oled.drawStr(
         0,
         15,
-        "BubuDudu"
+        deviceName
     );
 
 
-    oled.drawStr(
-        0,
-        32,
-        "OLED works!"
-    );
+    // --------------------------------------------------
+    // Current system state
+    // --------------------------------------------------
+
+    if (active)
+    {
+        oled.drawStr(
+            0,
+            32,
+            "STATE: ACTIVE"
+        );
+    }
+
+    else
+    {
+        oled.drawStr(
+            0,
+            32,
+            "STATE: INACTIVE"
+        );
+    }
+
+
+    // --------------------------------------------------
+    // Boot reason
+    // --------------------------------------------------
+
+    if (motionWake)
+    {
+        oled.drawStr(
+            0,
+            49,
+            "BOOT: MOTION"
+        );
+    }
+
+    else
+    {
+        oled.drawStr(
+            0,
+            49,
+            "BOOT: NORMAL"
+        );
+    }
 
 
     oled.sendBuffer();

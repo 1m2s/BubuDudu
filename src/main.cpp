@@ -3,6 +3,7 @@
 
 #include "esp_sleep.h"
 
+#include "Config.h"
 #include "Motion.h"
 #include "LED.h"
 #include "Display.h"
@@ -28,6 +29,15 @@ constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
 Motion motion;
 LED led;
 Display display;
+
+
+// ======================================================
+// System state
+// ======================================================
+
+// false -> normal startup
+// true  -> woke from deep sleep through GPIO3
+bool motionWakeBoot = false;
 
 
 // ======================================================
@@ -163,6 +173,13 @@ void enterDeepSleep()
             Serial.println(
                 ">>> STATE: ACTIVE"
             );
+
+
+            display.showStatus(
+                DEVICE_NAME,
+                true,
+                motionWakeBoot
+            );
         }
 
 
@@ -264,6 +281,13 @@ void setup()
 
     esp_sleep_wakeup_cause_t wakeCause =
         esp_sleep_get_wakeup_cause();
+
+
+    motionWakeBoot =
+        (
+            wakeCause ==
+            ESP_SLEEP_WAKEUP_GPIO
+        );
 
 
     if (
@@ -372,7 +396,15 @@ void setup()
     }
 
 
-    display.showTest();
+    // ==================================================
+    // Initial status screen
+    // ==================================================
+
+    display.showStatus(
+        DEVICE_NAME,
+        true,
+        motionWakeBoot
+    );
 
 
     // ==================================================
@@ -446,6 +478,13 @@ void loop()
         Serial.println(
             ">>> STATE: ACTIVE"
         );
+
+
+        display.showStatus(
+            DEVICE_NAME,
+            true,
+            motionWakeBoot
+        );
     }
 
 
@@ -460,6 +499,13 @@ void loop()
     {
         Serial.println(
             ">>> STATE: INACTIVE"
+        );
+
+
+        display.showStatus(
+            DEVICE_NAME,
+            false,
+            motionWakeBoot
         );
 
 

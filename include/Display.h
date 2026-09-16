@@ -11,7 +11,11 @@ public:
 
     bool begin();
 
-    void showTest();
+    void showStatus(
+        const char* deviceName,
+        bool active,
+        bool motionWake
+    );
 
 
 private:
