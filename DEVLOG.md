@@ -773,3 +773,125 @@ Before changing hardware or attempting RF transmission:
 5. obtain stable believable CC1101 register values
 
 Do not continue to RF transmission until the SPI identification milestone is working reliably.
+
+## 2026-09-17
+
+### Completed
+
+* Continued CC1101 integration and debugging on the ESP32-C3 Super Mini.
+* Confirmed the CC1101 hardware and raw SPI communication were working correctly.
+* Confirmed reliable bidirectional CC1101 communication between Bubu and Dudu.
+* Verified the application-level reliability behavior:
+
+  * structured EVENT messages
+  * message IDs
+  * ACK generation
+  * ACK matching
+  * 300 ms timeout
+  * maximum 2 retries
+  * retries reuse the same message ID
+  * duplicate EVENT detection
+  * duplicate EVENTs are not processed twice
+  * duplicate EVENTs still receive another ACK
+  * peer offline detection after failed communication
+  * automatic recovery when communication returns
+* Moved the working CC1101 communication stack into a dedicated FreeRTOS `RadioTask`.
+* Verified that moving the radio communication into a FreeRTOS task did not break the previously working protocol behavior.
+* Established the intended ownership rule that `RadioTask` is the only task that should directly access `CC1101Radio`.
+* Experimented with FreeRTOS queues for communication between the application and `RadioTask`.
+* Experimented with reintegrating Motion, OLED, LED, deep sleep and CC1101 into the full firmware.
+* Tested a 30-second application-level inactivity grace period before deep sleep instead of immediately sleeping after the ADXL345 reports inactivity.
+* Stashed this unfinished queue/power-policy integration rather than committing experimental code.
+* Created the clean `feature/espnow` branch from the last committed CC1101 + FreeRTOS checkpoint in preparation for implementing the second communication transport.
+
+### Important debugging lesson
+
+A large part of the CC1101/SPI debugging effort was ultimately caused by a misplaced jumper wire on the breadboard.
+
+The logic analyzer was therefore not required to solve the final hardware fault.
+
+However, the debugging work was still valuable because I learned:
+
+* what SPI is and how the bus works
+* the roles of SCK, MOSI, MISO and CS/CSN
+* how SPI transactions appear on a logic analyzer
+* how to configure PulseView for SPI decoding
+* what signals to inspect when debugging an SPI peripheral
+* how to distinguish a software/protocol problem from a physical wiring problem
+* why basic wiring verification should happen before deeper protocol debugging
+
+This was a good reminder to check the simplest physical causes first before assuming a more complicated firmware or protocol failure.
+
+### Personal note
+
+Today's work became somewhat sloppy toward the end of the session.
+
+I was mentally unfocused and, during parts of the queue/full-system integration, I was copying code without properly reading and understanding every change. That goes against the purpose of this project: I want to be able to explain every architectural and implementation decision myself rather than merely produce working firmware.
+
+Because of that, I deliberately did **not** commit the unfinished queue/power integration. It was stashed instead.
+
+Before building further on that work, I need to revisit the relevant code when focused and make sure I understand:
+
+* how the FreeRTOS TX and RX queues work
+* why the application should enqueue an event rather than construct radio packets itself
+* how `RadioTask` owns protocol reliability and CC1101 access
+* how the LED task receives application events
+* how the power/sleep policy should interact with communication activity
+* what should define peer presence, proximity and wake behavior
+
+The goal is not just to have commits that work. The goal is to understand why they work.
+
+### Current working checkpoint
+
+Current branch:
+
+`feature/espnow`
+
+Current working tree:
+
+clean
+
+`feature/espnow` currently starts from:
+
+`dd729bb refactor: move CC1101 communication into FreeRTOS task`
+
+The unfinished queue + 30-second power-policy work is safely stored in a Git stash:
+
+`wip: queue integration and 30s power policy`
+
+Do not apply this stash to `feature/espnow`.
+
+The committed CC1101 checkpoint remains working and contains:
+
+* raw CC1101 driver
+* 433.92 MHz configuration
+* bidirectional communication
+* `Protocol::Message`
+* EVENT messages
+* ACKs
+* timeout/retry logic
+* duplicate detection
+* peer availability handling
+* dedicated FreeRTOS `RadioTask`
+
+### Exact next step
+
+Begin clean ESP-NOW bring-up on `feature/espnow`.
+
+Known Wi-Fi MAC addresses:
+
+* Bubu: `E8:F6:0A:12:4C:A4`
+* Dudu: `E8:F6:0A:12:5B:84`
+
+First milestone:
+
+1. Create a minimal `ESPNowRadio` module.
+2. Initialize ESP-NOW on both devices.
+3. Configure each device with the other device as its peer.
+4. Verify the correct local and peer MAC addresses.
+5. Prove simple bidirectional ESP-NOW transmission.
+6. Only after basic communication works, integrate the existing BubuDudu protocol concepts.
+
+Do not mix CC1101 fallback, proximity, deep-sleep discovery, queues or full-system integration into the initial ESP-NOW bring-up.
+
+Also revisit today's FreeRTOS queue work before eventually using it in the final architecture.
