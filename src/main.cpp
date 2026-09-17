@@ -3,7 +3,100 @@
 #include "Config.h"
 #include "CC1101Radio.h"
 
+
 bool radioReady = false;
+unsigned long nextSendTime = 0;
+
+constexpr unsigned long SEND_PERIOD_MS = 4000;
+
+
+#ifdef DEVICE_BUBU
+
+const uint8_t TX_MESSAGE[] =
+{
+    'B', 'U', 'B', 'U',
+    ' ', '-', '>', ' ',
+    'D', 'U', 'D', 'U'
+};
+
+constexpr unsigned long FIRST_SEND_DELAY_MS = 1500;
+
+#elif defined(DEVICE_DUDU)
+
+const uint8_t TX_MESSAGE[] =
+{
+    'D', 'U', 'D', 'U',
+    ' ', '-', '>', ' ',
+    'B', 'U', 'B', 'U'
+};
+
+constexpr unsigned long FIRST_SEND_DELAY_MS = 3000;
+
+#endif
+
+
+void sendTestPacket()
+{
+    bool success =
+        CC1101Radio::sendPacket(
+            TX_MESSAGE,
+            sizeof(TX_MESSAGE)
+        );
+
+    if (success)
+    {
+        Serial.print("TX OK: ");
+
+        for (uint8_t i = 0; i < sizeof(TX_MESSAGE); i++)
+        {
+            Serial.write(TX_MESSAGE[i]);
+        }
+
+        Serial.println();
+    }
+    else
+    {
+        Serial.println("TX FAILED");
+    }
+
+
+    /*
+     * sendPacket() finishes in IDLE.
+     *
+     * Both devices should normally be listening,
+     * so immediately return the radio to RX.
+     */
+    if (!CC1101Radio::startReceive())
+    {
+        Serial.println("FAILED TO RETURN TO RX");
+        radioReady = false;
+    }
+}
+
+
+void checkForReceivedPacket()
+{
+    uint8_t buffer[32];
+    uint8_t length = 0;
+
+    if (
+        CC1101Radio::receivePacket(
+            buffer,
+            sizeof(buffer),
+            length
+        )
+    )
+    {
+        Serial.print("RX OK: ");
+
+        for (uint8_t i = 0; i < length; i++)
+        {
+            Serial.write(buffer[i]);
+        }
+
+        Serial.println();
+    }
+}
 
 
 void setup()
@@ -14,12 +107,14 @@ void setup()
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("CC1101 first one-way packet test");
+    Serial.println("CC1101 bidirectional packet test");
     Serial.println("========================================");
 
     Serial.printf("Device: %s\n", DEVICE_NAME);
 
+
     CC1101Radio::begin();
+
 
     Serial.println();
     Serial.println("Resetting CC1101...");
@@ -34,7 +129,7 @@ void setup()
 
 
     Serial.println();
-    Serial.println("Configuring 433.92 MHz packet radio...");
+    Serial.println("Configuring packet radio...");
 
     if (!CC1101Radio::configureForPacketTest())
     {
@@ -44,30 +139,26 @@ void setup()
 
     Serial.println("RADIO CONFIG OK");
 
-    radioReady = true;
-
-
-#ifdef DEVICE_BUBU
 
     Serial.println();
-    Serial.println("Role: TRANSMITTER");
-    Serial.println("Bubu will send a packet every 2 seconds.");
-
-#elif defined(DEVICE_DUDU)
-
-    Serial.println();
-    Serial.println("Role: RECEIVER");
+    Serial.println("Entering RX...");
 
     if (!CC1101Radio::startReceive())
     {
         Serial.println("FAILED TO ENTER RX");
-        radioReady = false;
         return;
     }
 
-    Serial.println("Dudu listening...");
+    Serial.println("RX OK");
 
-#endif
+
+    radioReady = true;
+
+    nextSendTime =
+        millis() + FIRST_SEND_DELAY_MS;
+
+    Serial.println();
+    Serial.println("Bidirectional test running...");
 }
 
 
@@ -79,65 +170,25 @@ void loop()
     }
 
 
-#ifdef DEVICE_BUBU
+    /*
+     * Most of the time both radios stay in RX
+     * and check whether a packet has arrived.
+     */
+    checkForReceivedPacket();
 
-    static unsigned long lastSend = 0;
 
-    if (millis() - lastSend >= 2000)
+    /*
+     * When this device's transmit slot arrives,
+     * temporarily leave RX, transmit, then go
+     * straight back into RX.
+     */
+    if ((long)(millis() - nextSendTime) >= 0)
     {
-        lastSend = millis();
+        sendTestPacket();
 
-        const uint8_t message[] =
-        {
-            'H', 'E', 'L', 'L', 'O',
-            ' ',
-            'D', 'U', 'D', 'U'
-        };
-
-        bool success =
-            CC1101Radio::sendPacket(
-                message,
-                sizeof(message)
-            );
-
-        if (success)
-        {
-            Serial.println("TX OK: HELLO DUDU");
-        }
-        else
-        {
-            Serial.println("TX FAILED");
-        }
+        nextSendTime += SEND_PERIOD_MS;
     }
 
-
-#elif defined(DEVICE_DUDU)
-
-    uint8_t buffer[32];
-
-    uint8_t length = 0;
-
-    if (
-        CC1101Radio::receivePacket(
-            buffer,
-            sizeof(buffer) - 1,
-            length
-        )
-    )
-    {
-        buffer[length] = '\0';
-
-        Serial.print("RX OK: ");
-
-        for (uint8_t i = 0; i < length; i++)
-        {
-            Serial.write(buffer[i]);
-        }
-
-        Serial.println();
-    }
 
     delay(5);
-
-#endif
 }
