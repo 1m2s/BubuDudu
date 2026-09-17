@@ -1,254 +1,273 @@
 #include <Arduino.h>
-#include <Wire.h>
+#include <SPI.h>
 
-#include "esp_sleep.h"
+// ============================================================
+// CC1101 <-> ESP32-C3 wiring
+// ============================================================
 
-#include "Config.h"
-#include "Motion.h"
-#include "LED.h"
-#include "Display.h"
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-
-// ======================================================
-// Hardware configuration
-// ======================================================
-
-constexpr uint8_t I2C_SDA_PIN = 0;
-constexpr uint8_t I2C_SCL_PIN = 1;
-
-constexpr gpio_num_t ADXL_INT_PIN = GPIO_NUM_3;
+constexpr uint8_t CC1101_CSN  = 10;
+constexpr uint8_t CC1101_SCK  = 6;
+constexpr uint8_t CC1101_MOSI = 7;
+constexpr uint8_t CC1101_MISO = 20;
 
 
-// ======================================================
-// Subsystems
-// ======================================================
+// ============================================================
+// CC1101 commands / addresses used in this test
+// ============================================================
 
-Motion motion;
-LED led;
-Display display;
+// IOCFG2 configuration register address
+constexpr uint8_t CC1101_IOCFG2_WRITE = 0x00;
+
+// Read bit added to address 0x00
+constexpr uint8_t CC1101_IOCFG2_READ = 0x80;
+
+// Status register reads
+constexpr uint8_t CC1101_PARTNUM_READ = 0xF0;
+constexpr uint8_t CC1101_VERSION_READ = 0xF1;
+
+// Reset command strobe
+constexpr uint8_t CC1101_SRES = 0x30;
 
 
-// ======================================================
-// System state
-// ======================================================
+// ============================================================
+// SPI settings
+// ============================================================
 
-// false -> normal startup
-// true  -> woke from deep sleep through GPIO3
-bool motionWakeBoot = false;
+SPISettings cc1101SPISettings(
+    100000,      // 100 kHz
+    MSBFIRST,
+    SPI_MODE0
+);
 
 
-// ======================================================
-// I2C scanner
+// ============================================================
+// Wait for CHIP_RDYn
 //
-// Temporary bring-up/debug tool.
-// ======================================================
+// With CSN LOW, CC1101 uses MISO/SO as CHIP_RDYn.
+// HIGH = not ready
+// LOW  = ready
+// ============================================================
 
-void scanI2C()
+bool waitForCC1101Ready(uint32_t timeoutUs)
 {
-    Serial.println();
-    Serial.println("Scanning I2C bus...");
-    Serial.println("-------------------");
+    uint32_t startTime = micros();
 
-    uint8_t deviceCount = 0;
-
-
-    for (
-        uint8_t address = 1;
-        address < 127;
-        address++
-    )
+    while (digitalRead(CC1101_MISO) == HIGH)
     {
-        Wire.beginTransmission(address);
-
-        uint8_t error =
-            Wire.endTransmission();
-
-
-        if (error == 0)
+        if (micros() - startTime >= timeoutUs)
         {
-            Serial.print(
-                "Found I2C device at 0x"
-            );
-
-
-            if (address < 0x10)
-            {
-                Serial.print("0");
-            }
-
-
-            Serial.println(
-                address,
-                HEX
-            );
-
-
-            deviceCount++;
+            return false;
         }
     }
 
-
-    Serial.println("-------------------");
-
-    Serial.print(
-        "Devices found: "
-    );
-
-    Serial.println(
-        deviceCount
-    );
-
-    Serial.println();
+    return true;
 }
 
 
-// ======================================================
-// LED FreeRTOS task
-// ======================================================
+// ============================================================
+// Start one normal CC1101 SPI transaction
+// ============================================================
 
-void ledTask(void *parameter)
+bool beginCC1101Transaction()
 {
-    while (true)
+    SPI.beginTransaction(cc1101SPISettings);
+
+    digitalWrite(CC1101_CSN, LOW);
+
+    if (!waitForCC1101Ready(5000))
     {
-        led.heartbeat();
+        digitalWrite(CC1101_CSN, HIGH);
+        SPI.endTransaction();
+
+        return false;
     }
+
+    return true;
 }
 
 
-// ======================================================
-// Enter deep sleep
-// ======================================================
+// ============================================================
+// End one normal CC1101 SPI transaction
+// ============================================================
 
-void enterDeepSleep()
+void endCC1101Transaction()
 {
-    Serial.println();
+    digitalWrite(CC1101_CSN, HIGH);
 
-    Serial.println(
-        ">>> ESP32 entering DEEP SLEEP"
-    );
-
-    Serial.println(
-        "Move device to wake it."
-    );
+    SPI.endTransaction();
+}
 
 
-    // --------------------------------------------------
-    // Stop normal awake interrupt handling.
-    // --------------------------------------------------
+// ============================================================
+// Write one CC1101 configuration register
+// ============================================================
 
-    motion.pauseInterrupt();
-
-
-    // --------------------------------------------------
-    // Movement may have happened between detecting
-    // inactivity and entering deep sleep.
-    // --------------------------------------------------
-
-    if (
-        digitalRead(
-            motion.getInterruptPin()
-        ) == HIGH
-    )
+bool writeCC1101Register(uint8_t address, uint8_t value)
+{
+    if (!beginCC1101Transaction())
     {
-        MotionEvent event =
-            motion.readPendingEvent();
+        return false;
+    }
+
+    SPI.transfer(address);
+    SPI.transfer(value);
+
+    endCC1101Transaction();
+
+    return true;
+}
 
 
-        Serial.println(
-            "Motion occurred before sleep."
-        );
+// ============================================================
+// Read one CC1101 register
+//
+// command is already the complete read command.
+// Examples:
+//
+// IOCFG2  -> 0x80
+// PARTNUM -> 0xF0
+// VERSION -> 0xF1
+// ============================================================
 
-        Serial.println(
-            "Deep sleep cancelled."
-        );
+bool readCC1101Register(uint8_t command, uint8_t &value)
+{
+    if (!beginCC1101Transaction())
+    {
+        return false;
+    }
+
+    SPI.transfer(command);
+
+    value = SPI.transfer(0x00);
+
+    endCC1101Transaction();
+
+    return true;
+}
 
 
-        if (
-            event == MotionEvent::Activity
-        )
-        {
-            Serial.println(
-                ">>> STATE: ACTIVE"
-            );
+// ============================================================
+// Manual CC1101 reset
+//
+// Datasheet sequence:
+//
+// 1. SCLK HIGH, SI LOW
+// 2. Pulse CSN LOW -> HIGH
+// 3. Wait at least 40 us
+// 4. CSN LOW
+// 5. Wait for SO / CHIP_RDYn LOW
+// 6. Send SRES = 0x30
+// 7. Wait for SO LOW again
+// 8. CSN HIGH
+// ============================================================
+
+bool resetCC1101()
+{
+    // Stop hardware SPI temporarily so we can manually
+    // control SCK and MOSI during the beginning of reset.
+    SPI.end();
+
+    pinMode(CC1101_CSN, OUTPUT);
+    pinMode(CC1101_SCK, OUTPUT);
+    pinMode(CC1101_MOSI, OUTPUT);
+    pinMode(CC1101_MISO, INPUT);
+
+    // Required starting levels
+    digitalWrite(CC1101_CSN, HIGH);
+    digitalWrite(CC1101_SCK, HIGH);
+    digitalWrite(CC1101_MOSI, LOW);
+
+    delayMicroseconds(5);
+
+    // CSN strobe
+    digitalWrite(CC1101_CSN, LOW);
+
+    delayMicroseconds(10);
+
+    digitalWrite(CC1101_CSN, HIGH);
+
+    // Datasheet requires >= 40 us
+    delayMicroseconds(50);
+
+    // Return control to hardware SPI
+    SPI.begin(
+        CC1101_SCK,
+        CC1101_MISO,
+        CC1101_MOSI,
+        CC1101_CSN
+    );
+
+    SPI.beginTransaction(cc1101SPISettings);
+
+    // Select CC1101
+    digitalWrite(CC1101_CSN, LOW);
+
+    // Wait until chip is ready for SRES
+    if (!waitForCC1101Ready(5000))
+    {
+        digitalWrite(CC1101_CSN, HIGH);
+        SPI.endTransaction();
+
+        return false;
+    }
+
+    // Send reset command strobe
+    SPI.transfer(CC1101_SRES);
+
+    // Keep CSN LOW and wait until reset is finished
+    if (!waitForCC1101Ready(5000))
+    {
+        digitalWrite(CC1101_CSN, HIGH);
+        SPI.endTransaction();
+
+        return false;
+    }
+
+    digitalWrite(CC1101_CSN, HIGH);
+
+    SPI.endTransaction();
+
+    return true;
+}
 
 
-            display.showStatus(
-                DEVICE_NAME,
-                true,
-                motionWakeBoot
-            );
-        }
+// ============================================================
+// Read and print CC1101 identity
+// ============================================================
 
+void printCC1101Identity()
+{
+    uint8_t iocfg2;
+    uint8_t partnum;
+    uint8_t version;
 
-        motion.resumeInterrupt();
+    bool iocfg2OK =
+        readCC1101Register(CC1101_IOCFG2_READ, iocfg2);
 
+    bool partnumOK =
+        readCC1101Register(CC1101_PARTNUM_READ, partnum);
+
+    bool versionOK =
+        readCC1101Register(CC1101_VERSION_READ, version);
+
+    if (!iocfg2OK || !partnumOK || !versionOK)
+    {
+        Serial.println("ERROR: CC1101 register read failed");
         return;
     }
 
-
-    // --------------------------------------------------
-    // GPIO3 deep-sleep wake mask
-    // --------------------------------------------------
-
-    uint64_t wakePinMask =
-        1ULL << ADXL_INT_PIN;
-
-
-    // --------------------------------------------------
-    // Wake when ADXL345 INT1 drives GPIO3 HIGH.
-    // --------------------------------------------------
-
-    esp_err_t result =
-        esp_deep_sleep_enable_gpio_wakeup(
-            wakePinMask,
-            ESP_GPIO_WAKEUP_GPIO_HIGH
-        );
-
-
-    if (result != ESP_OK)
-    {
-        Serial.println(
-            "ERROR: Could not configure deep-sleep wake."
-        );
-
-
-        motion.resumeInterrupt();
-
-        return;
-    }
-
-
-    // --------------------------------------------------
-    // Turn WS2812B off before deep sleep.
-    // --------------------------------------------------
-
-    Serial.println(
-        "Turning WS2812 off."
+    Serial.printf(
+        "IOCFG2: 0x%02X | PARTNUM: 0x%02X | VERSION: 0x%02X\n",
+        iocfg2,
+        partnum,
+        version
     );
-
-
-    led.off();
-
-
-    Serial.flush();
-
-
-    // ==================================================
-    // Deep sleep begins.
-    //
-    // This function does not return.
-    // ==================================================
-
-    esp_deep_sleep_start();
 }
 
 
-// ======================================================
-// setup
-// ======================================================
+// ============================================================
+// Setup
+// ============================================================
 
 void setup()
 {
@@ -256,259 +275,98 @@ void setup()
 
     delay(1000);
 
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("CC1101 SPI bring-up test");
+    Serial.println("========================================");
+
+    pinMode(CC1101_CSN, OUTPUT);
+
+    digitalWrite(CC1101_CSN, HIGH);
+
+    SPI.begin(
+        CC1101_SCK,
+        CC1101_MISO,
+        CC1101_MOSI,
+        CC1101_CSN
+    );
+
+
+    // --------------------------------------------------------
+    // TEST 1:
+    // Deliberately change IOCFG2 from 0x29 to 0x2E
+    // --------------------------------------------------------
 
     Serial.println();
+    Serial.println("TEST 1: Writing IOCFG2 = 0x2E");
 
-    Serial.println(
-        "BubuDudu subsystem integration test"
-    );
-
-    Serial.println(
-        "-----------------------------------"
-    );
-
-
-    // ==================================================
-    // LED
-    // ==================================================
-
-    led.begin();
-
-
-    // ==================================================
-    // Determine boot reason
-    // ==================================================
-
-    esp_sleep_wakeup_cause_t wakeCause =
-        esp_sleep_get_wakeup_cause();
-
-
-    motionWakeBoot =
-        (
-            wakeCause ==
-            ESP_SLEEP_WAKEUP_GPIO
-        );
-
-
-    if (
-        wakeCause ==
-        ESP_SLEEP_WAKEUP_UNDEFINED
-    )
+    if (!writeCC1101Register(
+            CC1101_IOCFG2_WRITE,
+            0x2E))
     {
-        Serial.println(
-            "Boot reason: NORMAL STARTUP"
-        );
+        Serial.println("ERROR: IOCFG2 write failed");
+        return;
     }
 
-    else if (
-        wakeCause ==
-        ESP_SLEEP_WAKEUP_GPIO
-    )
+
+    // Read it back
+    uint8_t beforeReset;
+
+    if (!readCC1101Register(
+            CC1101_IOCFG2_READ,
+            beforeReset))
     {
-        Serial.println(
-            "Boot reason: MOTION WAKE"
-        );
+        Serial.println("ERROR: IOCFG2 read failed");
+        return;
     }
 
+    Serial.printf(
+        "Before reset IOCFG2: 0x%02X\n",
+        beforeReset
+    );
+
+
+    // --------------------------------------------------------
+    // TEST 2:
+    // Perform SRES
+    // --------------------------------------------------------
+
+    Serial.println();
+    Serial.println("TEST 2: Sending SRES");
+
+    if (resetCC1101())
+    {
+        Serial.println("RESET OK");
+    }
     else
     {
-        Serial.print(
-            "Other wake reason: "
-        );
-
-        Serial.println(
-            (int)wakeCause
-        );
+        Serial.println("RESET ERROR");
+        return;
     }
 
 
-    // ==================================================
-    // Motion
-    //
-    // Motion currently owns initialization of the
-    // shared I2C bus:
-    //
-    // SDA -> GPIO0
-    // SCL -> GPIO1
-    // ==================================================
-
-    bool motionReady =
-        motion.begin(
-            I2C_SDA_PIN,
-            I2C_SCL_PIN,
-            (uint8_t)ADXL_INT_PIN
-        );
-
-
-    if (!motionReady)
-    {
-        Serial.println();
-
-        Serial.println(
-            "ERROR: ADXL345 not detected."
-        );
-
-
-        while (true)
-        {
-            delay(1000);
-        }
-    }
-
-
-    Serial.println(
-        "Motion subsystem ready."
-    );
-
-
-    // ==================================================
-    // Temporary shared I2C bus verification
-    //
-    // Expected:
-    // OLED    -> 0x3C
-    // ADXL345 -> 0x53
-    // ==================================================
-
-    scanI2C();
-
-
-    // ==================================================
-    // Display
-    //
-    // Display uses the already initialized I2C bus.
-    // ==================================================
-
-    bool displayReady =
-        display.begin();
-
-
-    if (!displayReady)
-    {
-        Serial.println(
-            "ERROR: Display initialization failed."
-        );
-
-
-        while (true)
-        {
-            delay(1000);
-        }
-    }
-
-
-    // ==================================================
-    // Initial status screen
-    // ==================================================
-
-    display.showStatus(
-        DEVICE_NAME,
-        true,
-        motionWakeBoot
-    );
-
-
-    // ==================================================
-    // Check event responsible for motion wake
-    // ==================================================
-
-    if (
-        wakeCause ==
-        ESP_SLEEP_WAKEUP_GPIO
-    )
-    {
-        MotionEvent wakeEvent =
-            motion.getStartupEvent();
-
-
-        if (
-            wakeEvent ==
-            MotionEvent::Activity
-        )
-        {
-            Serial.println(
-                "ADXL345 wake event: ACTIVITY"
-            );
-        }
-    }
-
+    // --------------------------------------------------------
+    // TEST 3:
+    // Read identity after reset
+    // --------------------------------------------------------
 
     Serial.println();
+    Serial.println("TEST 3: Identity after reset");
 
-    Serial.println(
-        ">>> STATE: ACTIVE"
-    );
+    printCC1101Identity();
 
     Serial.println();
-
-
-    // ==================================================
-    // Start LED FreeRTOS task
-    // ==================================================
-
-    xTaskCreate(
-        ledTask,
-        "LED Task",
-        2048,
-        nullptr,
-        1,
-        nullptr
-    );
+    Serial.println("Repeating identity every 2 seconds...");
 }
 
 
-// ======================================================
-// loop
-// ======================================================
+// ============================================================
+// Loop
+// ============================================================
 
 void loop()
 {
-    MotionEvent event =
-        motion.getEvent();
+    printCC1101Identity();
 
-
-    // ==================================================
-    // Activity
-    // ==================================================
-
-    if (
-        event ==
-        MotionEvent::Activity
-    )
-    {
-        Serial.println(
-            ">>> STATE: ACTIVE"
-        );
-
-
-        display.showStatus(
-            DEVICE_NAME,
-            true,
-            motionWakeBoot
-        );
-    }
-
-
-    // ==================================================
-    // Inactivity
-    // ==================================================
-
-    else if (
-        event ==
-        MotionEvent::Inactivity
-    )
-    {
-        Serial.println(
-            ">>> STATE: INACTIVE"
-        );
-
-
-        display.showStatus(
-            DEVICE_NAME,
-            false,
-            motionWakeBoot
-        );
-
-
-        enterDeepSleep();
-    }
+    delay(2000);
 }
