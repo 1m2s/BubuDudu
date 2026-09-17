@@ -12,4 +12,18 @@ namespace CC1101Radio
 
     uint8_t readPartNumber();
     uint8_t readVersion();
+
+    bool setFrequency433_92MHz();
+
+    bool configureForPacketTest();
+
+    bool sendPacket(const uint8_t* data, uint8_t length);
+
+    bool startReceive();
+
+    bool receivePacket(
+        uint8_t* buffer,
+        uint8_t maxLength,
+        uint8_t& receivedLength
+    );
 }
