@@ -56,6 +56,14 @@ namespace
 
 
     // ======================================================
+    // Application receive handler
+    // ======================================================
+
+    ESPNowRadio::ReceiveHandler applicationReceiveHandler =
+        nullptr;
+
+
+    // ======================================================
     // Print MAC address
     // ======================================================
 
@@ -126,57 +134,37 @@ namespace
     )
     {
         Serial.print(
-            "RX | from="
+            "ESP-NOW RX | from="
         );
 
         printMacAddress(
             macAddress
         );
 
-        Serial.print(
-            " | data="
+        Serial.printf(
+            " | bytes=%d\n",
+            length
         );
 
 
         /*
-         * Temporary text test only.
+         * ESPNowRadio does NOT interpret the packet.
          *
-         * Copy the received bytes into a local character
-         * buffer and add our own string terminator.
+         * It simply passes the bytes upward to whoever
+         * registered the receive handler.
          */
-        char text[64];
-
-
-        int copyLength =
-            length;
-
-
         if (
-            copyLength >=
-            static_cast<int>(
-                sizeof(text)
-            )
+            applicationReceiveHandler !=
+            nullptr
         )
         {
-            copyLength =
-                sizeof(text) - 1;
+            applicationReceiveHandler(
+                data,
+                static_cast<size_t>(
+                    length
+                )
+            );
         }
-
-
-        memcpy(
-            text,
-            data,
-            copyLength
-        );
-
-
-        text[copyLength] =
-            '\0';
-
-
-        Serial.println(
-            text
-        );
     }
 }
 
@@ -187,8 +175,14 @@ namespace
 
 namespace ESPNowRadio
 {
-    bool begin()
+    bool begin(
+        ReceiveHandler receiveHandler
+    )
     {
+        applicationReceiveHandler =
+            receiveHandler;
+
+
         Serial.println();
         Serial.println(
             "========================================"
@@ -217,42 +211,46 @@ namespace ESPNowRadio
             WIFI_STA
         );
 
-    // ESP32-C3 Super Mini radio workaround.
-    //
-    // This hardware previously showed unreliable ESP-NOW
-    // operation at the default Wi-Fi settings.
-    //
-    // Keep the receiver awake and reduce TX power.
-    if (!WiFi.setSleep(false))
-    {
-        Serial.println(
-            "FAILED TO DISABLE WIFI SLEEP"
-        );
-
-        return false;
-    }
-
-
-    if (!WiFi.setTxPower(WIFI_POWER_8_5dBm))
-    {
-        Serial.println(
-            "FAILED TO SET WIFI TX POWER"
-        );
-
-        return false;
-    }
-
-
-    Serial.println(
-        "Wi-Fi sleep: disabled"
-    );
-
-    Serial.println(
-        "Wi-Fi TX power: 8.5 dBm"
-    );
 
         // --------------------------------------------------
-        // Both devices use Wi-Fi channel 1.
+        // Proven ESP32-C3 Super Mini configuration.
+        // --------------------------------------------------
+
+        if (!WiFi.setSleep(false))
+        {
+            Serial.println(
+                "FAILED TO DISABLE WIFI SLEEP"
+            );
+
+            return false;
+        }
+
+
+        if (
+            !WiFi.setTxPower(
+                WIFI_POWER_8_5dBm
+            )
+        )
+        {
+            Serial.println(
+                "FAILED TO SET WIFI TX POWER"
+            );
+
+            return false;
+        }
+
+
+        Serial.println(
+            "Wi-Fi sleep: disabled"
+        );
+
+        Serial.println(
+            "Wi-Fi TX power: 8.5 dBm"
+        );
+
+
+        // --------------------------------------------------
+        // Both devices use channel 1.
         // --------------------------------------------------
 
         esp_err_t channelResult =
@@ -349,7 +347,7 @@ namespace ESPNowRadio
 
 
         // --------------------------------------------------
-        // Register callbacks.
+        // Register ESP-NOW callbacks.
         // --------------------------------------------------
 
         if (
@@ -386,7 +384,7 @@ namespace ESPNowRadio
 
 
         // --------------------------------------------------
-        // Register opposite device as peer.
+        // Register opposite BubuDudu device.
         // --------------------------------------------------
 
         esp_now_peer_info_t peerInfo = {};
@@ -452,23 +450,18 @@ namespace ESPNowRadio
 
 
     // ======================================================
-    // Send temporary text payload
+    // Send raw bytes
     // ======================================================
 
-    bool sendText(
-        const char* text
+    bool send(
+        const uint8_t* data,
+        size_t length
     )
     {
-        size_t length =
-            strlen(text) + 1;
-
-
         esp_err_t result =
             esp_now_send(
                 PEER_MAC,
-                reinterpret_cast<const uint8_t*>(
-                    text
-                ),
+                data,
                 length
             );
 
