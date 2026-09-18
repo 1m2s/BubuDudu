@@ -121,3 +121,83 @@ Hardware validation confirmed both devices operate simultaneously:
 - ADXL345 detected at `0x53`
 - OLED text output works while the ADXL345 motion subsystem remains operational
 - No additional ESP32-C3 GPIO pins are required for the OLED
+
+### CC1101 433 MHz Radio
+
+\| CC1101 Signal | ESP32-C3 Connection | Status | Purpose |
+
+\| -------------- | -------------------- | ------ | ------- |
+
+\| SCK | GPIO6 | ✅ Validated | SPI clock |
+
+\| MOSI | GPIO7 | ✅ Validated | SPI data from ESP32 to CC1101 |
+
+\| MISO | GPIO20 | ✅ Validated | SPI data from CC1101 to ESP32 |
+
+\| CSN | GPIO10 | ✅ Validated | Active-low SPI chip select |
+
+\| VCC | 3.3 V | ✅ Validated | Radio power supply |
+
+\| GND | Common GND | ✅ Validated | Ground reference |
+
+\| GDO0 | Not connected | ⏸️ Unused | Optional radio interrupt/event output |
+
+\| GDO2 | Not connected | ⏸️ Unused | Optional radio interrupt/event output |
+
+Operating frequency: `433.92 MHz`
+
+SPI clock: `100 kHz`
+
+SPI mode: `Mode 0`
+
+Bit order: `MSB first`
+
+The CC1101 uses the following SPI connections:
+
+\- GPIO6 → SCK
+
+\- GPIO7 → MOSI
+
+\- GPIO20 → MISO
+
+\- GPIO10 → CSN
+
+#### Validation notes
+
+\- GPIO6, GPIO7, GPIO20 and GPIO10 successfully communicate with the CC1101 over SPI.
+
+\- The CC1101 reset sequence was successfully validated on both Bubu and Dudu.
+
+\- CC1101 identification registers were successfully read after reset.
+
+\- Both radios were successfully configured for operation at `433.92 MHz`.
+
+\- Bidirectional packet transmission was successfully validated between Bubu and Dudu.
+
+\- Structured `Protocol::Message` packets were successfully transmitted over the CC1101 link.
+
+\- Application-level EVENT and ACK messages were successfully transmitted in both directions.
+
+\- Message IDs and ACK matching were successfully validated.
+
+\- A `300 ms` application ACK timeout was implemented and tested.
+
+\- A maximum of two retries is used when an ACK is not received.
+
+\- Retries reuse the same message ID so the retransmission represents the same logical event.
+
+\- Duplicate EVENT packets are detected and are not processed twice.
+
+\- Duplicate EVENT packets are still ACKed again so the sender can recover when a previous ACK was lost.
+
+\- Peer online/offline behaviour and recovery after communication returns were successfully tested.
+
+\- CC1101 communication was moved into a dedicated FreeRTOS `RadioTask`.
+
+\- The current `RadioTask` is intended to be the sole owner of the CC1101 hardware.
+
+\- GDO0 and GDO2 are currently not required because the existing driver polls CC1101 radio state and FIFO status through SPI.
+
+\- GPIO4 was originally reserved for a CC1101 GDO connection but is currently unused.
+
+\- GPIO6, GPIO7, GPIO10 and GPIO20 should now be treated as reserved for the CC1101 communication subsystem.
