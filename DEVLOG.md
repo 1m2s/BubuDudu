@@ -895,3 +895,158 @@ First milestone:
 Do not mix CC1101 fallback, proximity, deep-sleep discovery, queues or full-system integration into the initial ESP-NOW bring-up.
 
 Also revisit today's FreeRTOS queue work before eventually using it in the final architecture.
+
+## 2026-09-18
+
+### Completed
+
+- Continued development on the clean `feature/espnow` branch.
+
+- Created a dedicated ESP-NOW transport module:
+
+  - `include/ESPNowRadio.h`
+  - `src/ESPNowRadio.cpp`
+
+- Configured both ESP32-C3 devices for ESP-NOW communication using:
+
+  - Wi-Fi station mode
+  - Wi-Fi channel 1
+  - fixed Bubu/Dudu peer MAC addresses
+
+- Verified the device MAC addresses:
+
+  - Bubu: `E8:F6:0A:12:4C:A4`
+  - Dudu: `E8:F6:0A:12:5B:84`
+
+- Successfully initialized ESP-NOW and registered the opposite device as a peer on both Bubu and Dudu.
+
+- Initially observed repeated ESP-NOW transmission failures even though initialization, peer registration and channel configuration were correct.
+
+- Reapplied the previously discovered ESP32-C3 Super Mini radio workaround:
+
+  - disabled Wi-Fi sleep
+  - reduced Wi-Fi TX power to `8.5 dBm`
+
+- Confirmed that ESP-NOW communication became reliable after applying this configuration.
+
+- Verified simple bidirectional communication:
+
+  - Bubu → Dudu
+  - Dudu → Bubu
+
+- Verified simultaneous / overlapping bidirectional ESP-NOW traffic.
+
+- Replaced temporary text packets with the existing packed `Protocol::Message`.
+
+- Confirmed that the existing 8-byte BubuDudu application protocol can be transported correctly over ESP-NOW.
+
+- Implemented and validated application-level reliability over ESP-NOW:
+
+  - EVENT messages
+  - message IDs
+  - ACK generation
+  - ACK matching
+  - 300 ms ACK timeout
+  - maximum 2 retries
+  - retries reuse the same message ID
+  - duplicate EVENT detection
+  - duplicate EVENTs are not processed twice
+  - duplicate EVENTs still receive another ACK
+  - communication failure when a peer is unavailable
+  - automatic recovery when the peer returns
+
+- Deliberately dropped an ACK during testing to force a retransmission.
+
+- Confirmed that the receiver detected the retransmitted EVENT as a duplicate, ignored the duplicate application event and sent another ACK.
+
+- Confirmed experimentally that an ESP-NOW send callback reporting `SUCCESS` does not guarantee that the BubuDudu application ACK was received.
+
+- Observed a real case where the ESP-NOW send callback succeeded but the application ACK timed out, proving why the application-level reliability layer is still required.
+
+- Confirmed that when a peer is unavailable the sender correctly performs:
+
+  - ACK timeout
+  - retry 1/2
+  - retry 2/2
+  - give up after retries are exhausted
+
+- Confirmed communication automatically resumes after the peer becomes available again.
+
+- Updated the CC1101 pin-map documentation to match the physically validated hardware.
+
+- Confirmed the validated CC1101 SPI connections:
+
+  - GPIO6 → SCK
+  - GPIO7 → MOSI
+  - GPIO20 → MISO
+  - GPIO10 → CSN
+
+- Updated the documentation to reflect that CC1101 GDO0/GDO2 are currently unused.
+
+- GPIO4 was therefore released from the original theoretical CC1101 GDO assignment and is currently available for future use.
+
+### Important debugging lesson
+
+The ESP-NOW bring-up reinforced that a communication system can fail even when the higher-level software configuration appears correct.
+
+ESP-NOW initialization succeeded, the correct peer MAC addresses were registered and both boards were using the same Wi-Fi channel, yet the actual transmissions initially failed.
+
+The problem was related to the previously observed behavior of the ESP32-C3 Super Mini radio.
+
+The working configuration was:
+
+- Wi-Fi sleep disabled
+- Wi-Fi TX power reduced to `8.5 dBm`
+
+This was a useful reminder that successful initialization does not necessarily mean the complete physical communication path is working.
+
+Another important result was proving that:
+
+`ESP-NOW send callback SUCCESS != application message delivered successfully`
+
+The ESP-NOW callback only confirms the result of the lower-level transmission attempt.
+
+The BubuDudu application ACK is still necessary to confirm that the remote application actually received and processed the message.
+
+This directly justifies keeping message IDs, application ACKs, timeout handling, retries and duplicate detection above the radio transport.
+
+### Architecture decision
+
+Both BubuDudu communication technologies have now been independently proven.
+
+The current long-term communication architecture is intended to become:
+
+```text
+Application
+    ↓
+Communication / reliability
+    ↓
+Protocol::Message
+    ↓
+┌─────────────┬─────────────┐
+ESPNowRadio   CC1101Radio
+primary       secondary
+
+ESP-NOW will normally be the primary communication method.
+
+CC1101 will eventually act as a secondary / fallback radio when ESP-NOW communication cannot be confirmed.
+
+The intended failover behaviour is:
+
+Send EVENT over ESP-NOW
+        ↓
+Wait for application ACK
+        ↓
+ACK received?
+   ↓ yes              ↓ no
+remain ESP-NOW     retry ESP-NOW
+                       ↓
+                 retries exhausted
+                       ↓
+                 test CC1101 link
+                       ↓
+                  CC1101 available
+                       ↓
+              resend same logical EVENT
+                       ↓
+              use CC1101 as fallback
