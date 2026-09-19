@@ -900,153 +900,220 @@ Also revisit today's FreeRTOS queue work before eventually using it in the final
 
 ### Completed
 
-- Continued development on the clean `feature/espnow` branch.
+* Continued development on the clean `feature/espnow` branch.
+* Created a dedicated ESP-NOW transport module:
 
-- Created a dedicated ESP-NOW transport module:
+  * `include/ESPNowRadio.h`
+  * `src/ESPNowRadio.cpp`
+* Configured both ESP32-C3 devices for ESP-NOW communication using:
 
-  - `include/ESPNowRadio.h`
-  - `src/ESPNowRadio.cpp`
+  * Wi-Fi station mode
+  * Wi-Fi channel 1
+  * Fixed Bubu/Dudu peer MAC addresses
+* Verified the device MAC addresses:
 
-- Configured both ESP32-C3 devices for ESP-NOW communication using:
+  * Bubu: `E8:F6:0A:12:4C:A4`
+  * Dudu: `E8:F6:0A:12:5B:84`
+* Successfully initialized ESP-NOW and registered the opposite device as a peer on both Bubu and Dudu.
+* Initially observed repeated ESP-NOW transmission failures despite correct initialization, peer registration, and channel configuration.
+* Reapplied the previously discovered ESP32-C3 Super Mini radio workaround:
 
-  - Wi-Fi station mode
-  - Wi-Fi channel 1
-  - fixed Bubu/Dudu peer MAC addresses
+  * Disabled Wi-Fi sleep.
+  * Reduced Wi-Fi TX power to `8.5 dBm`.
+* Confirmed that ESP-NOW communication became reliable after applying this configuration.
+* Verified bidirectional communication:
 
-- Verified the device MAC addresses:
+  * Bubu → Dudu
+  * Dudu → Bubu
+* Verified simultaneous and overlapping bidirectional ESP-NOW traffic.
+* Replaced temporary text packets with the existing packed `Protocol::Message`.
+* Confirmed that the existing 8-byte BubuDudu application protocol can be transported correctly over ESP-NOW.
+* Implemented and validated application-level reliability:
 
-  - Bubu: `E8:F6:0A:12:4C:A4`
-  - Dudu: `E8:F6:0A:12:5B:84`
+  * EVENT messages
+  * Message IDs
+  * ACK generation and matching
+  * 300 ms ACK timeout
+  * Maximum 2 retries
+  * Retries reuse the original message ID
+  * Duplicate EVENT detection
+  * Duplicate EVENTs are not processed twice
+  * Duplicate EVENTs still receive another ACK
+  * Communication failure detection when the peer is unavailable
+  * Automatic communication recovery when the peer returns
+* Deliberately dropped an ACK during testing to force a retransmission.
+* Confirmed that the receiver recognized the retransmitted EVENT as a duplicate, ignored the duplicate application event, and transmitted another ACK.
+* Confirmed experimentally that an ESP-NOW send callback reporting `SUCCESS` does not guarantee that the BubuDudu application ACK was received.
+* Observed a real case where the ESP-NOW send callback succeeded but the application ACK timed out.
+* Confirmed that an unavailable peer causes:
 
-- Successfully initialized ESP-NOW and registered the opposite device as a peer on both Bubu and Dudu.
+  * ACK timeout
+  * Retry 1/2
+  * Retry 2/2
+  * Failure after retries are exhausted
+* Confirmed that communication resumes after the peer becomes available again.
+* Updated CC1101 pin-map documentation to match the physically validated hardware.
+* Confirmed the CC1101 SPI connections:
 
-- Initially observed repeated ESP-NOW transmission failures even though initialization, peer registration and channel configuration were correct.
+  * GPIO6 → SCK
+  * GPIO7 → MOSI
+  * GPIO20 → MISO
+  * GPIO10 → CSN
+* Documented that CC1101 GDO0/GDO2 are currently unused.
+* Released GPIO4 from its original theoretical CC1101 GDO assignment for possible future use.
 
-- Reapplied the previously discovered ESP32-C3 Super Mini radio workaround:
+### Important Debugging Lesson
 
-  - disabled Wi-Fi sleep
-  - reduced Wi-Fi TX power to `8.5 dBm`
+The ESP-NOW bring-up reinforced that a communication system can fail even when its higher-level software configuration appears correct.
 
-- Confirmed that ESP-NOW communication became reliable after applying this configuration.
-
-- Verified simple bidirectional communication:
-
-  - Bubu → Dudu
-  - Dudu → Bubu
-
-- Verified simultaneous / overlapping bidirectional ESP-NOW traffic.
-
-- Replaced temporary text packets with the existing packed `Protocol::Message`.
-
-- Confirmed that the existing 8-byte BubuDudu application protocol can be transported correctly over ESP-NOW.
-
-- Implemented and validated application-level reliability over ESP-NOW:
-
-  - EVENT messages
-  - message IDs
-  - ACK generation
-  - ACK matching
-  - 300 ms ACK timeout
-  - maximum 2 retries
-  - retries reuse the same message ID
-  - duplicate EVENT detection
-  - duplicate EVENTs are not processed twice
-  - duplicate EVENTs still receive another ACK
-  - communication failure when a peer is unavailable
-  - automatic recovery when the peer returns
-
-- Deliberately dropped an ACK during testing to force a retransmission.
-
-- Confirmed that the receiver detected the retransmitted EVENT as a duplicate, ignored the duplicate application event and sent another ACK.
-
-- Confirmed experimentally that an ESP-NOW send callback reporting `SUCCESS` does not guarantee that the BubuDudu application ACK was received.
-
-- Observed a real case where the ESP-NOW send callback succeeded but the application ACK timed out, proving why the application-level reliability layer is still required.
-
-- Confirmed that when a peer is unavailable the sender correctly performs:
-
-  - ACK timeout
-  - retry 1/2
-  - retry 2/2
-  - give up after retries are exhausted
-
-- Confirmed communication automatically resumes after the peer becomes available again.
-
-- Updated the CC1101 pin-map documentation to match the physically validated hardware.
-
-- Confirmed the validated CC1101 SPI connections:
-
-  - GPIO6 → SCK
-  - GPIO7 → MOSI
-  - GPIO20 → MISO
-  - GPIO10 → CSN
-
-- Updated the documentation to reflect that CC1101 GDO0/GDO2 are currently unused.
-
-- GPIO4 was therefore released from the original theoretical CC1101 GDO assignment and is currently available for future use.
-
-### Important debugging lesson
-
-The ESP-NOW bring-up reinforced that a communication system can fail even when the higher-level software configuration appears correct.
-
-ESP-NOW initialization succeeded, the correct peer MAC addresses were registered and both boards were using the same Wi-Fi channel, yet the actual transmissions initially failed.
+ESP-NOW initialization succeeded, the correct peer MAC addresses were registered, and both boards were using the same Wi-Fi channel. Nevertheless, the actual transmissions initially failed.
 
 The problem was related to the previously observed behavior of the ESP32-C3 Super Mini radio.
 
 The working configuration was:
 
-- Wi-Fi sleep disabled
-- Wi-Fi TX power reduced to `8.5 dBm`
+* Wi-Fi sleep disabled.
+* Wi-Fi TX power reduced to `8.5 dBm`.
 
-This was a useful reminder that successful initialization does not necessarily mean the complete physical communication path is working.
+Successful initialization does not necessarily mean the complete physical communication path is functioning.
 
 Another important result was proving that:
 
 `ESP-NOW send callback SUCCESS != application message delivered successfully`
 
-The ESP-NOW callback only confirms the result of the lower-level transmission attempt.
+The ESP-NOW callback reports the result of the lower-level transmission attempt.
 
-The BubuDudu application ACK is still necessary to confirm that the remote application actually received and processed the message.
+The BubuDudu application ACK is still necessary to confirm that the remote application received and processed the message.
 
-This directly justifies keeping message IDs, application ACKs, timeout handling, retries and duplicate detection above the radio transport.
+This justifies keeping message IDs, application ACKs, timeout handling, retries, and duplicate detection above the radio transport.
 
-### Architecture decision
+### Architecture Decision
 
 Both BubuDudu communication technologies have now been independently proven.
 
-The current long-term communication architecture is intended to become:
+The intended long-term communication architecture is:
 
 ```text
 Application
-    ↓
-Communication / reliability
-    ↓
+    |
+    v
+Shared communication / reliability layer
+    |
+    v
 Protocol::Message
-    ↓
-┌─────────────┬─────────────┐
-ESPNowRadio   CC1101Radio
-primary       secondary
+    |
+    +-------------------+
+    |                   |
+    v                   v
+ESPNowRadio         CC1101Radio
+Primary             Secondary / fallback
+```
 
 ESP-NOW will normally be the primary communication method.
 
-CC1101 will eventually act as a secondary / fallback radio when ESP-NOW communication cannot be confirmed.
+CC1101 will eventually act as a secondary or fallback radio when ESP-NOW communication cannot be confirmed.
 
-The intended failover behaviour is:
+The intended failover behavior is:
 
+```text
 Send EVENT over ESP-NOW
-        ↓
+          |
+          v
 Wait for application ACK
-        ↓
-ACK received?
-   ↓ yes              ↓ no
-remain ESP-NOW     retry ESP-NOW
-                       ↓
-                 retries exhausted
-                       ↓
-                 test CC1101 link
-                       ↓
-                  CC1101 available
-                       ↓
-              resend same logical EVENT
-                       ↓
-              use CC1101 as fallback
+          |
+          v
+    ACK received?
+       /     \
+     YES      NO
+      |        |
+      v        v
+   Continue   Retry ESP-NOW
+   ESP-NOW         |
+                   v
+             Retries exhausted
+                   |
+                   v
+             Test CC1101 link
+                   |
+                   v
+             CC1101 available
+                   |
+                   v
+          Resend same logical EVENT
+                   |
+                   v
+           Use CC1101 as fallback
+```
+
+This architecture remains a future integration target. The two radio implementations should remain independent until the battery and power subsystem is ready.
+
+
+
+## 2026-09-19
+
+### Completed
+
+* Paused further ESP-NOW and CC1101 integration to focus on the BubuDudu battery and power subsystem.
+* Established the proposed single-cell 18650 battery architecture using the existing TP4056-style charging/protection modules.
+* Confirmed that the charger/protection module does not provide a regulated 5 V output.
+* Began designing an analog battery indicator using the LM358P and resistor networks.
+* Built and tested a battery-voltage sensing circuit in Falstad.
+* Implemented a 100kΩ / 47kΩ voltage divider to scale VBAT into a suitable sensing voltage.
+* Verified the voltage-divider behavior at different simulated battery voltages.
+* Implemented two comparator stages with simulated 1.1 V and 1.2 V reference voltages.
+* Implemented three battery indication states:
+
+  * LOW: below approximately 3.44 V.
+  * MEDIUM: approximately 3.44–3.75 V.
+  * GOOD: above approximately 3.75 V.
+* Implemented an active-LOW warning LED using the lower comparator output.
+* Added NOT and AND logic to create mutually exclusive battery indications.
+* Verified that exactly one of the three indicator LEDs illuminates at representative battery voltages.
+* Experimented with positive feedback resistors to investigate comparator hysteresis.
+* Decided to defer hysteresis and retain the simpler, working three-state indicator as the current simulation baseline.
+
+### Current Working State
+
+ESP-NOW remains validated with bidirectional messaging, application ACKs, 300 ms timeouts, limited retries, duplicate detection, and recovery after peer restart.
+
+CC1101 remains independently validated with equivalent reliability behavior.
+
+The battery indicator is functionally validated in an idealized Falstad simulation.
+
+No physical battery-power circuit has been assembled yet.
+
+### Files
+
+* `DEVLOG.md` — documented the battery indicator simulation and design decisions.
+* `simulations/battery_indicator_v1.txt` — Falstad circuit export for the working three-state battery indicator.
+
+### Hardware Changes
+
+None. All battery-indicator development was performed in simulation.
+
+### Problems and Design Decisions
+
+* Identified that the TP4056-style module's OUT voltage follows the battery voltage rather than providing regulated 5 V.
+* Used independent reference sources for the initial comparator simulation.
+* Identified that actual LM358P output limitations must be considered before physical implementation.
+* Investigated hysteresis but deferred its final implementation.
+* Preserved the working indicator design rather than introducing additional complexity before hardware validation.
+
+### Known Issues
+
+* The simulated circuit uses ideal reference voltages and idealized 0–5 V comparator outputs.
+* NOT and AND gates are currently ideal simulation components.
+* Actual voltage-reference generation has not been designed.
+* The ESP32-C3 battery power path has not been electrically validated.
+* Battery charging, undervoltage protection, current consumption, and runtime have not yet been measured.
+* Hardware UVLO and MOSFET power gating remain future work.
+
+### Next Step
+
+Design and verify the actual single-cell 18650 power path for the ESP32-C3 Super Mini.
+
+Determine the safe power-input requirements, account for the TP4056 protection-board output, and identify which existing components can be used without adding an unnecessary boost converter.
+
+Once the power architecture is established, adapt the battery sensing and indication design to the real LM358P and available components.
+
+Do not connect the battery to the ESP32 until the power path and polarity have been verified.
