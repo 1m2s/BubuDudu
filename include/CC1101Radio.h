@@ -21,7 +21,15 @@ namespace CC1101Radio
 
     bool startReceive();
 
-    bool receivePacket(
+    struct ReceiveResult
+    {
+        bool packetReceived;
+        // False requires recovery, even if packetReceived is true.
+        // True also allows normal in-progress RX state transitions.
+        bool rxReady;
+    };
+
+    ReceiveResult receivePacket(
         uint8_t* buffer,
         uint8_t maxLength,
         uint8_t& receivedLength

@@ -96,6 +96,76 @@ namespace
 
     TaskHandle_t radioTaskHandle = nullptr;
 
+    // Only RadioTask owns this state and performs recovery.
+    enum class RadioState { Ready, Recovering, Fault };
+    RadioState radioState = RadioState::Ready;
+    constexpr uint8_t MAX_RECOVERY_ATTEMPTS = 3;
+    constexpr unsigned long RECOVERY_INTERVAL_MS = 250;
+    uint8_t recoveryAttempts = 0;
+    unsigned long lastRecoveryAttempt = 0;
+
+
+    bool initializeRadio()
+    {
+        if (!CC1101Radio::reset())
+        {
+            Serial.println("RADIO: reset failed");
+            return false;
+        }
+        if (!CC1101Radio::configureForPacketTest())
+        {
+            Serial.println("RADIO: configuration failed");
+            return false;
+        }
+        if (!CC1101Radio::startReceive())
+        {
+            Serial.println("RADIO: RX start failed");
+            return false;
+        }
+        return true;
+    }
+
+
+    void requestRecovery(const char* reason)
+    {
+        // Repeated failures during the same episode must not reset its budget.
+        if (radioState != RadioState::Ready)
+        {
+            return;
+        }
+        Serial.printf("RADIO RECOVERY REQUIRED: %s\n", reason);
+        radioState = RadioState::Recovering;
+        recoveryAttempts = 0;
+        lastRecoveryAttempt = millis();
+    }
+
+
+    void handleRadioRecovery()
+    {
+        if (radioState != RadioState::Recovering ||
+            millis() - lastRecoveryAttempt < RECOVERY_INTERVAL_MS)
+        {
+            return;
+        }
+
+        ++recoveryAttempts;
+        Serial.printf("RADIO RECOVERY: attempt %u/%u\n",
+                      recoveryAttempts, MAX_RECOVERY_ATTEMPTS);
+        // Reset only the radio hardware. Keep pending IDs and duplicate history.
+        if (initializeRadio())
+        {
+            radioState = RadioState::Ready;
+            Serial.println("RADIO RECOVERY SUCCEEDED: RX ready");
+        }
+        else if (recoveryAttempts >= MAX_RECOVERY_ATTEMPTS)
+        {
+            radioState = RadioState::Fault;
+            Serial.println("RADIO PERSISTENT FAULT: recovery exhausted; "
+                           "radio I/O stopped until device restart");
+        }
+        lastRecoveryAttempt = millis();
+    }
+
 
     // ========================================================
     // Helpers
@@ -161,6 +231,12 @@ namespace
         const Protocol::Message& message
     )
     {
+        if (radioState != RadioState::Ready)
+        {
+            // Do not bypass recovery or its attempt limit with a TX attempt.
+            return false;
+        }
+
         const uint8_t* bytes =
             reinterpret_cast<const uint8_t*>(
                 &message
@@ -182,14 +258,10 @@ namespace
          */
         if (!CC1101Radio::startReceive())
         {
-            Serial.println(
-                "RADIO ERROR: failed to return to RX"
-            );
-
-            return false;
+            requestRecovery("RX restart after TX failed");
         }
 
-
+        // TX completion and subsequent RX readiness are independent.
         return transmitted;
     }
 
@@ -451,18 +523,28 @@ namespace
 
     void handleIncomingMessage()
     {
+        if (radioState != RadioState::Ready)
+        {
+            return;
+        }
+
         uint8_t buffer[32];
 
         uint8_t length = 0;
 
 
-        if (
-            !CC1101Radio::receivePacket(
+        const CC1101Radio::ReceiveResult result =
+            CC1101Radio::receivePacket(
                 buffer,
                 sizeof(buffer),
                 length
-            )
-        )
+            );
+        if (!result.rxReady)
+        {
+            requestRecovery("receive poll/RX restart failed");
+        }
+        // A copied packet remains valid even if its RX restart failed.
+        if (!result.packetReceived)
         {
             return;
         }
@@ -693,71 +775,14 @@ namespace
         // CC1101 initialization
         // ----------------------------------------------------
 
-        CC1101Radio::begin();
-
-
-        if (!CC1101Radio::reset())
+        if (!CC1101Radio::begin() || !initializeRadio())
         {
-            Serial.println(
-                "RADIO TASK: RESET FAILED"
-            );
-
-
-            radioTaskHandle = nullptr;
-
-            vTaskDelete(nullptr);
-
-            return;
+            requestRecovery("initialization failed");
         }
-
-
-        Serial.println(
-            "RESET OK"
-        );
-
-
-        if (
-            !CC1101Radio::configureForPacketTest()
-        )
+        else
         {
-            Serial.println(
-                "RADIO TASK: CONFIG FAILED"
-            );
-
-
-            radioTaskHandle = nullptr;
-
-            vTaskDelete(nullptr);
-
-            return;
+            Serial.println("RADIO CONFIG OK | RX OK");
         }
-
-
-        Serial.println(
-            "RADIO CONFIG OK"
-        );
-
-
-        if (
-            !CC1101Radio::startReceive()
-        )
-        {
-            Serial.println(
-                "RADIO TASK: FAILED TO ENTER RX"
-            );
-
-
-            radioTaskHandle = nullptr;
-
-            vTaskDelete(nullptr);
-
-            return;
-        }
-
-
-        Serial.println(
-            "RX OK"
-        );
 
 
         nextEventTime =
@@ -777,6 +802,7 @@ namespace
 
         while (true)
         {
+            handleRadioRecovery();
             handleIncomingMessage();
 
 
@@ -784,9 +810,14 @@ namespace
 
 
             handlePeerAvailability();
+            if (radioState == RadioState::Fault)
+            {
+                setPeerOnline(false);
+            }
 
 
             if (
+                radioState == RadioState::Ready &&
                 !waitingForAck &&
                 (long)(
                     millis() -

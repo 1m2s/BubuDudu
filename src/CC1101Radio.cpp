@@ -106,6 +106,9 @@ namespace
             {
                 return false;
             }
+
+            // A disconnected radio must not busy-spin the owning task.
+            delay(1);
         }
 
         return true;
@@ -472,6 +475,10 @@ namespace CC1101Radio
             readRegister(MDMCFG4) == 0xCA &&
             readRegister(MDMCFG3) == 0x83 &&
             readRegister(MDMCFG2) == 0x13 &&
+            readRegister(PKTLEN) == MAX_PACKET_LENGTH &&
+            readRegister(PKTCTRL1) == 0x08 &&
+            readRegister(MCSM1) == 0x30 &&
+            readRegister(MCSM0) == 0x18 &&
             readRegister(PKTCTRL0) == 0x05;
     }
 
@@ -585,7 +592,7 @@ namespace CC1101Radio
     }
 
 
-    bool receivePacket(
+    ReceiveResult receivePacket(
         uint8_t* buffer,
         uint8_t maxLength,
         uint8_t& receivedLength
@@ -593,14 +600,16 @@ namespace CC1101Radio
     {
         receivedLength = 0;
 
-        uint8_t state =
-            readStatusRegister(MARCSTATE) & 0x1F;
+        const uint8_t status = readStatusRegister(MARCSTATE);
+        if (status == 0xFF)
+        {
+            return {false, false};
+        }
+        const uint8_t state = status & 0x1F;
 
         if (state == MARC_RXFIFO_OVERFLOW)
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         /*
@@ -612,7 +621,7 @@ namespace CC1101Radio
          */
         if (state != MARC_IDLE)
         {
-            return false;
+            return {false, true};
         }
 
         const uint8_t rxStatus =
@@ -621,9 +630,7 @@ namespace CC1101Radio
         // RXBYTES bit 7 reports overflow; bits 6:0 hold the byte count.
         if (rxStatus & 0x80)
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         const uint8_t rxBytes = rxStatus & 0x7F;
@@ -635,9 +642,7 @@ namespace CC1101Radio
          */
         if (rxBytes == 0)
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         uint8_t raw[64];
@@ -645,9 +650,7 @@ namespace CC1101Radio
         // Reject abnormal counts before using them as a buffer write length.
         if (rxBytes > sizeof(raw))
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         if (!readBurst(
@@ -656,9 +659,7 @@ namespace CC1101Radio
                 rxBytes
             ))
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         uint8_t packetLength = raw[0];
@@ -669,9 +670,7 @@ namespace CC1101Radio
             packetLength + 1 > rxBytes
         )
         {
-            startReceive();
-
-            return false;
+            return {false, startReceive()};
         }
 
         memcpy(
@@ -682,8 +681,7 @@ namespace CC1101Radio
 
         receivedLength = packetLength;
 
-        startReceive();
-
-        return true;
+        // Delivery is independent of whether listening can be restored.
+        return {true, startReceive()};
     }
 }
