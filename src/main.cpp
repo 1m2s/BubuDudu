@@ -1,6 +1,8 @@
 #include <Arduino.h>
 
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #include "Config.h"
 #include "ESPNowRadio.h"
@@ -9,6 +11,11 @@
 
 namespace
 {
+    constexpr UBaseType_t RX_QUEUE_LENGTH = 8;
+    QueueHandle_t receiveQueue = nullptr;
+    bool protocolReady = false;
+
+
     // ======================================================
     // Device identity
     // ======================================================
@@ -509,6 +516,23 @@ namespace
     // Process incoming ESP-NOW data
     // ======================================================
 
+    // Runs in the Wi-Fi task. Copy bytes only; loop() owns protocol state.
+    void queueReceivedData(const uint8_t* data, size_t length)
+    {
+        if (length != sizeof(Protocol::Message))
+        {
+            return;
+        }
+
+        Protocol::Message message{};
+        memcpy(&message, data, sizeof(message));
+
+        // Never block the Wi-Fi task. If full, drop without ACKing;
+        // the sender's existing timeout/retry logic can retry the packet.
+        (void)xQueueSend(receiveQueue, &message, 0);
+    }
+
+
     void handleReceivedData(
         const uint8_t* data,
         size_t length
@@ -738,9 +762,17 @@ void setup()
     );
 
 
+    receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
+    if (receiveQueue == nullptr)
+    {
+        Serial.println("ESP-NOW RECEIVE QUEUE CREATION FAILED");
+        return;
+    }
+
+
     if (
         !ESPNowRadio::begin(
-            handleReceivedData
+            queueReceivedData
         )
     )
     {
@@ -761,6 +793,8 @@ void setup()
     nextEventTime =
         millis() +
         FIRST_EVENT_DELAY_MS;
+
+    protocolReady = true;
 }
 
 
@@ -770,6 +804,28 @@ void setup()
 
 void loop()
 {
+    if (!protocolReady)
+    {
+        delay(10);
+        return;
+    }
+
+    // Handle queued ACKs before timeouts. Bound each batch so continuous
+    // incoming traffic cannot prevent retries or outgoing events.
+    for (UBaseType_t i = 0; i < RX_QUEUE_LENGTH; ++i)
+    {
+        Protocol::Message message{};
+        if (xQueueReceive(receiveQueue, &message, 0) != pdPASS)
+        {
+            break;
+        }
+
+        handleReceivedData(
+            reinterpret_cast<const uint8_t*>(&message),
+            sizeof(message)
+        );
+    }
+
     // ------------------------------------------------------
     // Check ACK timeout / retry state.
     // ------------------------------------------------------
