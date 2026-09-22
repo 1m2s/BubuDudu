@@ -615,17 +615,18 @@ namespace CC1101Radio
             return false;
         }
 
-        uint8_t rxBytes =
+        const uint8_t rxStatus =
             readStatusRegister(RXBYTES);
 
-        if (rxBytes & 0x80)
+        // RXBYTES bit 7 reports overflow; bits 6:0 hold the byte count.
+        if (rxStatus & 0x80)
         {
             startReceive();
 
             return false;
         }
 
-        rxBytes &= 0x7F;
+        const uint8_t rxBytes = rxStatus & 0x7F;
 
         /*
          * IDLE with zero bytes can happen after a packet
@@ -640,6 +641,14 @@ namespace CC1101Radio
         }
 
         uint8_t raw[64];
+
+        // Reject abnormal counts before using them as a buffer write length.
+        if (rxBytes > sizeof(raw))
+        {
+            startReceive();
+
+            return false;
+        }
 
         if (!readBurst(
                 FIFO,
