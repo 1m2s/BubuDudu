@@ -13,6 +13,14 @@ namespace CC1101Radio
     uint8_t readPartNumber();
     uint8_t readVersion();
 
+    // Raw MARCSTATE for bench diagnostics; 0xFF indicates an SPI read failure.
+    uint8_t readMarcState();
+    // Raw RXBYTES: bit 7 is overflow, bits 6:0 are the FIFO byte count.
+    uint8_t readRxBytes();
+
+    // Keep CS inactive across the MCU's deep sleep/reboot; no radio strobes.
+    bool holdChipSelectForDeepSleep(bool hold);
+
     bool setFrequency433_92MHz();
 
     bool configureForPacketTest();

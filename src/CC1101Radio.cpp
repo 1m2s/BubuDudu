@@ -1,6 +1,7 @@
 #include "CC1101Radio.h"
 
 #include <SPI.h>
+#include <driver/gpio.h>
 #include <cstring>
 
 namespace
@@ -13,6 +14,7 @@ namespace
     constexpr uint32_t SPI_FREQUENCY = 100000;
 
     // Configuration registers
+    constexpr uint8_t IOCFG0   = 0x02;
     constexpr uint8_t FIFOTHR  = 0x03;
     constexpr uint8_t SYNC1    = 0x04;
     constexpr uint8_t SYNC0    = 0x05;
@@ -260,9 +262,12 @@ namespace CC1101Radio
 {
     bool begin()
     {
+        // Set the output latch before enabling/releasing the CS pad.
+        digitalWrite(PIN_CS, HIGH);
         pinMode(PIN_CS, OUTPUT);
 
-        digitalWrite(PIN_CS, HIGH);
+        if (!holdChipSelectForDeepSleep(false))
+            return false;
 
         SPI.begin(
             PIN_SCK,
@@ -272,6 +277,24 @@ namespace CC1101Radio
         );
 
         return true;
+    }
+
+
+    bool holdChipSelectForDeepSleep(bool hold)
+    {
+        const gpio_num_t cs = static_cast<gpio_num_t>(PIN_CS);
+        if (hold)
+        {
+            digitalWrite(PIN_CS, HIGH);
+            if (gpio_hold_en(cs) != ESP_OK)
+                return false;
+            gpio_deep_sleep_hold_en();
+            return true;
+        }
+        // begin() configured CS HIGH before releasing a retained pad.
+        // Cancellation uses the same HIGH configuration from before sleep.
+        gpio_deep_sleep_hold_dis();
+        return gpio_hold_dis(cs) == ESP_OK;
     }
 
 
@@ -377,6 +400,18 @@ namespace CC1101Radio
     }
 
 
+    uint8_t readMarcState()
+    {
+        return readStatusRegister(MARCSTATE);
+    }
+
+
+    uint8_t readRxBytes()
+    {
+        return readStatusRegister(RXBYTES);
+    }
+
+
     bool setFrequency433_92MHz()
     {
         writeRegister(FREQ2, FREQ2_433_92);
@@ -406,6 +441,10 @@ namespace CC1101Radio
          */
 
         writeRegister(FIFOTHR, 0x47);
+
+        // GDO0: assert on CRC-valid packet; hold until first RX FIFO byte read.
+        // This also restores the wake output after bounded radio recovery.
+        writeRegister(IOCFG0, 0x07);
 
         // Explicit sync word used by both radios
         writeRegister(SYNC1, 0xD3);
@@ -469,6 +508,7 @@ namespace CC1101Radio
 
         // Read back the most important settings
         return
+            readRegister(IOCFG0) == 0x07 &&
             readRegister(FREQ2) == 0x10 &&
             readRegister(FREQ1) == 0xB0 &&
             readRegister(FREQ0) == 0x71 &&

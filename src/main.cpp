@@ -5,9 +5,13 @@
 
 void setup()
 {
+    const bool deepWake = RadioTask::captureBootWake();
     Serial.begin(115200);
 
-    delay(1500);
+    // The external radio may be holding a wake packet. Do not spend the
+    // peer's ACK/retry window waiting for USB on a deep-sleep reboot.
+    if (!deepWake)
+        delay(1500);
 
 
     Serial.println();
