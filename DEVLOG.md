@@ -1572,3 +1572,411 @@ For every integration step:
 3. test both physical devices
 4. investigate failures before adding another subsystem
 5. commit only after the new state is verified
+
+---
+
+## 2026-09-23
+
+### Development Strategy
+
+Continued incremental development from the individually validated ESP-NOW checkpoint on `feature/espnow`:
+
+`d24d72c` — `fix: serialize ESP-NOW receive handling through FreeRTOS queue`
+
+The previous large full-system integration experiment remains abandoned as the architecture baseline.
+
+The working rule is now explicit:
+
+```text
+one understandable change
+      |
+      v
+build
+      |
+      v
+flash
+      |
+      v
+physical test
+      |
+      v
+understand result
+      |
+      v
+commit
+      |
+      v
+next change
+```
+
+Today's firmware work added power-state policy and then a bounded ESP-NOW sleep agreement. It did not connect that agreement to actual ESP32 sleep execution.
+
+### Power FSM Foundation
+
+Created `feature/power-fsm` and added a dedicated `PowerManager` module in `include/PowerManager.h` and `src/PowerManager.cpp`.
+
+PowerManager owns semantic system power state. The ESP-NOW transport continues to own packet transmission, application ACK matching, retries and receive-queue processing.
+
+Local states:
+
+* `ACTIVE`
+* `IDLE`
+* `SLEEP_NEGOTIATING`
+* `SLEEPING`
+* `WAKING`
+
+Peer semantic states:
+
+* `ONLINE`
+* `SLEEP_PENDING`
+* `SLEEPING`
+* `UNKNOWN`
+* `OFFLINE`
+
+The important distinction is:
+
+```text
+SLEEPING != OFFLINE
+```
+
+A peer that intentionally entered sleep must not be treated as a failed or unreachable peer solely because its ESP-NOW traffic becomes silent.
+
+Added a bounded `SleepTransaction` containing an active flag, `sleepId`, coordinator/participant role, phase, start timestamp, phase deadline and overall hard deadline. PowerManager also manages failure cooldown and deterministic cancellation.
+
+The FSM runs through state checks and timestamps rather than blocking wait loops. Negotiation and waking have explicit escape paths; transitional states must not remain active indefinitely.
+
+At this checkpoint, `SLEEPING` and the subsequent wake transition were simulated. No `esp_deep_sleep_start()` call was added.
+
+Physical tests on both Bubu and Dudu verified:
+
+* `ACTIVE -> IDLE`
+
+* `IDLE -> SLEEP_NEGOTIATING`
+
+* hard timeout closes the transaction and returns to `IDLE`
+
+* failure cooldown applies
+
+* expiration of cooldown does not automatically restart negotiation
+
+* activity immediately cancels negotiation and returns to `ACTIVE`
+
+* simulated `SLEEPING -> WAKING -> ACTIVE`
+
+* existing ESP-NOW communication remained operational throughout the initial FSM tests
+
+The verified foundation was committed before starting the handshake checkpoint.
+
+### Coordinated Sleep Handshake
+
+Created `feature/sleep-handshake` from the committed Power FSM foundation.
+
+Extended the existing `Protocol::Message` with sleep-control message types while preserving its eight-byte size:
+
+* `SLEEP_REQUEST`
+* `SLEEP_READY`
+* `SLEEP_COMMIT`
+* `SLEEP_ACK`
+* `SLEEP_CANCEL`
+
+The `SLEEP_REQUEST` message ID becomes the transaction's `sleepId`. Replies reference that transaction using the existing 16-bit `ackForMessageId` field. Reliable control packets still have their own packet message IDs for application ACK matching and retries.
+
+The ordinary application/packet ACK and semantic `SLEEP_ACK` have different meanings:
+
+* packet ACK confirms receipt of one packet
+
+* `SLEEP_ACK` confirms that the participant accepted COMMIT and completed its side of the semantic sleep agreement
+
+Normal handshake:
+
+```text
+SLEEP_REQUEST
+      |
+      v
+SLEEP_READY
+      |
+      v
+SLEEP_COMMIT
+      |
+      v
+SLEEP_ACK
+```
+
+The participant completes when its semantic `SLEEP_ACK` is actually accepted for transmission by ESP-NOW. The coordinator completes when it receives the matching semantic `SLEEP_ACK`. Queueing that packet alone is not participant completion, and an ordinary packet ACK cannot substitute for it.
+
+After a successful exchange, both PowerManagers enter simulated `SLEEPING`. Both ESP32 CPUs remain physically awake.
+
+### Symmetric Operation and Simultaneous Requests
+
+Physical tests verified both directions:
+
+* Bubu initiates and Dudu becomes participant
+
+* Dudu initiates and Bubu becomes participant
+
+There is no permanent master/slave relationship.
+
+When both devices initiate at approximately the same time and are still coordinators waiting for READY, the lower numeric `DeviceId` wins the collision. This is a temporary transaction tie-break only.
+
+In the observed collision, Bubu started with `sleepId=40` and Dudu started with `sleepId=33`. Dudu correctly reported:
+
+```text
+peer DeviceId=1 wins; abandon 33, accept 40
+```
+
+Bubu kept its transaction. Dudu abandoned its own transaction, adopted Bubu's `sleepId` and became participant. Adopting the winning transaction preserves the losing device's original hard deadline; a collision cannot extend the negotiation indefinitely.
+
+The initial physical collision exposed the final-send phase bug described below. After fixing it, the physical collision test verified one surviving handshake, both devices reaching simulated `SLEEPING`, no deadlock and no second surviving transaction.
+
+Bubu winning this particular collision does not make it a permanent master. Dudu can still initiate a normal handshake.
+
+### Participant Final-Send Phase Bug
+
+The bench command `d` introduces a non-blocking one-second delay before newly queued reliable controls can be sent. That delay exposed a reproducible state-machine error on the physical boards:
+
+* participant received a valid matching `SLEEP_COMMIT`
+
+* COMMIT was accepted and `SLEEP_ACK` was queued
+
+* participant remained in the old `WAIT_COMMIT` phase
+
+* the old phase deadline expired before the queued `SLEEP_ACK` could be transmitted
+
+* `PHASE_TIMEOUT` incorrectly cancelled the transaction and sent `SLEEP_CANCEL`
+
+Receiving a valid COMMIT is forward progress. Waiting to submit the final ACK needs its own bounded phase rather than retaining the deadline for waiting to receive COMMIT.
+
+Added explicit phase `WAIT_SLEEP_ACK_TX`:
+
+```text
+WAIT_COMMIT
+    |
+    v
+valid SLEEP_COMMIT
+    |
+    v
+WAIT_SLEEP_ACK_TX
+    |
+    v
+SLEEP_ACK submitted
+    |
+    v
+SLEEPING
+```
+
+Only the first valid COMMIT starts the new phase deadline. Duplicate COMMIT remains idempotent and does not refresh either deadline. Retries also leave both deadlines unchanged.
+
+The overall transaction hard deadline is preserved. If the final ACK cannot be submitted before the phase or hard deadline, the transaction still closes deterministically. The hard deadline takes precedence when both limits have expired.
+
+The fix did not increase timeout values or disable the one-second bench delay.
+
+Focused host tests reproduced the delayed collision sequence, including delayed READY, delayed COMMIT and delayed final ACK. The modeled old `WAIT_COMMIT` deadline was 4100 ms while final ACK submission was scheduled at 4110 ms. These are host-test timestamps, not measured hardware timing.
+
+The corrected final-send behavior passed host tests and was then verified by rerunning the physical Bubu/Dudu simultaneous-request collision.
+
+### Missing-Peer Failure Path
+
+Physical testing with the peer unavailable verified:
+
+* one initial `SLEEP_REQUEST`
+
+* maximum two retries, reusing the same message ID
+
+* existing 300 ms application ACK timeout retained
+
+* retry exhaustion closes the negotiation
+
+* peer becomes `OFFLINE` and local state returns to `IDLE`
+
+* failure cooldown applies
+
+* negotiation does not automatically restart after cooldown
+
+* no infinite peer-search or retry loop
+
+This directly addresses a major failure mode from the earlier full-system integration attempt: an unavailable peer must not keep the device searching or negotiating forever.
+
+### Activity Cancellation
+
+Physical testing verified meaningful activity while the coordinator was negotiating:
+
+* local transaction closed immediately
+
+* local state returned to `ACTIVE`
+
+* peer semantic state was restored appropriately rather than left `SLEEP_PENDING`
+
+* a best-effort `SLEEP_CANCEL` was transmitted
+
+* participant received the matching CANCEL, closed its transaction and returned to `IDLE`
+
+* delayed sleep traffic did not subsequently make either device enter `SLEEPING` in this test
+
+Cancellation removes obsolete queued controls. If the best-effort CANCEL is lost, the peer's own bounded deadlines still provide an escape path.
+
+### Reliability and Stale Messages
+
+Implemented and tested protections include:
+
+* control processing checks the peer, transaction ID and applicable role/phase before advancing an active transaction
+
+* stale controls cannot create or advance unrelated transactions; a delayed old COMMIT cannot create a new sleep transaction
+
+* duplicate REQUEST and COMMIT are safe and do not reset the hard deadline
+
+* an exact duplicate of a previously completed COMMIT can replay `SLEEP_ACK` without creating another transaction or state transition
+
+* new application activity can cancel an active negotiation; duplicate EVENT reception retains its existing re-ACK behavior without executing the event again
+
+* `h` pauses automatic heartbeat generation for deterministic bench tests while pending transmissions, ACKs and retries continue
+
+* automatic application events are suppressed during negotiation, simulated sleep and waking
+
+* Wi-Fi receive callbacks continue to copy packets into the existing FreeRTOS RX queue; the main application context processes protocol and PowerManager state
+
+Deterministic stale/duplicate edge cases were covered primarily through host tests. The main coordinator, participant, simultaneous-collision, missing-peer and activity-cancellation flows were verified on physical Bubu/Dudu hardware.
+
+### Host Tests and Build Verification
+
+Added focused tests in `tests/host/sleep_handshake_test.cpp`, run by `tests/host/run.sh` on `feature/sleep-handshake`.
+
+The host harness exercises the production PowerManager and application code with substitutes for Arduino timing, ESP-NOW and the FreeRTOS queue. It builds for both Bubu and Dudu identities with compiler warnings treated as errors and address/undefined-behavior sanitizers.
+
+Coverage includes:
+
+* coordinator and participant completion
+
+* simultaneous requests, including equal numeric transaction IDs
+
+* stale controls and duplicate REQUEST, READY and COMMIT
+
+* activity cancellation and removal of obsolete queued controls
+
+* bounded phase and hard timeouts
+
+* delayed collision through `WAIT_SLEEP_ACK_TX`
+
+* duplicate COMMIT and retries without deadline extension
+
+* phase timeout, hard timeout and cancellation while final `SLEEP_ACK` remains unsent
+
+* `millis()` rollover and wrap-safe deadline comparisons
+
+* existing EVENT/ACK matching, duplicate handling and bounded same-ID retry behavior
+
+* receive-queue ownership and heartbeat gating
+
+The focused host tests passed for both device identities. Both PlatformIO environments, `bubu` and `dudu`, built successfully, and `git diff --check` passed during firmware verification.
+
+Host-test results establish deterministic software behavior under the modeled conditions; they are separate from the physical validation recorded above.
+
+### Current Working State
+
+The verified sleep-handshake architecture is:
+
+```text
+PowerManager
+    |
+    +-- local power state
+    +-- peer semantic state
+    +-- bounded sleep transaction
+    +-- timeout / cancellation policy
+    |
+    v
+ESP-NOW transport
+    |
+    v
+coordinated sleep handshake
+```
+
+Both devices can negotiate the decision to sleep in the verified scenarios while remaining physically awake. Actual ESP32 deep-sleep execution is deliberately not connected yet.
+
+CC1101, ADXL345, OLED, LED and proximity were not integrated into this checkpoint. The independently verified CC1101 implementation remains separate, and the old large integration remains abandoned as the baseline.
+
+Successful tested exchanges do not guarantee agreement under permanent packet loss. In particular, accepting final `SLEEP_ACK` for transmission does not prove its delivery: a participant can reach simulated `SLEEPING` while the coordinator times out and records uncertainty. Real sleep execution must account for that boundary before it is connected.
+
+The verified implementation is committed on `feature/sleep-handshake`; it has not been merged into `main` by this documentation update.
+
+### Important Development Reflection
+
+The earlier large integration attempt was a development mistake. Changing too many subsystems simultaneously made failures difficult to isolate and debugging unnecessarily costly.
+
+It was nevertheless useful evidence. Failures in the combined system exposed requirements that were less obvious in independent subsystem tests:
+
+* distinguishing a sleeping peer from an offline peer
+
+* bounding peer searching and retries
+
+* resolving simultaneous sleep requests
+
+* handling wake/sleep state disagreement
+
+* separating ownership of system state from radio state
+
+* defining explicit transaction deadlines
+
+* rejecting stale or delayed control messages
+
+* considering failure paths before integrating more hardware
+
+Development now asks what can happen one or two transitions after an apparently successful operation, and what happens when communication is lost, delayed, duplicated or simultaneous.
+
+The experience was both costly and useful: the implementation approach was wrong, but the failures exposed concrete requirements that are making the incremental architecture stronger.
+
+### Problems Solved
+
+* bounded PowerManager FSM
+
+* sleeping-peer versus offline-peer distinction
+
+* coordinated ESP-NOW sleep negotiation
+
+* symmetric coordinator/participant operation
+
+* simultaneous-request collision resolution
+
+* premature participant phase timeout before `SLEEP_ACK` transmission
+
+* bounded missing-peer behavior
+
+* prevention of automatic endless negotiation restart
+
+* activity-driven sleep cancellation
+
+* stale/duplicate sleep-control handling
+
+* preserving existing ESP-NOW reliability behavior during the new power protocol
+
+### Git Commits
+
+Today's firmware checkpoints:
+
+* `e3b849f` — `feat: add bounded power state machine foundation`
+
+* `baea754` — `feat: add bounded coordinated sleep handshake`
+
+The handshake commit includes the `WAIT_SLEEP_ACK_TX` fix and focused host tests; that work is committed, not awaiting a final firmware commit.
+
+Also committed today:
+
+* `49e1e85` — `docs: document integration lessons and radio hardening`
+
+That documentation commit records the earlier integration lessons and radio-hardening work. The new entry for today is a separate documentation-only update.
+
+### Next Step
+
+Connect the verified coordinated sleep decision to actual sleep execution incrementally.
+
+First preserve the handshake checkpoint, inspect the independently verified CC1101 deep-wake implementation, and define the smallest interface between PowerManager policy and wake/sleep execution.
+
+Subsequent checkpoints should separately:
+
+* arm CC1101 remote wake using confirmed `GDO0 -> ESP32-C3 GPIO4` wiring
+
+* reconnect ADXL345 local motion wake through GPIO3
+
+* verify wake-source setup and reboot handling, including preservation of a pending CC1101 wake packet
+
+* only then connect actual ESP32 deep-sleep entry
+
+These are separate changes and physical-test checkpoints, not one large integration task. Continue one understandable change, build, flash, physical test, understand, commit, then the next change.
