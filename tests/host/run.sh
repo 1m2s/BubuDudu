@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+test_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+repo_dir="$(cd -- "$test_dir/../.." && pwd)"
+build_dir="$(mktemp -d "${TMPDIR:-/tmp}/bubududu-handshake-tests.XXXXXX")"
+for device in BUBU DUDU; do
+    "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+        -fsanitize=address,undefined -fno-omit-frame-pointer \
+        -D"DEVICE_$device" -I"$test_dir" -I"$repo_dir/include" \
+        "$test_dir/sleep_handshake_test.cpp" -o "$build_dir/test_$device"
+    "$build_dir/test_$device"
+done
+echo "Host binaries: $build_dir"
