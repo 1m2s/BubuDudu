@@ -1117,3 +1117,458 @@ Determine the safe power-input requirements, account for the TP4056 protection-b
 Once the power architecture is established, adapt the battery sensing and indication design to the real LM358P and available components.
 
 Do not connect the battery to the ESP32 until the power path and polarity have been verified.
+
+## 2026-09-20 to 2026-09-21
+
+### Completed
+
+* Continued experimenting with full-system BubuDudu integration.
+
+* Attempted to combine several previously working subsystems into one integrated firmware state, including:
+
+  * ESP-NOW communication
+  * CC1101 communication
+  * application ACKs and retries
+  * WS2812B heartbeat output
+  * OLED diagnostics
+  * ADXL345 motion detection
+  * inactivity handling
+  * ESP32 deep sleep
+  * remote wake behavior
+  * peer availability
+  * RSSI-based proximity behavior
+
+* Tested coordinated sleep behavior so that Bubu and Dudu would not independently enter incompatible power states.
+
+* Investigated using the CC1101 as a method for waking the remote ESP32 when the primary ESP-NOW radio is unavailable during deep sleep.
+
+* Connected CC1101 GDO0 to ESP32-C3 GPIO4 for wake experimentation.
+
+* Continued experimenting with RSSI-based distance estimation.
+
+* Reduced the original NEAR / MEDIUM / FAR interpretation to a simpler CLOSE / FAR result because the measurements were not stable enough to justify finer classification.
+
+* Tested several variations of sleep timers, wake behavior and radio state handling.
+
+### Integration Failure and Development Lesson
+
+The largest problem during these two days was attempting too much integration at once.
+
+Several independently working subsystems were combined before the interfaces and responsibilities between them were sufficiently defined.
+
+This created failures involving communication, sleep state, wake behavior and application state that became extremely difficult to isolate.
+
+At several points it was no longer obvious whether a failure originated from:
+
+* ESP-NOW
+
+* CC1101
+
+* ACK/retry state
+
+* FreeRTOS task interaction
+
+* deep-sleep entry
+
+* CC1101 receive state
+
+* GDO wake signaling
+
+* ADXL345 inactivity behavior
+
+* peer-state logic
+
+* or interactions between several of them
+
+A large amount of time was spent trying to reverse-engineer what had broken after making broad integration changes.
+
+Some experimental versions occasionally appeared to work, while other tests with apparently similar conditions failed.
+
+Eventually the experimental integration had moved far enough away from the clean repository checkpoints that continuing to patch it was creating more uncertainty rather than progress.
+
+The decision was made to stop trying to repair the large integration experiment and return to the individually validated subsystem branches.
+
+### Important Development Lesson
+
+One of the most important lessons from the project so far is that there is no real shortcut around incremental embedded-system development.
+
+Trying to save time by integrating many features at once ultimately cost significantly more time because failures could no longer be isolated.
+
+The faster-looking approach became the slower approach.
+
+The improved workflow is therefore:
+
+```text
+one change
+    |
+    v
+build
+    |
+    v
+flash
+    |
+    v
+physical test
+    |
+    v
+understand the result
+    |
+    v
+commit
+    |
+    v
+next change
+```
+
+A subsystem should not be considered ready for integration simply because it worked once in a larger prototype.
+
+Each subsystem should first have a known working checkpoint, a clear responsibility and a reproducible hardware test.
+
+This experience changed the development strategy for the remainder of BubuDudu.
+
+### Current Working State
+
+The large experimental integration is not considered the production baseline.
+
+The validated subsystem branches remain the trusted source of working implementations.
+
+Development will continue from these verified checkpoints rather than trying to recover the experimental full-system firmware.
+
+The immediate priority is to strengthen the communication subsystems individually before returning to system integration.
+
+### Next Step
+
+Return to the clean ESP-NOW and CC1101 branches.
+
+Audit the implementations, fix concrete weaknesses individually, verify every change on both physical devices and only then begin the final system-integration phase.
+
+---
+
+## 2026-09-22
+
+### Completed
+
+* Returned to incremental development using the individually validated communication branches.
+
+* Audited the existing ESP-NOW implementation before making further system-integration changes.
+
+* Identified that the ESP-NOW receive callback and the Arduino application flow could both access application protocol state.
+
+* Added a FreeRTOS receive queue so that:
+
+  * the Wi-Fi callback only copies incoming packets
+  * packet processing happens outside the Wi-Fi callback
+  * the main application flow owns ACK/retry state
+  * protocol-state modification is serialized through one execution context
+
+* Preserved the existing ESP-NOW application protocol:
+
+  * 8-byte `Protocol::Message`
+  * EVENT messages
+  * application ACKs
+  * 300 ms ACK timeout
+  * maximum 2 retries
+  * retry using the same message ID
+  * duplicate detection
+  * bidirectional communication
+
+* Built both Bubu and Dudu successfully after the ESP-NOW queue change.
+
+* Hardware-tested the modified ESP-NOW implementation.
+
+* Verified:
+
+  * Bubu → Dudu communication
+  * Dudu → Bubu communication
+  * ACK generation and matching
+  * retry behavior
+  * retry exhaustion
+  * peer loss
+  * communication recovery when the peer returns
+
+### CC1101 Driver Improvements
+
+* Returned to `feature/cc1101` before integrating the radio into the complete system.
+
+* Audited the CC1101 driver and FreeRTOS `RadioTask`.
+
+* Confirmed that `RadioTask` already owns CC1101 protocol state and therefore does not have the same callback concurrency problem as ESP-NOW.
+
+* Added bounds checking before CC1101 RX FIFO reads.
+
+* Prevented abnormal RX byte counts from being used as an unchecked write length into the local receive buffer.
+
+* Preserved the existing packet format and normal receive behavior.
+
+* Hardware-tested bidirectional CC1101 communication after the change.
+
+* Verified:
+
+  * EVENT transmission
+  * ACK generation
+  * ACK matching
+  * two retries
+  * retry exhaustion
+  * peer offline detection
+  * communication recovery after peer restart
+
+### CC1101 Radio Recovery
+
+* Improved CC1101 receive recovery.
+
+* Changed packet reception so successful packet delivery and successful restoration of RX mode are reported separately.
+
+* Added bounded radio recovery owned by `RadioTask`.
+
+* Recovery now:
+
+  * detects failed RX restarts
+  * resets and reconfigures only the CC1101
+  * preserves protocol message IDs and duplicate history
+  * attempts recovery a maximum of three times
+  * enters a persistent fault state if recovery repeatedly fails
+  * avoids uncontrolled reset loops
+
+* Verified the recovery behavior with host-side fault-injection tests.
+
+* Verified both Bubu and Dudu builds with no compiler or linker errors.
+
+* Confirmed through physical regression testing that normal CC1101 communication still works after the recovery changes.
+
+### CC1101 Remote Wake
+
+One of the most difficult unresolved problems from the previous integration attempts was waking a sleeping ESP32 from the CC1101.
+
+The earlier experiments were inconsistent and difficult to debug because radio state, sleep state and wake behavior were all changing at the same time.
+
+The problem was therefore rebuilt incrementally.
+
+* Confirmed physical wake wiring:
+
+```text
+CC1101 GDO0 -> ESP32-C3 GPIO4
+```
+
+* Configured CC1101 `IOCFG0 = 0x07`.
+
+* With this configuration:
+
+  * GDO0 asserts HIGH after a CRC-valid packet is received
+  * GDO0 remains asserted until the first RX FIFO byte is read
+
+* First implemented a controlled ESP32 light-sleep test.
+
+* Verified the complete light-sleep wake chain:
+
+```text
+CC1101 packet
+    |
+    v
+GDO0 HIGH
+    |
+    v
+GPIO4
+    |
+    v
+ESP32 light-sleep wake
+    |
+    v
+packet processing
+    |
+    v
+application ACK
+```
+
+* Verified that the sleeping device woke through GPIO4 and successfully acknowledged the packet that triggered the wake.
+
+### CC1101 Deep-Sleep Remote Wake
+
+After light-sleep wake was proven, the experiment was extended to ESP32 deep sleep.
+
+Deep sleep required a different architecture because the ESP32 reboots after wake.
+
+A major concern was that normal startup initialization could reset or flush the CC1101 before the wake packet was read.
+
+The deep-sleep startup path was therefore changed so that the external radio is inspected before normal radio initialization.
+
+* Added deep-sleep wake using GPIO4.
+
+* Added a small RTC-memory checkpoint for protocol state that must survive the ESP32 reboot.
+
+* Preserved:
+
+  * next message ID
+  * last received peer message ID
+  * duplicate-history state
+
+* Prevented the wake path from immediately resetting or flushing the CC1101.
+
+* Preserved CC1101 chip-select state across ESP32 deep sleep.
+
+* On deep-sleep wake, firmware now records:
+
+  * ESP32 wake cause
+  * GPIO wake mask
+  * GDO0 state at boot
+  * CC1101 `MARCSTATE`
+  * CC1101 `RXBYTES`
+  * CC1101 `IOCFG0`
+
+* The retained CC1101 packet is inspected and processed before normal recovery or reinitialization.
+
+### Deep-Sleep Hardware Result
+
+Initial deep-sleep tests were inconsistent and several tests ended through the 30-second timer instead of GPIO wake.
+
+The experiment was repeated after rebuilding and flashing both devices again.
+
+Successful hardware tests then demonstrated:
+
+```text
+DEEP WAKE: cause=GPIO
+GPIO_mask=0x10
+GDO0_at_boot=1
+GDO0_before_FIFO=1
+```
+
+The CC1101 state before reading the FIFO showed:
+
+```text
+MARCSTATE=0x01
+RXBYTES=0x09
+IOCFG0=0x07
+```
+
+`RXBYTES=0x09` confirmed that the wake packet remained inside the CC1101 after the ESP32 entered deep sleep and rebooted:
+
+```text
+1 byte CC1101 packet-length field
++
+8 byte BubuDudu Protocol::Message
+=
+9 bytes
+```
+
+The firmware then successfully reported:
+
+```text
+ELECTRICAL DEEP-WAKE SUCCESS=YES
+
+DEEP PACKET:
+copied=1
+peer_event_processed=1
+ack_tx=1
+```
+
+The transmitting device also received the returned application ACK.
+
+The complete hardware chain was therefore demonstrated:
+
+```text
+433 MHz EVENT
+      |
+      v
+CC1101 receives packet
+      |
+      v
+GDO0 HIGH
+      |
+      v
+ESP32-C3 GPIO4
+      |
+      v
+deep-sleep wake
+      |
+      v
+ESP32 reboot
+      |
+      v
+CC1101 configuration + FIFO preserved
+      |
+      v
+wake packet recovered
+      |
+      v
+Protocol::Message processed
+      |
+      v
+application ACK transmitted
+      |
+      v
+sender receives matching ACK
+```
+
+The experiment was reproduced after rebuilding and reflashing the devices.
+
+The earlier inconsistent results are not yet attributed to one confirmed cause and should therefore not be described as a solved hardware fault.
+
+### Problems Solved
+
+* ESP-NOW protocol-state concurrency risk
+
+* ESP-NOW receive handling moved out of the Wi-Fi callback
+
+* CC1101 RX FIFO bounds protection
+
+* CC1101 failed-RX restart detection
+
+* bounded CC1101 recovery
+
+* persistent radio-fault handling
+
+* CC1101 GDO0 configuration
+
+* CC1101-triggered ESP32 light-sleep wake
+
+* CC1101-triggered ESP32 deep-sleep wake
+
+* preserving the wake packet across ESP32 deep-sleep reboot
+
+* restoring minimum protocol state from RTC memory
+
+* processing and acknowledging the packet responsible for waking the MCU
+
+### Git Commits
+
+* `d24d72c` — `fix: serialize ESP-NOW receive handling through FreeRTOS queue`
+
+* `b4665df` — `fix: bound CC1101 RX FIFO reads`
+
+* `653a7b8` — `fix: add bounded CC1101 RX recovery`
+
+* `ece6879` — `feat: add CC1101 deep-sleep remote wake`
+
+All committed ESP-NOW and CC1101 work was pushed to the corresponding remote feature branches.
+
+### Current Working State
+
+ESP-NOW now has a cleaner receive architecture with one application context owning protocol state.
+
+CC1101 now has:
+
+* bounded FIFO access
+* explicit RX restart status
+* bounded radio recovery
+* persistent-fault handling
+* application ACK/retry reliability
+* validated light-sleep remote wake
+* validated deep-sleep remote wake
+* preserved wake-packet processing after ESP32 reboot
+
+The communication subsystems are now in a substantially stronger state than during the earlier full-system integration attempt.
+
+### Next Step
+
+Begin final system integration from the validated feature branches.
+
+Do not restore the previous large experimental integration as the baseline.
+
+Integrate features incrementally, beginning from the now-hardened ESP-NOW and CC1101 communication implementations.
+
+For every integration step:
+
+1. make one understandable change
+2. build Bubu and Dudu
+3. test both physical devices
+4. investigate failures before adding another subsystem
+5. commit only after the new state is verified
