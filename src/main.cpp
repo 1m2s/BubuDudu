@@ -7,6 +7,7 @@
 #include "Config.h"
 #include "ESPNowRadio.h"
 #include "Protocol.h"
+#include "PowerManager.h"
 
 
 namespace
@@ -622,6 +623,7 @@ namespace
                 handleEvent(
                     message
                 );
+                PowerManager::notePeerSeen();
 
                 break;
 
@@ -631,6 +633,7 @@ namespace
                 handleAck(
                     message
                 );
+                PowerManager::notePeerSeen();
 
                 break;
 
@@ -724,6 +727,8 @@ namespace
             MAX_RETRIES
         );
 
+        PowerManager::notePeerUnreachable();
+
 
         waitingForAck =
             false;
@@ -736,6 +741,32 @@ namespace
         nextEventTime =
             millis() +
             EVENT_INTERVAL_MS;
+    }
+
+
+    void servicePowerTest()
+    {
+        const uint32_t now = millis();
+        PowerManager::update(now);
+        // Bound serial work too: one character per loop, no waiting for input.
+        if (Serial.available() == 0)
+            return;
+
+        switch (Serial.read())
+        {
+            case 'p': break;
+            case 'i': PowerManager::forceIdle(now); break;
+            case 's': PowerManager::startSimulatedNegotiation(now); break;
+            case 'a': PowerManager::injectActivity(now); break;
+            case 'f': PowerManager::startSimulatedNegotiation(now, true); break;
+            case 'z': PowerManager::completeSimulatedSleep(now); break;
+            case '?':
+                Serial.println("Power tests: p=status i=IDLE s=hard-timeout test a=activity/cancel "
+                               "f=phase-timeout test z=simulate SLEEPING; no actual sleep/handshake");
+                break;
+            default: return; // Includes serial line endings.
+        }
+        PowerManager::printStatus(now);
     }
 }
 
@@ -760,6 +791,10 @@ void setup()
     Serial.println(
         "Starting BubuDudu ESP-NOW reliability test..."
     );
+
+    PowerManager::begin();
+    Serial.println("Power FSM simulation: ? for commands. ESP-NOW stays active in every state.");
+    PowerManager::printStatus(millis());
 
 
     receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
@@ -806,6 +841,7 @@ void loop()
 {
     if (!protocolReady)
     {
+        servicePowerTest();
         delay(10);
         return;
     }
@@ -849,6 +885,9 @@ void loop()
         startHeartbeatEvent();
     }
 
+    // Runs in the same task as protocol processing, never in the callback.
+    // Simulated power states do not gate RX, ACKs, retries, or heartbeats.
+    servicePowerTest();
 
     delay(
         10
