@@ -222,6 +222,11 @@ void testTransport()
     receive(incoming(Type::Ack, commit.messageId)); assert(transaction().active);
     receive(incoming(Type::SleepAck, request.messageId));
     assert(localState() == LocalState::SLEEPING && peerState() == PeerState::SLEEPING);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
+    assert(Serial.log.find("sleepId=" + std::to_string(request.messageId) + " | role=COORDINATOR") != std::string::npos);
+    receive(incoming(Type::SleepAck, request.messageId));
+    for (int i = 0; i < 100; ++i) loop();
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
 
     // Missing peer: exactly three sends of the same REQUEST ID, then no loop.
     freshApp(); command('i'); command('s'); auto began = ackWaitStart; auto id = pendingMessage.messageId;
@@ -232,6 +237,7 @@ void testTransport()
     assert(!waitingForAck && !transaction().active && peerState() == PeerState::OFFLINE);
     for (const auto& message : wire) if (message.type == Type::SleepRequest) assert(message.messageId == id);
     for (int i = 0; i < 1000; ++i) loop(); assert(countWire(Type::SleepRequest) == 3);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
 
     // Duplicates coalesce with in-flight responses, never restart their budget.
     freshApp(); command('i'); const auto peerRequest = incoming(Type::SleepRequest, 20);
@@ -243,14 +249,21 @@ void testTransport()
     auto peerCommit = incoming(Type::SleepCommit, 20, 21);
     receive(peerCommit); // Retires READY, sends SLEEP_ACK, and only then closes.
     assert(localState() == LocalState::SLEEPING && pendingMessage.type == Type::SleepAck);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
     const auto finalAck = pendingMessage;
     auto transitions = occurrences(Serial.log, "HANDSHAKE_COMPLETE");
     began = ackWaitStart; receive(peerCommit);
     assert(ackWaitStart == began && countWire(Type::SleepAck) == 1);
     hostNow = began + 300; loop(); assert(countWire(Type::SleepAck) == 2 && pendingMessage.messageId == finalAck.messageId);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
     receive(incoming(Type::Ack, finalAck.messageId)); assert(!waitingForAck && peerState() == PeerState::SLEEPING);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
+    assert(Serial.log.find("sleepId=20 | role=PARTICIPANT") != std::string::npos);
     receive(peerCommit); assert(countWire(Type::SleepAck) == 3);
     assert(occurrences(Serial.log, "HANDSHAKE_COMPLETE") == transitions);
+    receive(incoming(Type::Ack, pendingMessage.messageId));
+    for (int i = 0; i < 100; ++i) loop();
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
 
     // Real loop collision retires the losing request, even with equal IDs.
     freshApp(); command('i'); command('s'); id = pendingMessage.messageId;
@@ -364,6 +377,15 @@ void testDelayedCollision()
     assert(hostNow < hard && localState() == LocalState::SLEEPING && !transaction().active);
     assert(peerState() == PeerState::SLEEPING && countWire(Type::SleepCancel) == 0);
     assert(occurrences(Serial.log, "HANDSHAKE_COMPLETE") == 1);
+    if (LOCAL_DEVICE == Device::Dudu)
+    {
+        assert(waitingForAck && occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
+        receive(incoming(Type::Ack, pendingMessage.messageId));
+    }
+    const char* role = LOCAL_DEVICE == Device::Bubu ? "COORDINATOR" : "PARTICIPANT";
+    assert(Serial.log.find(std::string("SLEEP EXECUTION READY | sleepId=40 | role=") + role) != std::string::npos);
+    for (int i = 0; i < 100; ++i) loop();
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
 }
 
 void testFinalSendBounds()
@@ -420,6 +442,8 @@ void testFinalSendBounds()
     assert(Serial.log.find("PHASE_TIMEOUT") != std::string::npos && cooldownLeftMs(finalPhaseDeadline) == 3000);
     PowerManager::controlSent(Type::SleepAck, 20, finalPhaseDeadline + 1);
     assert(localState() == LocalState::IDLE); // Late notification cannot complete.
+    SleepDecision decision{};
+    assert(!takeSleepDecision(decision) && occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
 
     // A late but valid COMMIT gets a fresh phase deadline beyond the hard cap.
     // The unchanged hard deadline still cancels first, before any ACK is sent.
@@ -430,6 +454,7 @@ void testFinalSendBounds()
     hostNow = finalHardDeadline; loop();
     assert(!transaction().active && localState() == LocalState::IDLE && controlCount == 0);
     assert(countWire(Type::SleepAck) == 0 && Serial.log.find("HARD_TIMEOUT") != std::string::npos);
+    assert(!takeSleepDecision(decision) && occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
 
     for (bool remoteCancel : {false, true})
     {
@@ -442,15 +467,130 @@ void testFinalSendBounds()
         receive(incoming(Type::SleepCommit, 20, 21)); // Stale after cancellation.
         hostNow = 5000; loop();
         assert(localState() == expected && countWire(Type::SleepAck) == 0);
+        assert(!takeSleepDecision(decision) && occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
     }
+}
+
+void testSleepDecisionInterface()
+{
+    SleepDecision decision{};
+    for (bool participant : {false, true})
+    {
+        freshPower(); forceIdle(0);
+        assert(!takeSleepDecision(decision));
+        if (participant)
+        {
+            handleControl(control(Type::SleepRequest, 27), 0);
+            handleControl(control(Type::SleepCommit, 27, 28), 10);
+            assert(!takeSleepDecision(decision)); // Queued is not submitted.
+            controlSent(Type::SleepAck, 27, 20);
+        }
+        else
+        {
+            requestSleep(27, 0);
+            handleControl(control(Type::SleepReady, 27), 10);
+            assert(!takeSleepDecision(decision));
+            handleControl(control(Type::SleepAck, 27), 20);
+        }
+        assert(takeSleepDecision(decision));
+        assert(decision.sleepId == 27);
+        assert(decision.role == (participant ? SleepRole::PARTICIPANT : SleepRole::COORDINATOR));
+        for (int i = 0; i < 10; ++i)
+        {
+            handleControl(control(participant ? Type::SleepCommit : Type::SleepAck, 27, 28), 30 + i);
+            controlSent(Type::SleepAck, 27, 30 + i);
+            assert(!takeSleepDecision(decision));
+        }
+    }
+
+    // Stale controls and cancellation never create a decision.
+    freshPower(); forceIdle(0);
+    for (auto type : {Type::SleepReady, Type::SleepCommit, Type::SleepAck, Type::SleepCancel})
+    {
+        handleControl(control(type, 99), 0);
+        assert(!takeSleepDecision(decision));
+    }
+    requestSleep(27, 0); injectActivity(10);
+    handleControl(control(Type::SleepAck, 27), 20);
+    assert(!takeSleepDecision(decision));
+
+    // A pending decision cannot survive activity wake or initialization.
+    for (bool reinitialize : {false, true})
+    {
+        freshPower(); forceIdle(0); requestSleep(27, 0);
+        handleControl(control(Type::SleepReady, 27), 10);
+        handleControl(control(Type::SleepAck, 27), 20);
+        if (reinitialize) PowerManager::begin(Device::Bubu, captureIntent);
+        else { injectActivity(30); update(280); }
+        assert(!takeSleepDecision(decision));
+        // The latch is per completion, not a once-per-boot flag.
+        forceIdle(300); assert(requestSleep(28, 300));
+        handleControl(control(Type::SleepReady, 28), 310);
+        handleControl(control(Type::SleepAck, 28), 320);
+        assert(takeSleepDecision(decision) && decision.sleepId == 28);
+        assert(!takeSleepDecision(decision));
+    }
+}
+
+void testExecutionDrain()
+{
+    // Final ACK retries block readiness through both retries; exhaustion may
+    // release the semantic decision but does not remove delivery uncertainty.
+    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    receive(incoming(Type::SleepCommit, 20, 21));
+    const auto began = ackWaitStart;
+    const auto finalId = pendingMessage.messageId;
+    for (uint32_t elapsed : {299U, 300U, 600U, 899U})
+    {
+        hostNow = began + elapsed; loop();
+        assert(waitingForAck && occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
+    }
+    hostNow = began + 900; loop();
+    assert(!waitingForAck && controlCount == 0 && peerState() == PeerState::UNKNOWN);
+    assert(countWire(Type::SleepAck) == 3);
+    for (const auto& packet : wire)
+        if (packet.type == Type::SleepAck) assert(packet.messageId == finalId);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
+    for (int i = 0; i < 100; ++i) loop();
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
+
+    // Receipt followed by duplicate COMMIT in the same RX batch can leave a
+    // required replay queued but not yet eligible for TX. Queue also must drain.
+    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    const auto commit = incoming(Type::SleepCommit, 20, 21);
+    receive(commit); delayControlsForTest = true;
+    const auto receipt = incoming(Type::Ack, pendingMessage.messageId);
+    for (const auto& packet : {receipt, commit})
+        queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    loop();
+    assert(!waitingForAck && controlCount == 1);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
+    hostNow = controlQueue[0].notBefore; loop();
+    assert(waitingForAck && controlCount == 0);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
+    receive(incoming(Type::Ack, pendingMessage.messageId));
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
+
+    // Activity after semantic completion but before transport drain revokes
+    // the unconsumed decision, even if a late receipt/COMMIT follows.
+    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    receive(commit); const auto pendingId = pendingMessage.messageId;
+    assert(localState() == LocalState::SLEEPING && waitingForAck);
+    command('a');
+    receive(incoming(Type::Ack, pendingId)); receive(commit);
+    for (int i = 0; i < 100; ++i) loop();
+    assert(localState() == LocalState::ACTIVE);
+    assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
 }
 
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
+    testSleepDecisionInterface(); testExecutionDrain();
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);
     puts("PASS: actual RX queue/loop, packet ACK vs SLEEP_ACK, bounded same-ID retries, cancellation purge, heartbeat gating");
     puts("PASS: delayed collision, bounded WAIT_SLEEP_ACK_TX, duplicate/retry deadlines, unsent phase/hard expiry, cancellation");
+    puts("PASS: one-shot sleep decisions, duplicate/stale suppression, transport drain/exhaustion, queued replay, activity revocation");
 }

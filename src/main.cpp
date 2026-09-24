@@ -1022,6 +1022,17 @@ void loop()
     handleAckTimeout();
     sendNextControl();
 
+    // Semantic completion can precede the final SLEEP_ACK's packet receipt.
+    // Wait for all reliable work to finish (ACK or bounded retry exhaustion).
+    // This checkpoint only reports readiness; CPU and radio remain awake.
+    if (!waitingForAck && controlCount == 0)
+    {
+        PowerManager::SleepDecision decision{};
+        if (PowerManager::takeSleepDecision(decision))
+            Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
+                          decision.sleepId, PowerManager::toString(decision.role));
+    }
+
 
     // ------------------------------------------------------
     // Only create a new EVENT if there is no previous EVENT

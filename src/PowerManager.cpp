@@ -14,6 +14,8 @@ namespace PowerManager
         LocalState local = LocalState::ACTIVE;
         PeerState peer = PeerState::UNKNOWN;
         SleepTransaction sleep;
+        SleepDecision sleepDecision{};
+        bool sleepDecisionPending = false;
         Protocol::DeviceId localDevice = Protocol::DeviceId::Bubu;
         Protocol::DeviceId peerDevice = Protocol::DeviceId::Dudu;
         ControlSender sendControl = nullptr;
@@ -48,6 +50,8 @@ namespace PowerManager
         {
             if (local == next)
                 return;
+            if (next != LocalState::SLEEPING)
+                sleepDecisionPending = false;
             Serial.printf("POWER: %s -> %s | %s\n", toString(local), toString(next), reason);
             local = next;
         }
@@ -103,6 +107,8 @@ namespace PowerManager
 
         void finishTransaction()
         {
+            sleepDecision = {sleep.sleepId, sleep.role};
+            sleepDecisionPending = true;
             sleep = SleepTransaction{};
             commitAccepted = false;
             setPeer(PeerState::SLEEPING);
@@ -123,6 +129,7 @@ namespace PowerManager
         peer = PeerState::UNKNOWN;
         sleep = SleepTransaction{};
         localDevice = device;
+        sleepDecisionPending = false;
         peerDevice = device == Protocol::DeviceId::Bubu ? Protocol::DeviceId::Dudu : Protocol::DeviceId::Bubu;
         sendControl = sender;
         havePeerRequest = false;
@@ -387,6 +394,15 @@ namespace PowerManager
             setPeer(PeerState::UNKNOWN);
             Serial.println("POWER: final SLEEP_ACK delivery uncertain; simulated sleep retained");
         }
+    }
+
+    bool takeSleepDecision(SleepDecision& out)
+    {
+        if (!sleepDecisionPending)
+            return false;
+        out = sleepDecision;
+        sleepDecisionPending = false;
+        return true;
     }
 
     bool automaticHeartbeatAllowed()

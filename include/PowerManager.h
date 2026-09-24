@@ -20,6 +20,12 @@ namespace PowerManager
     enum class SleepRole : uint8_t { NONE, COORDINATOR, PARTICIPANT };
     enum class SleepPhase : uint8_t { NONE, WAIT_READY, WAIT_COMMIT, WAIT_ACK, WAIT_SLEEP_ACK_TX };
 
+    struct SleepDecision
+    {
+        uint16_t sleepId;
+        SleepRole role;
+    };
+
     struct SleepTransaction
     {
         bool active = false;
@@ -45,6 +51,9 @@ namespace PowerManager
     bool controlStillNeeded(Protocol::MessageType type, uint16_t sleepId);
     void controlSent(Protocol::MessageType type, uint16_t sleepId, uint32_t now);
     void controlFailed(Protocol::MessageType type, uint16_t sleepId, uint32_t now);
+    // Consume semantic completion once; the caller must first drain transport.
+    // An unconsumed decision is discarded when leaving simulated SLEEPING.
+    bool takeSleepDecision(SleepDecision& out);
     bool automaticHeartbeatAllowed();
     void applicationEvent(uint32_t now);
 
