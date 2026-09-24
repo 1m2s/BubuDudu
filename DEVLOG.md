@@ -1980,3 +1980,426 @@ Subsequent checkpoints should separately:
 * only then connect actual ESP32 deep-sleep entry
 
 These are separate changes and physical-test checkpoints, not one large integration task. Continue one understandable change, build, flash, physical test, understand, commit, then the next change.
+
+---
+
+## 2026-09-24
+
+### Development Strategy
+
+Continued on `feature/sleep-execution` from the verified coordinated sleep-handshake checkpoint:
+
+`baea754` — `feat: add bounded coordinated sleep handshake`
+
+Today's work connected the semantic sleep agreement to real ESP32-C3 deep sleep through separately built and physically tested checkpoints. The previous large full-system integration was not restored, and the independently verified CC1101 implementation was used as reference material rather than merged as a complete radio architecture.
+
+The sequence remained one understandable change, build, flash, physical test, understand the result, commit, then the next change.
+
+### One-Shot Sleep Execution Handoff
+
+Added `PowerManager::SleepDecision`, containing the completed `sleepId` and coordinator/participant role, and `takeSleepDecision()` as a one-time handoff to the application.
+
+PowerManager decides that semantic sleep agreement has completed. It does not perform hardware sleep or depend on ESP32, CC1101 or RTC APIs.
+
+The initial checkpoint only printed `SLEEP EXECUTION READY` after the application ACK/retry transaction and sleep-control queue drained. CPU and radios remained awake while that interface was verified.
+
+Duplicate or stale controls do not create another execution decision. Activity revokes an unconsumed decision, and cancelled or failed negotiations do not produce one.
+
+The participant's verified completion sequence remained:
+
+```text
+WAIT_COMMIT
+    |
+    v
+valid SLEEP_COMMIT
+    |
+    v
+WAIT_SLEEP_ACK_TX
+    |
+    v
+SLEEP_ACK submitted
+    |
+    v
+semantic SLEEPING
+```
+
+That semantic transition can precede the ordinary packet ACK for `SLEEP_ACK`. Physical sleep therefore needs a separate transport-drain gate. The initial application-level gate was strengthened later in the day to include callback completion.
+
+### CC1101 Sleep-Arm Readiness
+
+Added the small `CC1101SleepArm` layer to the current firmware. It initializes the proven 433.92 MHz packet configuration on cold boot and provides a read-only pre-sleep readiness snapshot.
+
+The readiness inspection checks:
+
+* CC1101 identity and response
+
+* expected packet configuration, including `IOCFG0 = 0x07`
+
+* radio in RX
+
+* empty RX FIFO, without an overflow indication
+
+* GDO0/GPIO4 LOW
+
+* bounded SPI readiness and radio polling
+
+The inspection does not reset the radio, flush the FIFO, consume a packet or restart RX. Calibration-updated registers are not incorrectly compared against their initial seed values.
+
+Physical tests passed with Bubu initiating, Dudu initiating and simultaneous sleep requests. Each successful, drained sleep decision produced exactly one arm inspection. Activity cancellation and missing-peer failure did not run the arm step.
+
+This checkpoint still left the ESP32 awake; it established that wake hardware was ready before connecting physical sleep.
+
+### RTC History Checkpoint
+
+Added `RtcState` with a validated 16-byte RTC-memory checkpoint.
+
+The retained fields are:
+
+* `nextMessageId`
+
+* last peer EVENT message ID and its validity flag
+
+* newest peer sleep REQUEST watermark and its validity flag
+
+* magic, version and checksum metadata
+
+The design rule is:
+
+**RTC retains history, not work in progress.**
+
+The checkpoint does not retain an active sleep transaction, coordinator/participant phase, phase or hard deadline, cooldown timestamp, ACK/retry state, pending packet, control queue, RX/TX queue state, `SleepDecision`, or previous local/peer runtime power states.
+
+History is needed to avoid reusing an old allocator snapshot, executing a duplicate EVENT again, or accepting an already handled sleep REQUEST after reboot. Live execution must start fresh.
+
+The first RTC checkpoint established storage and restart tests without immediately connecting physical sleep. The later deep-wake checkpoint connected save/load to real sleep boundaries: cold boot invalidates old history; deep-wake startup restores validated history and consumes the snapshot.
+
+Host tests covered invalid checkpoints, replacement, checksum/version validation, validity flags, message-ID rollover, EVENT duplicate history, stale REQUEST rejection and absence of live FSM/transport work after simulated restart.
+
+### Retained CC1101 Deep-Wake Recovery
+
+Added `CC1101WakeRecovery` and manual bench command `x`, initially separate from coordinated sleep execution.
+
+Cold boot still permits normal CC1101 reset and configuration. Deep wake follows a different startup order because resetting or flushing the external radio would destroy the packet that woke the ESP32.
+
+The deep-wake path now:
+
+1. captures ESP32 reset/wake evidence and GDO0 level before normal initialization
+2. initializes fresh PowerManager state and restores RTC history
+3. releases the retained CS hold
+4. attaches MCU SPI and pins without resetting CC1101
+5. inspects retained `MARCSTATE`, `RXBYTES`, `IOCFG0` and GDO0
+6. copies a valid retained packet before any RX recovery
+7. processes the heartbeat EVENT through the existing handler and restored duplicate history
+8. transmits its CC1101 ACK before restarting RX
+9. makes a bounded RX restart attempt and continues normal ESP-NOW runtime
+
+Packet processing and ACK evidence remain separate from whether RX can be restored. The retained packet is not discarded merely because a later restart fails.
+
+The first physical proof used current Bubu firmware and the older proven `ece6879` wake sender on Dudu. Bubu entered deep sleep through `x`, received the RF wake packet and reported:
+
+```text
+GPIO wake mask=0x10
+RTC RESTORE=OK
+GDO0 at boot=HIGH
+MARCSTATE=0x01
+RXBYTES=0x09
+IOCFG0=0x07
+```
+
+The nine FIFO bytes were one CC1101 length byte plus the existing eight-byte `Protocol::Message`. The packet survived the ESP32 reboot, the EVENT was processed once, the wake ACK was transmitted and RX returned ready. Dudu independently received the matching ACK.
+
+The complete verified chain was:
+
+```text
+CC1101 EVENT -> GDO0 HIGH -> GPIO4 deep wake -> ESP32 reboot
+    -> RTC history restored -> retained FIFO recovered
+    -> EVENT processed -> CC1101 ACK -> sender matches ACK
+```
+
+The 30-second bench timer fallback was also physically verified:
+
+* TIMER wake and RTC restore OK
+
+* `EMPTY_FIFO`
+
+* no false EVENT delivery
+
+* no wake ACK transmitted
+
+* radio ready in RX
+
+Timer wake is not counted as CC1101 GPIO wake.
+
+### Current-Firmware CC1101 Peer Wake Transmitter
+
+Added `CC1101WakeTx` and manual serial command `w` so the current firmware could wake its peer without needing the older CC1101 test firmware.
+
+This is a narrow awake-board bench sender, not a general CC1101 transport, fallback selector or new `RadioTask`.
+
+The sender preserves:
+
+* the existing eight-byte heartbeat EVENT
+
+* one ID allocation through the application's existing `nextMessageId`
+
+* the same message ID and payload on retries
+
+* 300 ms ACK timeout and maximum two retries
+
+* ACK version, sender, type and `ackForMessageId` validation
+
+* bounded TX, RX and SPI waits
+
+* one RX recovery budget across the command
+
+* no CC1101 reset or `SRES`
+
+* refusal when existing retained FIFO data makes transmission unsafe
+
+The TX sequence reuses the proven IDLE/TX FIFO preparation, `PATABLE = 0x60`, length-prefixed packet write, STX, bounded completion wait and return to RX. ACK success remains distinguishable from final RX readiness.
+
+Physical tests passed with current firmware on both boards:
+
+* Bubu `x` -> Dudu `w` -> Bubu GPIO4 wake -> ACK returned to Dudu
+
+* Dudu `x` -> Bubu `w` -> Dudu GPIO4 wake -> ACK returned to Bubu
+
+In both directions, RTC restoration succeeded, the retained nine-byte FIFO packet was recovered, the EVENT was processed exactly once and the CC1101 ACK matched at the sender. Normal ESP-NOW runtime resumed afterward.
+
+The sender remains manual. General CC1101 reception while the application is already awake was not added; sender retries alone therefore do not guarantee a second ACK if the initial boot-time wake ACK is lost.
+
+### Callback-Level Transport Drain
+
+Physical log ordering exposed a remaining gap before connecting real sleep: `SLEEP EXECUTION READY` could appear before the final ESP-NOW `TX CALLBACK ... SUCCESS`.
+
+Checking only `waitingForAck == false` and `controlCount == 0` did not prove that a fire-and-forget packet ACK had finished transmission. In particular, the coordinator could otherwise sleep before its ordinary receipt ACK for the participant's `SLEEP_ACK` had completed.
+
+Added atomic ESP-NOW TX-in-flight and active-RX-callback tracking without replacing the transport architecture.
+
+A TX reservation is incremented before `esp_now_send()` because the Wi-Fi task can invoke its callback before that call returns. Rejected sends roll back the reservation. Accepted sends release it exactly once at the end of their callback, after logging; both SUCCESS and FAILED callbacks count as completed. Callback completion is not itself proof of application-level delivery.
+
+The shared physical-sleep drain check now requires:
+
+* runtime initialized
+
+* no pending application ACK/retry transaction
+
+* no queued sleep controls
+
+* no active sleep transaction
+
+* zero outstanding ESP-NOW TX callbacks
+
+* no active ESP-NOW RX callback
+
+* an existing, empty receive queue
+
+`SleepDecision` is not consumed until that gate passes. A stalled final drain has a separate bounded three-second timeout; it cannot leave the awake device waiting indefinitely in semantic `SLEEPING`.
+
+The participant also remains awake if retries for the ordinary receipt of its final `SLEEP_ACK` exhaust. A rejected receipt-ACK send after semantic completion aborts local execution rather than allowing an empty callback count to imply successful transport.
+
+The handshake sequence, DeviceId arbitration, packet format, 300 ms ACK timeout and maximum two retries remain unchanged.
+
+### Shared Physical Sleep Entry
+
+Connected coordinated sleep execution to the same proven physical-entry primitive used by manual `x`.
+
+Both coordinator and participant use one application execution path:
+
+```text
+semantic handshake complete
+    -> transport fully drained
+    -> SleepDecision consumed once
+    -> CC1101 arm READY
+    -> shared physical sleep entry
+```
+
+The entry primitive performs a read-only CC1101 readiness check, configures GPIO4 HIGH wake and the 30-second integration safety timer, drives CS HIGH, and enables GPIO/deep-sleep hold.
+
+Transport is rechecked after arm inspection and again after wake-source setup and Serial logging. RTC history is saved at the final possible boundary, followed by another transport check and the final GDO0 LOW check immediately before `esp_deep_sleep_start()`.
+
+No CC1101 reset or destructive FIFO operation is used to prepare sleep.
+
+An arm refusal, newly busy transport, wake-source setup failure, final GDO HIGH or unexpected deep-sleep return aborts entry. Cleanup invalidates the RTC snapshot, releases CS hold, disables configured wake sources and leaves the CPU awake, with the failure reason logged.
+
+Added the hardware-independent `PowerManager::notifySleepExecutionFailed()` notification. After semantic completion, failure returns local state to `IDLE` with a three-second cooldown, keeps the transaction inactive, discards execution/replay authority and does not recreate a `SleepDecision`.
+
+Peer state is preserved because the peer may already be asleep. Local entry failure does not mark it `OFFLINE`, start another handshake or enter an automatic retry loop.
+
+### Coordinated Real-Sleep Hardware Validation
+
+Physical tests were performed after the final execution checkpoint was built and flashed to both boards.
+
+Bubu-initiated sleep passed:
+
+* `SLEEP_REQUEST -> SLEEP_READY -> SLEEP_COMMIT -> SLEEP_ACK`
+
+* outstanding transport callbacks drained
+
+* both devices reported sleep execution ready and CC1101 arm ready
+
+* both entered real deep sleep exactly once
+
+* both USB serial monitors disconnected
+
+* both woke through the timer after approximately 30 seconds
+
+* RTC restoration succeeded and retained RX FIFOs were empty
+
+* both returned to fresh `ACTIVE` runtime
+
+* normal ESP-NOW communication recovered automatically
+
+Dudu-initiated sleep passed the same complete sequence with coordinator and participant reversed.
+
+Simultaneous requests passed with the non-blocking one-second control delay enabled:
+
+* both devices began their own coordinator transaction
+
+* deterministic DeviceId arbitration selected Bubu's transaction
+
+* Dudu abandoned its local transaction and became participant
+
+* both converged on the same sleep ID without extending the hard deadline
+
+* transport drained on both sides
+
+* both entered physical sleep exactly once
+
+* both timer-woke and recovered normal communication
+
+Activity cancellation passed:
+
+* activity cancelled the active sleep transaction
+
+* a best-effort `SLEEP_CANCEL` was transmitted
+
+* both devices remained awake
+
+* no sleep execution began
+
+Missing-peer testing passed:
+
+* one initial REQUEST plus maximum two retries used the same message ID
+
+* retry exhaustion marked the peer `OFFLINE` and returned local state to `IDLE`
+
+* no sleep decision was executed and no physical sleep occurred
+
+* no endless search, retry or automatic re-negotiation loop followed
+
+### Host Tests and Build Verification
+
+The focused host suites passed for both Bubu and Dudu identities, including the existing EVENT/ACK, sleep-handshake and collision regressions.
+
+Coverage added through today's checkpoints includes:
+
+* one-shot decisions, duplicate/stale suppression and transport drain
+
+* CC1101 identity/configuration checks, FIFO/GDO preservation and bounded arm waits
+
+* RTC validity, checksum/version checks, replacement, ID rollover and history-only restart
+
+* retained FIFO recovery, malformed packets, wake ACK/RX failures and timer `EMPTY_FIFO`
+
+* current-firmware wake transmission, ACK validation, same-ID retries, bounded cutoff and one recovery budget
+
+* actual ESP-NOW wrapper accounting for early, delayed, failed and rejected sends
+
+* coordinator and participant callback gates and exactly one physical-entry attempt
+
+* cancellation, missing peer and delayed simultaneous-request convergence
+
+* traffic arriving during arm/setup, final GDO HIGH, setup failure and unexpected deep-sleep return
+
+* final-boundary RTC save and abort cleanup
+
+* fresh transaction, queue, retry, deadline and execution state after timer restart
+
+* unchanged manual `x` and `w` operation
+
+The host harness uses compiler warnings as errors and address/undefined-behavior sanitizers. Both PlatformIO environments built successfully without warnings or errors, and `git diff --check` passed during firmware verification.
+
+These deterministic software checks are separate from the physical board results recorded above. Hardware validation established the actual GPIO wake, packet retention, returned ACK, coordinated deep sleep and timer recovery behavior in the tested scenarios.
+
+### Current Working State
+
+Both devices now use the same current firmware architecture on `feature/sleep-execution`.
+
+The verified system includes:
+
+* reliable bidirectional ESP-NOW EVENT/ACK communication
+
+* bounded sleep negotiation with deterministic simultaneous-request resolution
+
+* bounded activity cancellation and missing-peer behavior
+
+* RTC history retained across deep sleep
+
+* CC1101 armed for GPIO4 deep wake
+
+* retained CC1101 wake-packet recovery and EVENT/ACK operation in both directions
+
+* coordinated handshake connected to real deep sleep on both devices
+
+* fresh ACTIVE runtime and automatic ESP-NOW recovery after timer wake
+
+The 30-second timer remains an integration safety net, not final product policy. Manual `x` and `w` remain bench/debug commands. ADXL345 motion wake is not yet integrated into this coordinated sleep path, and the production power policy is not finished.
+
+The successful physical exchanges do not establish agreement under every RF-loss condition. A completed callback does not guarantee a peer processed its packet, and one device may already be asleep when the other aborts. Bounded failure handling and the integration timer keep those cases observable without automatic retry loops.
+
+Today's firmware checkpoints are committed and pushed on `feature/sleep-execution`. This DEVLOG update is maintained separately on `main`; no feature source or tests are merged or cherry-picked into `main`.
+
+### Important Development Reflection
+
+Semantic `SLEEPING` is a policy decision, not permission to immediately suspend the CPU. Required packet work, including ESP-NOW callbacks, is part of the physical sleep-entry contract.
+
+Deep-wake startup order is equally important: normal CC1101 initialization would erase the retained packet before software could identify and acknowledge the wake event. RTC restoration must recover history and freshness without reviving stale runtime execution.
+
+Hardware sleep failure needs an explicit bounded path back to an awake semantic state. Leaving an awake CPU permanently labeled `SLEEPING` would hide a failed transition rather than recover from it.
+
+Today's work continues the lesson from the abandoned large integration attempt. Separately proving the decision handoff, arm check, RTC history, retained wake, peer transmitter and final execution gate made failures diagnosable and preserved each last working checkpoint before the next subsystem was connected.
+
+### Problems Solved
+
+* one completed handshake producing at most one physical execution attempt
+
+* non-destructive CC1101 pre-sleep readiness inspection
+
+* preserving protocol history across deep-sleep reboot without restoring unfinished work
+
+* recovering and acknowledging a retained CC1101 wake packet before normal runtime
+
+* waking either board using the current firmware on its peer
+
+* preventing deep sleep while required ESP-NOW callbacks remain outstanding
+
+* sharing manual and coordinated physical sleep entry
+
+* explicit IDLE/cooldown recovery after local execution failure
+
+* coordinated real sleep, timer wake and subsequent ESP-NOW recovery on both boards
+
+### Git Commits
+
+Today's firmware checkpoints, in implementation order:
+
+* `b0554a8` — `feat: add one-shot sleep execution handoff`
+
+* `2f5d71d` — `feat: validate CC1101 sleep-arm readiness`
+
+* `4ddb5d8` — `feat: add RTC sleep history checkpoint`
+
+* `9b2cc12` — `feat: add retained CC1101 deep-wake recovery`
+
+* `78a00c7` — `feat: add bounded CC1101 peer wake transmission`
+
+* `d62f0fc` — `feat: connect coordinated sleep to deep sleep`
+
+All six checkpoints are committed on `feature/sleep-execution` and were confirmed present on its matching remote branch before this documentation update.
+
+### Next Step
+
+Integrate the ADXL345 motion interrupt into the proven coordinated deep-sleep/wake architecture, incrementally, without destabilizing CC1101 peer wake or the sleep handshake.
+
+Keep the integration timer while validating that next checkpoint. Preserve the current working state and continue one understandable change, build, flash, physical test, understand, commit, then the next change.
