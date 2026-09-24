@@ -22,9 +22,9 @@ namespace RtcState
     bool load(History& out);
     void invalidate();
 
-    // Not wired to runtime yet. Future entry must save AFTER the last ID is
-    // allocated, immediately before sleeping. An awake CPU makes snapshots stale.
-    // Future startup must gate load on a real deep-wake reset cause, invalidate
-    // on cold boot, and recover the retained CC1101 FIFO BEFORE begin() can reset
-    // the radio. Neither reset-cause handling nor that recovery is implemented.
+    // Manual bench entry saves AFTER the last ID is
+    // allocated, immediately before sleeping. The handshake still stays awake.
+    // Startup gates load on a real deep-wake reset cause, invalidates
+    // on cold boot, and recovers the retained CC1101 FIFO BEFORE begin() can reset
+    // the radio. No live execution state is restored.
 }

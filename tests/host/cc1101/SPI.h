@@ -20,6 +20,11 @@ struct HostSPI
     std::vector<uint8_t> commands;
     bool active = false, first = true, reachRx = true;
     int corruptWrite = -1;
+    std::deque<uint8_t> rxFifo;
+    std::vector<uint8_t> txFifo;
+    std::vector<std::vector<uint8_t>> transmissions;
+    unsigned fifoReads = 0;
+    bool finishTx = true, failAfterFifo = false;
     uint8_t command = 0;
     unsigned statusReads = 0;
     unsigned injectPacketAt = 0;
@@ -46,9 +51,25 @@ struct HostSPI
                 registers[0x35] = 0x0D;
                 registers[0x23] = 0xEA; // Calibration changes the seed.
             }
-            assert(value != 0x3F && value != 0xFF); // No FIFO reads/writes.
+            if (value == 0x36) registers[0x35] = 1;
+            if (value == 0x3A) { rxFifo.clear(); registers[0x3B] = 0; gdoLevel = LOW; }
+            if (value == 0x3B) txFifo.clear();
+            if (value == 0x35)
+            {
+                transmissions.push_back(txFifo);
+                registers[0x35] = finishTx ? 1 : 0x13;
+            }
             return 0;
         }
+        if (command == 0xFF)
+        {
+            assert(!rxFifo.empty());
+            const auto byte = rxFifo.front(); rxFifo.pop_front(); ++fifoReads;
+            registers[0x3B] = static_cast<uint8_t>(rxFifo.size()); gdoLevel = LOW;
+            if (rxFifo.empty() && failAfterFifo) misoHigh = true;
+            return byte;
+        }
+        if (command == 0x7F) { txFifo.push_back(value); return 0; }
         const uint8_t address = command & 0x3F;
         if (command & 0x80)
         {

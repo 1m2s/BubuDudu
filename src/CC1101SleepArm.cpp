@@ -1,7 +1,7 @@
 #include "CC1101SleepArm.h"
 
 #include <Arduino.h>
-#include <SPI.h>
+#include "CC1101Bus.h"
 
 namespace CC1101SleepArm
 {
@@ -9,12 +9,10 @@ namespace CC1101SleepArm
     {
         // Pin mapping, SPI mode/rate, reset sequence and RX profile adapted
         // from ece6879: CC1101Radio::begin/reset/configureForPacketTest.
-        constexpr uint8_t CS = 10, SCK = 6, MOSI = 7, MISO = 20, GDO0 = 4;
+        using namespace CC1101Bus;
         constexpr uint8_t IOCFG0 = 0x02, PARTNUM = 0x30, VERSION = 0x31;
         constexpr uint8_t MARCSTATE = 0x35, RXBYTES = 0x3B;
         constexpr uint8_t SRES = 0x30, SRX = 0x34;
-        constexpr uint32_t BUDGET_US = 50000, READY_WAIT_US = 2000;
-        const SPISettings settings(100000, MSBFIRST, SPI_MODE0);
         bool initialized = false;
 
         struct Setting { uint8_t address; uint8_t value; };
@@ -34,49 +32,6 @@ namespace CC1101SleepArm
             {0x23, 0xE9}, {0x24, 0x2A}, {0x25, 0x00}, {0x26, 0x1F}, // FSCAL3..0
             {0x2C, 0x81}, {0x2D, 0x35}, {0x2E, 0x09} // TEST2/1/0
         };
-
-        bool withinBudget(uint32_t started)
-        {
-            return uint32_t(micros() - started) < BUDGET_US;
-        }
-
-        bool waitReady(uint32_t started)
-        {
-            const uint32_t waitStarted = micros();
-            while (digitalRead(MISO) == HIGH)
-            {
-                if (!withinBudget(started) || uint32_t(micros() - waitStarted) >= READY_WAIT_US)
-                    return false;
-                delayMicroseconds(10);
-            }
-            return withinBudget(started);
-        }
-
-        void releaseBus()
-        {
-            digitalWrite(CS, HIGH);
-            SPI.endTransaction();
-        }
-
-        bool select(uint32_t started)
-        {
-            if (!withinBudget(started)) return false;
-            SPI.beginTransaction(settings);
-            digitalWrite(CS, LOW);
-            if (waitReady(started)) return true;
-            releaseBus();
-            return false;
-        }
-
-        bool read(uint8_t address, uint8_t& value, uint32_t started)
-        {
-            if (!select(started)) return false;
-            // Status addresses need the burst bit even for a single byte.
-            SPI.transfer(address | (address >= 0x30 ? 0xC0 : 0x80));
-            value = SPI.transfer(0);
-            releaseBus();
-            return withinBudget(started);
-        }
 
         bool identity(Report& report, uint32_t started)
         {
@@ -125,16 +80,13 @@ namespace CC1101SleepArm
     Result begin()
     {
         initialized = false;
-        digitalWrite(CS, HIGH); // Output latch before enabling pad, as in ece6879.
-        pinMode(CS, OUTPUT);
-        pinMode(GDO0, INPUT_PULLDOWN);
-        SPI.begin(SCK, MISO, MOSI, CS);
+        CC1101Bus::setupPins();
         const uint32_t started = micros();
         Report probe;
         if (!identity(probe, started)) return Result::RadioUnavailable;
 
         // Cold boot ONLY. No reset/flush is reachable from prepareForSleep().
-        SPI.beginTransaction(settings);
+        SPI.beginTransaction(settings());
         digitalWrite(CS, HIGH); delayMicroseconds(5);
         digitalWrite(CS, LOW); delayMicroseconds(10);
         digitalWrite(CS, HIGH); delayMicroseconds(40);
@@ -171,6 +123,14 @@ namespace CC1101SleepArm
             delayMicroseconds(100);
         }
         return Result::NotInRx;
+    }
+
+    void attachRetained()
+    {
+        // Caller releases retained CS hold with the output latch HIGH first.
+        // MCU-side setup only; subsequent inspection verifies radio readiness.
+        CC1101Bus::setupPins();
+        initialized = true;
     }
 
     Report prepareForSleep()

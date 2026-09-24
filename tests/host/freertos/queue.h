@@ -32,3 +32,5 @@ inline int xQueueReceive(QueueHandle_t queue, void* data, unsigned wait)
     queue->items.pop_front();
     return pdPASS;
 }
+
+inline size_t uxQueueMessagesWaiting(QueueHandle_t queue) { return queue->items.size(); }

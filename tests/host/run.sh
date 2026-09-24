@@ -20,4 +20,9 @@ done
     -I"$test_dir" -I"$repo_dir/include" \
     "$test_dir/rtc_state_test.cpp" -o "$build_dir/test_rtc_state"
 "$build_dir/test_rtc_state"
+"${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$test_dir/wake" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
+    "$test_dir/cc1101_wake_test.cpp" -o "$build_dir/test_cc1101_wake"
+"$build_dir/test_cc1101_wake"
 echo "Host binaries: $build_dir"

@@ -10,6 +10,10 @@
 #include "PowerManager.h"
 #include "CC1101SleepArm.h"
 #include "RtcState.h"
+#include "CC1101WakeRecovery.h"
+
+void saveRtcHistory();
+bool restoreRtcHistory();
 
 
 namespace
@@ -17,6 +21,9 @@ namespace
     constexpr UBaseType_t RX_QUEUE_LENGTH = 8;
     QueueHandle_t receiveQueue = nullptr;
     bool protocolReady = false;
+    CC1101WakeRecovery::BootInfo bootInfo;
+    CC1101WakeRecovery::Report wakeReport;
+    bool rtcRestored = false;
 
 
     // ======================================================
@@ -502,8 +509,9 @@ namespace
     // Handle received EVENT
     // ======================================================
 
-    void handleEvent(
-        const Protocol::Message& message
+    bool handleEvent(
+        const Protocol::Message& message,
+        bool receiptOverEspNow = true
     )
     {
         bool duplicate =
@@ -541,12 +549,10 @@ namespace
              *
              * Therefore ACK the duplicate again.
              */
-            sendAck(
-                message.messageId
-            );
+            if (receiptOverEspNow) sendAck(message.messageId);
 
 
-            return;
+            return false;
         }
 
 
@@ -597,7 +603,7 @@ namespace
         // --------------------------------------------------
 
         if (
-            DROP_FIRST_ACK_FOR_TEST &&
+            receiptOverEspNow && DROP_FIRST_ACK_FOR_TEST &&
             !testAckAlreadyDropped
         )
         {
@@ -612,7 +618,7 @@ namespace
             );
 
 
-            return;
+            return true;
         }
 
 
@@ -620,9 +626,8 @@ namespace
         // Normal ACK
         // --------------------------------------------------
 
-        sendAck(
-            message.messageId
-        );
+        if (receiptOverEspNow) sendAck(message.messageId);
+        return true;
     }
 
 
@@ -889,7 +894,17 @@ namespace
 
         switch (Serial.read())
         {
-            case 'p': break;
+            case 'p':
+                if (bootInfo.deep) CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
+                break;
+            case 'x':
+                if (!protocolReady || waitingForAck || controlCount != 0 ||
+                    uxQueueMessagesWaiting(receiveQueue) != 0 ||
+                    !PowerManager::automaticHeartbeatAllowed() || PowerManager::transaction().active)
+                    Serial.println("BENCH DEEP SLEEP | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
+                else
+                    CC1101WakeRecovery::benchDeepSleep(saveRtcHistory);
+                break;
             case 'i': PowerManager::forceIdle(now); break;
             case 's':
                 if (!protocolReady || waitingForAck || controlCount != 0)
@@ -910,7 +925,7 @@ namespace
                 break;
             case '?':
                 Serial.println("Power tests: p=status i=IDLE s=handshake a=activity/cancel "
-                               "h=toggle auto heartbeats d=toggle 1s control delay; CPU stays awake");
+                               "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep; handshake stays awake");
                 break;
             default: return; // Includes serial line endings.
         }
@@ -923,7 +938,7 @@ namespace
 }
 
 
-// Explicit foundation hooks, intentionally NOT called by setup()/loop() yet.
+// Only manual bench entry calls save; only real deep-wake startup calls restore.
 // Save belongs at the future final sleep boundary, after all packet IDs have
 // been allocated. Do not save at today's arm check and keep using that snapshot
 // while the CPU continues to send packets.
@@ -933,7 +948,7 @@ void saveRtcHistory()
                     PowerManager::exportHistory()});
 }
 
-// Future deep-wake startup only: call PowerManager::begin() first, then restore
+// Deep-wake startup only: call PowerManager::begin() first, then restore
 // before enabling transport. Never reset CC1101 or runtime state to simulate it.
 bool restoreRtcHistory()
 {
@@ -954,33 +969,38 @@ bool restoreRtcHistory()
 // Arduino setup
 // ==========================================================
 
+// Wake-only callback: use the existing EVENT dedup/delivery path, but return a
+// CC1101 receipt. Wi-Fi is not initialized yet; no ESP-NOW send is attempted.
+Protocol::Message handleWakeEvent(const Protocol::Message& event, bool& processed)
+{
+    processed = handleEvent(event, false);
+    return {Protocol::VERSION, Protocol::MessageType::Ack, nextMessageId++,
+            LOCAL_DEVICE, Protocol::EventType::None, event.messageId};
+}
+
 void setup()
 {
-    Serial.begin(
-        115200
-    );
-
-
-    delay(
-        1500
-    );
-
-
-    Serial.println();
-    Serial.println(
-        "Starting BubuDudu ESP-NOW reliability test..."
-    );
-
+    bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
+    Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
-    Serial.println("Sleep handshake bench: ? for commands. CPUs remain awake; both peers must be IDLE.");
+    if (bootInfo.deep)
+    {
+        // No USB delay, normal CC1101 begin, reset or configuration here.
+        rtcRestored = restoreRtcHistory();
+        if (!rtcRestored) RtcState::invalidate();
+        wakeReport = CC1101WakeRecovery::recover(rtcRestored, PEER_DEVICE, handleWakeEvent);
+        CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
+    }
+    else
+    {
+        RtcState::invalidate();
+        delay(1500);
+        Serial.println("BOOT | COLD");
+        const auto armInit = CC1101SleepArm::begin();
+        Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
+    }
+    Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
-
-    // One cold-boot radio setup before starting ESP-NOW; never run on an arm
-    // check. A future deep-wake boot MUST skip CC1101SleepArm::begin() until
-    // retained wake-packet inspection/recovery completes. RTC history restore
-    // alone does not make this cold-boot path safe for real deep wake.
-    const auto armInit = CC1101SleepArm::begin();
-    Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
 
     receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
     if (receiveQueue == nullptr)

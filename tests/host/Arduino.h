@@ -17,6 +17,7 @@ struct HostSerial
     std::string log;
     std::deque<char> input;
     void begin(unsigned long) {}
+    void flush() {}
     int available() { return static_cast<int>(input.size()); }
     int read() { int c = input.front(); input.pop_front(); return c; }
     void println(const char* s = "") { log += std::string(s) + "\n"; }
