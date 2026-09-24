@@ -28,6 +28,8 @@ struct HostSPI
     uint8_t command = 0;
     unsigned statusReads = 0;
     unsigned injectPacketAt = 0;
+    void (*statusHook)() = nullptr;
+    uint32_t txAtUs = 0;
     void begin(int sck, int miso, int mosi, int cs)
     {
         assert(sck == 6 && miso == 20 && mosi == 7 && cs == 10);
@@ -57,6 +59,7 @@ struct HostSPI
             if (value == 0x35)
             {
                 transmissions.push_back(txFifo);
+                txAtUs = hostUs;
                 registers[0x35] = finishTx ? 1 : 0x13;
             }
             return 0;
@@ -76,6 +79,7 @@ struct HostSPI
             if (address >= 0x30) assert((command & 0xC0) == 0xC0);
             if (address == 0x35 || address == 0x3B)
             {
+                if (statusHook) statusHook();
                 ++statusReads;
                 if (injectPacketAt && statusReads == injectPacketAt)
                 {

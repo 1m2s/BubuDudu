@@ -31,6 +31,20 @@ namespace CC1101SleepArm
     }
 }
 unsigned wakeRecoveries = 0, benchSleepCalls = 0;
+std::vector<Protocol::Message> wakeEvents;
+namespace CC1101WakeTx
+{
+    Report send(const Protocol::Message& event, Protocol::DeviceId peer)
+    {
+        assert(protocolReady && !waitingForAck && controlCount == 0 && !PowerManager::transaction().active);
+        assert(receiveQueue->items.empty() && peer == PEER_DEVICE);
+        wakeEvents.push_back(event);
+        Report report;
+        report.result = Result::AckTimeout; report.attempts = 3; report.rxReady = true;
+        return report;
+    }
+    const char* toString(Result) { return "ACK_TIMEOUT"; }
+}
 CC1101WakeRecovery::BootInfo injectedBoot;
 bool injectWakePacket = false;
 Protocol::Message injectedPacket{};
@@ -241,6 +255,7 @@ void freshApp()
     armAttempts = 0; armResult = CC1101SleepArm::Result::Ready;
     armInitializations = 0; wakeRecoveries = 0; benchSleepCalls = 0;
     injectedBoot = {}; injectWakePacket = false;
+    wakeEvents.clear();
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
 }
 void command(char c) { Serial.input.push_back(c); loop(); }
@@ -852,12 +867,40 @@ void testBootRouting()
     puts("PASS: cold/deep startup routing, RTC before wake EVENT dedup, fresh runtime, one recovery, x transport/FSM guards");
 }
 
+void testManualWakeTx()
+{
+    freshApp(); protocolReady = false; command('w');
+    assert(wakeEvents.empty() && nextMessageId == 1);
+    freshApp(); startHeartbeatEvent(); const auto id = nextMessageId; command('w');
+    assert(wakeEvents.empty() && nextMessageId == id);
+    freshApp(); command('d'); command('i'); command('s'); command('w');
+    assert(wakeEvents.empty());
+    freshApp(); command('i'); command('s'); receive(incoming(Type::Ack, pendingMessage.messageId));
+    assert(!waitingForAck && transaction().active); command('w'); assert(wakeEvents.empty());
+    // A queued control blocks w even without an active FSM transaction.
+    freshApp(); assert(queueSleepControl(Type::SleepReady, 40)); command('w'); assert(wakeEvents.empty());
+    freshApp(); queueReceivedData(reinterpret_cast<const uint8_t*>(&injectedPacket), sizeof(injectedPacket));
+    command('w'); assert(wakeEvents.empty());
+    freshApp(); nextMessageId = 0xFFFF;
+    command('w'); assert(wakeEvents.size() == 1 && nextMessageId == 0);
+    assert(wakeEvents[0].messageId == 0xFFFF && wakeEvents[0].type == Type::Event &&
+           wakeEvents[0].version == Protocol::VERSION && wakeEvents[0].sender == LOCAL_DEVICE &&
+           wakeEvents[0].event == Protocol::EventType::Heartbeat && wakeEvents[0].ackForMessageId == 0);
+    assert(Serial.log.find("GIVE_UP | retries=2") != std::string::npos);
+    for (unsigned i = 0; i < 20; ++i) loop();
+    assert(wakeEvents.size() == 1 && nextMessageId == 0 && wire.empty() && !transaction().active);
+    command('w'); assert(wakeEvents.size() == 2 && wakeEvents[1].messageId == 0 && nextMessageId == 1);
+    // Existing ESP-NOW EVENT path still uses that same allocator afterwards.
+    startHeartbeatEvent(); assert(pendingMessage.messageId == 1 && nextMessageId == 2);
+    puts("PASS: manual w runtime/transport/FSM guards, one allocator increment, rollover, no automatic wake TX");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
-    testRtcHistoryRestart(); testBootRouting();
+    testRtcHistoryRestart(); testBootRouting(); testManualWakeTx();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

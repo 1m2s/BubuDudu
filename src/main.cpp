@@ -11,6 +11,7 @@
 #include "CC1101SleepArm.h"
 #include "RtcState.h"
 #include "CC1101WakeRecovery.h"
+#include "CC1101WakeTx.h"
 
 void saveRtcHistory();
 bool restoreRtcHistory();
@@ -905,6 +906,26 @@ namespace
                 else
                     CC1101WakeRecovery::benchDeepSleep(saveRtcHistory);
                 break;
+            case 'w':
+            {
+                if (!protocolReady || waitingForAck || controlCount != 0 ||
+                    uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
+                    !PowerManager::automaticHeartbeatAllowed())
+                {
+                    Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
+                    break;
+                }
+                const Protocol::Message event{Protocol::VERSION, Protocol::MessageType::Event,
+                    nextMessageId++, LOCAL_DEVICE, Protocol::EventType::Heartbeat, 0};
+                const auto result = CC1101WakeTx::send(event, PEER_DEVICE);
+                if (result.result == CC1101WakeTx::Result::Acked)
+                    Serial.printf("CC1101 WAKE ACK | id=%u | OK | RX_READY=%d\n", event.messageId, result.rxReady);
+                else
+                    Serial.printf("CC1101 WAKE TX | id=%u | GIVE_UP | retries=%u | reason=%s | RX_READY=%d\n",
+                        event.messageId, result.attempts ? result.attempts - 1 : 0,
+                        CC1101WakeTx::toString(result.result), result.rxReady);
+                break;
+            }
             case 'i': PowerManager::forceIdle(now); break;
             case 's':
                 if (!protocolReady || waitingForAck || controlCount != 0)
@@ -925,7 +946,8 @@ namespace
                 break;
             case '?':
                 Serial.println("Power tests: p=status i=IDLE s=handshake a=activity/cancel "
-                               "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep; handshake stays awake");
+                               "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep "
+                               "w=BENCH CC1101 wake EVENT; handshake stays awake");
                 break;
             default: return; // Includes serial line endings.
         }

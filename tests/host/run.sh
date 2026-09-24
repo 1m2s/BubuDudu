@@ -25,4 +25,11 @@ done
     -I"$test_dir/wake" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
     "$test_dir/cc1101_wake_test.cpp" -o "$build_dir/test_cc1101_wake"
 "$build_dir/test_cc1101_wake"
+for device in BUBU DUDU; do
+    "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+        -fsanitize=address,undefined -fno-omit-frame-pointer \
+        -D"DEVICE_$device" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
+        "$test_dir/cc1101_wake_tx_test.cpp" -o "$build_dir/test_cc1101_wake_tx_$device"
+    "$build_dir/test_cc1101_wake_tx_$device"
+done
 echo "Host binaries: $build_dir"
