@@ -142,6 +142,21 @@ namespace PowerManager
         wakeDeadline = 0;
     }
 
+    SleepHistory exportHistory()
+    {
+        return {havePeerRequest, newestPeerRequest};
+    }
+
+    bool restoreHistory(const SleepHistory& history)
+    {
+        if (local != LocalState::ACTIVE || peer != PeerState::UNKNOWN ||
+            sleep.active || sleepDecisionPending || cooldownActive)
+            return false;
+        havePeerRequest = history.havePeerRequest;
+        newestPeerRequest = history.newestPeerRequest;
+        return true;
+    }
+
     void update(uint32_t now)
     {
         if (cooldownActive && expired(now, cooldownDeadline))

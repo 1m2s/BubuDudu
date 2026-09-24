@@ -26,6 +26,16 @@ namespace PowerManager
         SleepRole role;
     };
 
+    // Peer REQUEST freshness only; no transaction or completed-reply authority.
+    struct SleepHistory
+    {
+        bool havePeerRequest;
+        uint16_t newestPeerRequest;
+    };
+    SleepHistory exportHistory();
+    // Startup only, immediately after begin(). Refuses a live/nonfresh FSM.
+    bool restoreHistory(const SleepHistory& history);
+
     struct SleepTransaction
     {
         bool active = false;

@@ -9,6 +9,7 @@
 #include "Protocol.h"
 #include "PowerManager.h"
 #include "CC1101SleepArm.h"
+#include "RtcState.h"
 
 
 namespace
@@ -922,6 +923,33 @@ namespace
 }
 
 
+// Explicit foundation hooks, intentionally NOT called by setup()/loop() yet.
+// Save belongs at the future final sleep boundary, after all packet IDs have
+// been allocated. Do not save at today's arm check and keep using that snapshot
+// while the CPU continues to send packets.
+void saveRtcHistory()
+{
+    RtcState::save({nextMessageId, haveLastPeerEvent, lastPeerEventId,
+                    PowerManager::exportHistory()});
+}
+
+// Future deep-wake startup only: call PowerManager::begin() first, then restore
+// before enabling transport. Never reset CC1101 or runtime state to simulate it.
+bool restoreRtcHistory()
+{
+    if (protocolReady || waitingForAck || controlCount != 0)
+        return false;
+    RtcState::History history{};
+    if (!RtcState::load(history) || !PowerManager::restoreHistory(history.sleep))
+        return false;
+    nextMessageId = history.nextMessageId;
+    haveLastPeerEvent = history.haveLastPeerEvent;
+    lastPeerEventId = history.lastPeerEventId;
+    RtcState::invalidate(); // Consume only after successful application.
+    return true;
+}
+
+
 // ==========================================================
 // Arduino setup
 // ==========================================================
@@ -948,7 +976,9 @@ void setup()
     PowerManager::printStatus(millis());
 
     // One cold-boot radio setup before starting ESP-NOW; never run on an arm
-    // check. A future deep-wake boot must bypass reset/configuration entirely.
+    // check. A future deep-wake boot MUST skip CC1101SleepArm::begin() until
+    // retained wake-packet inspection/recovery completes. RTC history restore
+    // alone does not make this cold-boot path safe for real deep wake.
     const auto armInit = CC1101SleepArm::begin();
     Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
 

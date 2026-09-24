@@ -2,6 +2,7 @@
 // substitutes. No PlatformIO, Wi-Fi, hardware, or additional test framework.
 #include "Arduino.h"
 #include "../../src/PowerManager.cpp"
+#include "../../src/RtcState.cpp"
 #include "../../src/main.cpp"
 
 uint32_t hostNow = 0;
@@ -9,10 +10,11 @@ HostSerial Serial;
 std::vector<Protocol::Message> wire;
 bool radioAccepts = true;
 unsigned armAttempts = 0;
+unsigned armInitializations = 0;
 CC1101SleepArm::Result armResult = CC1101SleepArm::Result::Ready;
 namespace CC1101SleepArm
 {
-    Result begin() { return Result::Ready; }
+    Result begin() { ++armInitializations; return Result::Ready; }
     Report prepareForSleep()
     {
         // Real loop must consume only after transport drain, never in callback.
@@ -211,6 +213,7 @@ void freshApp()
     nextEventTime = 100000; controlCount = 0; pauseAutomaticHeartbeats = true; delayControlsForTest = false;
     hostNow = 0; wire.clear(); radioAccepts = true; Serial.log.clear(); Serial.input.clear();
     armAttempts = 0; armResult = CC1101SleepArm::Result::Ready;
+    armInitializations = 0;
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
 }
 void command(char c) { Serial.input.push_back(c); loop(); }
@@ -669,11 +672,107 @@ void testArmFailure()
     }
 }
 
+void simulateHistoryRestart()
+{
+    // Recreate startup defaults, NOT setup(): no radio reset, no real reboot.
+    // RTC storage is deliberately left intact across this simulated restart.
+    freshApp(); protocolReady = false;
+    pendingMessage = {}; ackWaitStart = 0; nextEventTime = 0;
+    for (auto& control : controlQueue) control = {};
+    assert(restoreRtcHistory());
+    assert(!transaction().active && transaction().role == SleepRole::NONE &&
+           transaction().phase == SleepPhase::NONE);
+    assert(transaction().startedAt == 0 && transaction().phaseDeadline == 0 &&
+           transaction().hardDeadline == 0 && cooldownLeftMs(hostNow) == 0);
+    assert(localState() == LocalState::ACTIVE && peerState() == PeerState::UNKNOWN);
+    SleepDecision decision{};
+    assert(!takeSleepDecision(decision));
+    assert(!waitingForAck && retryCount == 0 && controlCount == 0 && ackWaitStart == 0);
+    assert(pendingMessage.messageId == 0 && nextEventTime == 0 && receiveQueue->items.empty());
+    assert(armInitializations == 0 && armAttempts == 0 && wire.empty());
+    RtcState::History consumed{};
+    assert(!RtcState::load(consumed));
+    assert(!restoreRtcHistory()); // Cannot replay the old ID allocator snapshot.
+    protocolReady = true;
+}
+
+void testRtcHistoryRestart()
+{
+    // Retain EVENT history and the next unused ID, including wrap through zero.
+    freshApp(); nextMessageId = 0xFFFF;
+    haveLastPeerEvent = true; lastPeerEventId = 0xFFFF;
+    saveRtcHistory(); simulateHistoryRestart();
+    assert(nextMessageId == 0xFFFF && haveLastPeerEvent && lastPeerEventId == 0xFFFF);
+    startHeartbeatEvent(); assert(pendingMessage.messageId == 0xFFFF && nextMessageId == 0);
+    receive(incoming(Type::Ack, 0xFFFF));
+    startHeartbeatEvent(); assert(pendingMessage.messageId == 0 && nextMessageId == 1);
+    receive(incoming(Type::Ack, 0));
+    Protocol::Message event{1, Type::Event, 0xFFFF, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+    command('i'); command('s');
+    receive(event);
+    assert(transaction().active && occurrences(Serial.log, "RX DUPLICATE") == 1);
+    assert(occurrences(Serial.log, "RX NEW EVENT") == 0 && wire.back().ackForMessageId == 0xFFFF);
+    event.messageId = 0; receive(event);
+    assert(!transaction().active && localState() == LocalState::ACTIVE && lastPeerEventId == 0);
+    assert(occurrences(Serial.log, "RX NEW EVENT") == 1);
+
+    // Snapshot while transaction, pending retry, TX outbox and RX queue contain
+    // live work. Only history is encoded; none of that work survives restart.
+    freshApp(); startHeartbeatEvent(); hostNow = ackWaitStart + 300; loop();
+    assert(waitingForAck && retryCount == 1);
+    PowerManager::forceIdle(hostNow);
+    assert(PowerManager::requestSleep(nextMessageId++, hostNow));
+    queueReceivedData(reinterpret_cast<const uint8_t*>(&event), sizeof(event));
+    assert(transaction().active && controlCount == 1 && !receiveQueue->items.empty());
+    const auto nextId = nextMessageId;
+    const auto activeId = transaction().sleepId;
+    const auto runtimeBefore = transaction();
+    assert(!PowerManager::restoreHistory({true, 55})); // Refuse live FSM import.
+    assert(transaction().sleepId == runtimeBefore.sleepId && transaction().active);
+    saveRtcHistory();
+    assert(!restoreRtcHistory()); // Refuse live application import.
+    RtcState::History stillValid{}; assert(RtcState::load(stillValid));
+    simulateHistoryRestart(); assert(nextMessageId == nextId);
+    receive(incoming(Type::SleepReady, activeId)); receive(incoming(Type::SleepAck, activeId));
+    assert(!transaction().active && armAttempts == 0);
+
+    // Completed participant: save before consuming SleepDecision. Persist the
+    // REQUEST watermark, not the decision or completed COMMIT replay authority.
+    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 0xFFFF));
+    const auto commit = incoming(Type::SleepCommit, 0xFFFF, 21);
+    PowerManager::handleControl(commit, hostNow); sendNextControl();
+    assert(localState() == LocalState::SLEEPING && waitingForAck);
+    assert(sleepDecisionPending && completed.valid); // Ensure test source really is live.
+    saveRtcHistory(); simulateHistoryRestart();
+    const auto history = PowerManager::exportHistory();
+    assert(history.havePeerRequest && history.newestPeerRequest == 0xFFFF);
+    command('i');
+    receive(incoming(Type::SleepRequest, 0xFFFF));
+    receive(incoming(Type::SleepRequest, 0xFFFE));
+    receive(commit); receive(incoming(Type::SleepAck, 0xFFFF));
+    assert(!transaction().active && countWire(Type::SleepReady) == 0 && countWire(Type::SleepAck) == 0);
+    assert(armAttempts == 0 && localState() == LocalState::IDLE);
+    receive(incoming(Type::SleepRequest, 0)); // Existing half-range arithmetic accepts rollover.
+    assert(transaction().active && transaction().sleepId == 0);
+    command('a'); assert(cooldownLeftMs(hostNow) > 0);
+    saveRtcHistory(); simulateHistoryRestart(); // No old cooldown or timestamps.
+    command('i'); receive(incoming(Type::SleepRequest, 0));
+    assert(!transaction().active); // Cancellation's watermark is retained too.
+    receive(incoming(Type::SleepRequest, 1)); assert(transaction().active);
+
+    freshApp(); protocolReady = false; nextMessageId = 77;
+    RtcState::invalidate(); assert(!restoreRtcHistory());
+    assert(nextMessageId == 77 && !PowerManager::exportHistory().havePeerRequest);
+    assert(!transaction().active && armInitializations == 0);
+    puts("PASS: RTC application restart, EVENT dedup/ID wrap, REQUEST freshness, no live transaction/decision/queue/retry/deadline/replay restore");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
+    testRtcHistoryRestart();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);
