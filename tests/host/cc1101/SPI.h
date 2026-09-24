@@ -1,0 +1,70 @@
+#pragma once
+#include "Arduino.h"
+#include <array>
+
+constexpr int HIGH = 1, LOW = 0, OUTPUT = 1, INPUT_PULLDOWN = 2;
+constexpr int MSBFIRST = 1, SPI_MODE0 = 0;
+extern uint32_t hostUs;
+extern bool misoHigh;
+extern int gdoLevel, csLevel;
+inline uint32_t micros() { hostUs += 10; return hostUs; }
+inline void delayMicroseconds(uint32_t us) { hostUs += us; }
+inline void pinMode(int, int) {}
+inline void digitalWrite(int pin, int value) { assert(pin == 10); csLevel = value; }
+inline int digitalRead(int pin) { return pin == 20 ? int(misoHigh) : gdoLevel; }
+struct SPISettings { SPISettings(uint32_t, int, int) {} };
+
+struct HostSPI
+{
+    std::array<uint8_t, 64> registers{};
+    std::vector<uint8_t> commands;
+    bool active = false, first = true, reachRx = true;
+    int corruptWrite = -1;
+    uint8_t command = 0;
+    unsigned statusReads = 0;
+    unsigned injectPacketAt = 0;
+    void begin(int sck, int miso, int mosi, int cs)
+    {
+        assert(sck == 6 && miso == 20 && mosi == 7 && cs == 10);
+    }
+    void beginTransaction(const SPISettings&) { assert(!active); active = true; first = true; }
+    void endTransaction() { assert(active); active = false; }
+    uint8_t transfer(uint8_t value)
+    {
+        assert(active && csLevel == LOW);
+        hostUs += 80; // Eight clocks at the real 100 kHz SPI rate.
+        if (first)
+        {
+            first = false; command = value; commands.push_back(value);
+            if (value == 0x30) // SRES
+            {
+                registers.fill(0);
+                registers[0x31] = 0x14; registers[0x35] = 1;
+            }
+            if (value == 0x34 && reachRx)
+            {
+                registers[0x35] = 0x0D;
+                registers[0x23] = 0xEA; // Calibration changes the seed.
+            }
+            assert(value != 0x3F && value != 0xFF); // No FIFO reads/writes.
+            return 0;
+        }
+        const uint8_t address = command & 0x3F;
+        if (command & 0x80)
+        {
+            if (address >= 0x30) assert((command & 0xC0) == 0xC0);
+            if (address == 0x35 || address == 0x3B)
+            {
+                ++statusReads;
+                if (injectPacketAt && statusReads == injectPacketAt)
+                {
+                    registers[0x35] = 1; registers[0x3B] = 9; gdoLevel = HIGH;
+                }
+            }
+            return registers[address];
+        }
+        registers[address] = address == corruptWrite ? uint8_t(value ^ 1) : value;
+        return 0;
+    }
+};
+extern HostSPI SPI;

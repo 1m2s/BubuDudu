@@ -8,6 +8,7 @@
 #include "ESPNowRadio.h"
 #include "Protocol.h"
 #include "PowerManager.h"
+#include "CC1101SleepArm.h"
 
 
 namespace
@@ -946,6 +947,10 @@ void setup()
     Serial.println("Sleep handshake bench: ? for commands. CPUs remain awake; both peers must be IDLE.");
     PowerManager::printStatus(millis());
 
+    // One cold-boot radio setup before starting ESP-NOW; never run on an arm
+    // check. A future deep-wake boot must bypass reset/configuration entirely.
+    const auto armInit = CC1101SleepArm::begin();
+    Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
 
     receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
     if (receiveQueue == nullptr)
@@ -1029,8 +1034,16 @@ void loop()
     {
         PowerManager::SleepDecision decision{};
         if (PowerManager::takeSleepDecision(decision))
+        {
             Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
                           decision.sleepId, PowerManager::toString(decision.role));
+            const auto arm = CC1101SleepArm::prepareForSleep();
+            Serial.printf("CC1101 SLEEP ARM | %s | reason=%s | PART=0x%02X VERSION=0x%02X "
+                          "IOCFG0=0x%02X MARCSTATE=0x%02X RXBYTES=0x%02X GDO0=%d | CPU stays awake\n",
+                          arm.result == CC1101SleepArm::Result::Ready ? "READY" : "FAILED",
+                          CC1101SleepArm::toString(arm.result), arm.part, arm.version,
+                          arm.iocfg0, arm.marc, arm.rxBytes, arm.gdo);
+        }
     }
 
 
