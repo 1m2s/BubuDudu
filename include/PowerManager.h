@@ -62,8 +62,11 @@ namespace PowerManager
     void controlSent(Protocol::MessageType type, uint16_t sleepId, uint32_t now);
     void controlFailed(Protocol::MessageType type, uint16_t sleepId, uint32_t now);
     // Consume semantic completion once; the caller must first drain transport.
-    // An unconsumed decision is discarded when leaving simulated SLEEPING.
+    // An unconsumed decision is discarded when leaving semantic SLEEPING.
     bool takeSleepDecision(SleepDecision& out);
+    // Hardware-agnostic failure notification, valid only after completion.
+    // Discards execution/replay authority; keeps peer state and enters IDLE.
+    void notifySleepExecutionFailed(uint32_t now);
     bool automaticHeartbeatAllowed();
     void applicationEvent(uint32_t now);
 

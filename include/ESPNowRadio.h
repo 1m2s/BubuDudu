@@ -5,6 +5,9 @@
 
 namespace ESPNowRadio
 {
+    // Application observations only; counters are shared with Wi-Fi callbacks.
+    unsigned txInFlight();
+    bool receiveCallbackActive();
     // Function type used when ESP-NOW receives data.
     //
     // Another part of the program can give ESPNowRadio

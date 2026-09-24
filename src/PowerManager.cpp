@@ -407,7 +407,7 @@ namespace PowerManager
             // Peer may have received our final SLEEP_ACK but its receipt was
             // lost. Do not label it OFFLINE or pretend agreement is certain.
             setPeer(PeerState::UNKNOWN);
-            Serial.println("POWER: final SLEEP_ACK delivery uncertain; simulated sleep retained");
+            Serial.println("POWER: final SLEEP_ACK delivery uncertain; execution policy must decide");
         }
     }
 
@@ -418,6 +418,16 @@ namespace PowerManager
         out = sleepDecision;
         sleepDecisionPending = false;
         return true;
+    }
+
+    void notifySleepExecutionFailed(uint32_t now)
+    {
+        if (local != LocalState::SLEEPING || sleep.active) return;
+        completed = CompletedReply{};
+        cooldownActive = true;
+        cooldownDeadline = now + FAILURE_COOLDOWN_MS;
+        setLocal(LocalState::IDLE, "SLEEP_EXECUTION_FAILED");
+        // Peer may already be asleep. No CANCEL, OFFLINE inference or retry.
     }
 
     bool automaticHeartbeatAllowed()

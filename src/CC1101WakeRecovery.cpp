@@ -175,37 +175,58 @@ namespace CC1101WakeRecovery
         Serial.printf("WAKE ACK | sent=%d | RX_READY=%d\n", report.ackSent, report.rxReady);
     }
 
-    void benchDeepSleep(void (*saveHistory)())
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated)
     {
-        if (CC1101SleepArm::prepareForSleep().result != CC1101SleepArm::Result::Ready)
-        {
-            Serial.println("BENCH DEEP SLEEP | REFUSED | radio not ready");
-            return;
-        }
+        const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
         RtcState::invalidate();
-        esp_err_t result = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-        if (result == ESP_OK)
-            result = esp_deep_sleep_enable_gpio_wakeup(1ULL << GDO0, ESP_GPIO_WAKEUP_GPIO_HIGH);
-        if (result == ESP_OK) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
-        if (result == ESP_OK)
+        const auto arm = CC1101SleepArm::prepareForSleep();
+        Serial.printf("CC1101 SLEEP ARM | %s | reason=%s | MARCSTATE=0x%02X RXBYTES=0x%02X GDO0=%d\n",
+                      arm.result == CC1101SleepArm::Result::Ready ? "READY" : "FAILED",
+                      CC1101SleepArm::toString(arm.result), arm.marc, arm.rxBytes, arm.gdo);
+        const char* reason = arm.result == CC1101SleepArm::Result::Ready ? blockedReason() :
+                             CC1101SleepArm::toString(arm.result);
+        esp_err_t result = ESP_OK;
+        if (!reason)
         {
-            digitalWrite(CS, HIGH);
-            result = gpio_hold_en(static_cast<gpio_num_t>(CS));
-            if (result == ESP_OK) gpio_deep_sleep_hold_en();
+            result = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+            if (result == ESP_OK)
+                result = esp_deep_sleep_enable_gpio_wakeup(1ULL << GDO0, ESP_GPIO_WAKEUP_GPIO_HIGH);
+            if (result == ESP_OK) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
+            if (result == ESP_OK)
+            {
+                digitalWrite(CS, HIGH);
+                result = gpio_hold_en(static_cast<gpio_num_t>(CS));
+                if (result == ESP_OK) gpio_deep_sleep_hold_en();
+            }
+            reason = "SETUP_FAILED";
+            if (result == ESP_OK)
+            {
+                Serial.printf("%s | ARMED | GPIO4 HIGH | timer=30s INTEGRATION SAFETY TIMER\n", label);
+                Serial.printf("%s | ENTERING | USB may disconnect; p reprints wake report\n", label);
+                Serial.flush();
+                // Recheck AFTER arm inspection, wake-source setup and logging.
+                reason = blockedReason();
+                if (!reason)
+                {
+                    saveHistory(); // Final allocator/history snapshot, no subsequent send.
+                    reason = blockedReason(); // Catch RX arriving while RTC was written.
+                    if (!reason)
+                    {
+                        reason = "GDO_HIGH";
+                        if (digitalRead(GDO0) == LOW)
+                        {
+                            esp_deep_sleep_start(); // Success does not return.
+                            reason = "DEEP_SLEEP_RETURNED";
+                        }
+                    }
+                }
+            }
         }
-        if (result == ESP_OK)
-        {
-            Serial.println("BENCH DEEP SLEEP | ARMED | GPIO4 HIGH | timer=30s BENCH SAFETY NET");
-            Serial.println("BENCH DEEP SLEEP | ENTERING | USB may disconnect; p reprints wake report");
-            Serial.flush();
-            saveHistory(); // Final allocator/history snapshot; no packets sent after this.
-            if (digitalRead(GDO0) == LOW) esp_deep_sleep_start();
-        }
-        // API failure, GDO racing HIGH, or unexpected return: remain awake.
+        // Any refusal/API failure/GDO race/return: discard checkpoint and holds.
         RtcState::invalidate();
         const bool released = releaseHold();
         const auto disabled = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-        Serial.printf("BENCH DEEP SLEEP | ABORTED | setup=%d GDO0=%d CS_RELEASED=%d WAKE_DISABLE=%d\n",
-                      result, digitalRead(GDO0), released, disabled);
+        Serial.printf("%s | ABORTED | reason=%s | setup=%d CS_RELEASED=%d WAKE_DISABLE=%d\n",
+                      label, reason, result, released, disabled);
     }
 }

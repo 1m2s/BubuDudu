@@ -7,12 +7,15 @@
 #include <esp_wifi.h>
 
 #include <cstring>
+#include <atomic>
 
 #include "Config.h"
 
 
 namespace
 {
+    std::atomic<unsigned> pendingTx{0};
+    std::atomic<unsigned> activeRx{0};
     // ======================================================
     // ESP-NOW configuration
     // ======================================================
@@ -120,6 +123,8 @@ namespace
                 "FAILED"
             );
         }
+        // Last callback operation: logging must finish before sleep is allowed.
+        pendingTx.fetch_sub(1);
     }
 
 
@@ -133,6 +138,7 @@ namespace
         int length
     )
     {
+        activeRx.fetch_add(1);
         Serial.print(
             "ESP-NOW RX | from="
         );
@@ -165,6 +171,7 @@ namespace
                 )
             );
         }
+        activeRx.fetch_sub(1);
     }
 }
 
@@ -175,6 +182,8 @@ namespace
 
 namespace ESPNowRadio
 {
+    unsigned txInFlight() { return pendingTx.load(); }
+    bool receiveCallbackActive() { return activeRx.load() != 0; }
     bool begin(
         ReceiveHandler receiveHandler
     )
@@ -458,6 +467,10 @@ namespace ESPNowRadio
         size_t length
     )
     {
+        // Reserve BEFORE the driver call: the Wi-Fi task may deliver its
+        // callback before esp_now_send returns. Rejected calls roll back the
+        // reservation; only accepted sends remain until their one callback.
+        pendingTx.fetch_add(1);
         esp_err_t result =
             esp_now_send(
                 PEER_MAC,
@@ -465,7 +478,7 @@ namespace ESPNowRadio
                 length
             );
 
-
+        if (result != ESP_OK) pendingTx.fetch_sub(1);
         return result == ESP_OK;
     }
 }

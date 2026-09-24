@@ -8,6 +8,7 @@ constexpr int ESP_GPIO_WAKEUP_GPIO_HIGH = 1;
 namespace WakePlatform
 {
     extern bool deepReset, sources, held, deepHeld, failSetup, failRelease;
+    extern bool returnFromSleep;
     extern esp_sleep_wakeup_cause_t cause;
     extern uint64_t mask;
     struct Entered {};
@@ -23,4 +24,5 @@ inline esp_err_t esp_deep_sleep_enable_gpio_wakeup(uint64_t mask, int mode)
     return WakePlatform::failSetup ? -1 : ESP_OK;
 }
 inline esp_err_t esp_sleep_enable_timer_wakeup(uint64_t us) { assert(us == 30000000); return ESP_OK; }
-inline void esp_deep_sleep_start() { throw WakePlatform::Entered{}; }
+inline void esp_deep_sleep_start()
+{ if (!WakePlatform::returnFromSleep) throw WakePlatform::Entered{}; }

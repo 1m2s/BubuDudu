@@ -28,7 +28,8 @@ namespace CC1101WakeRecovery
     using EventHandler = Protocol::Message (*)(const Protocol::Message&, bool& processed);
     Report recover(bool historyRestored, Protocol::DeviceId peer, EventHandler handler);
     void printReport(const BootInfo& boot, bool historyRestored, const Report& report);
-    // Explicit x command only. Caller checks runtime/transport are quiescent.
-    // Saves at final entry boundary; abort invalidates RTC and releases holds.
-    void benchDeepSleep(void (*saveHistory)());
+    // Shared manual/coordinated physical entry. Guard returns nullptr when
+    // drained, otherwise a diagnostic reason. Success does not return; ANY
+    // return is a refusal/abort. Saves only at the final entry boundary.
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated);
 }

@@ -20,6 +20,7 @@ struct HostSerial
     void flush() {}
     int available() { return static_cast<int>(input.size()); }
     int read() { int c = input.front(); input.pop_front(); return c; }
+    void print(const char* s) { log += s; }
     void println(const char* s = "") { log += std::string(s) + "\n"; }
     void printf(const char* format, ...)
     {

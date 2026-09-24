@@ -25,6 +25,9 @@ namespace
     CC1101WakeRecovery::BootInfo bootInfo;
     CC1101WakeRecovery::Report wakeReport;
     bool rtcRestored = false;
+    bool sleepDrainWaiting = false;
+    uint32_t sleepDrainStarted = 0;
+    constexpr uint32_t SLEEP_DRAIN_TIMEOUT_MS = 3000;
 
 
     // ======================================================
@@ -195,7 +198,7 @@ namespace
     // Send ACK
     // ======================================================
 
-    void sendAck(
+    bool sendAck(
         uint16_t receivedMessageId
     )
     {
@@ -247,6 +250,7 @@ namespace
                 receivedMessageId
             );
         }
+        return accepted;
     }
 
 
@@ -739,8 +743,13 @@ namespace
             }
             // Receipt ACK is independent of semantic acceptance. Duplicates
             // and stale controls are acknowledged, then evaluated by the FSM.
-            sendAck(message.messageId);
+            const bool receiptAccepted = sendAck(message.messageId);
             PowerManager::handleControl(message, millis());
+            if (!receiptAccepted && PowerManager::localState() == PowerManager::LocalState::SLEEPING)
+            {
+                Serial.println("COORDINATED DEEP SLEEP | ABORTED | reason=RECEIPT_TX_REJECTED");
+                PowerManager::notifySleepExecutionFailed(millis());
+            }
             return;
         }
 
@@ -874,7 +883,15 @@ namespace
             0;
 
         if (Protocol::isSleepControl(pendingMessage.type))
+        {
             PowerManager::controlFailed(pendingMessage.type, pendingMessage.ackForMessageId, millis());
+            if (pendingMessage.type == Protocol::MessageType::SleepAck &&
+                PowerManager::localState() == PowerManager::LocalState::SLEEPING)
+            {
+                Serial.println("COORDINATED DEEP SLEEP | ABORTED | reason=FINAL_RECEIPT_TIMEOUT");
+                PowerManager::notifySleepExecutionFailed(millis());
+            }
+        }
         else
             PowerManager::notePeerUnreachable();
 
@@ -884,6 +901,54 @@ namespace
             EVENT_INTERVAL_MS;
     }
 
+
+    // nullptr means drained. Used before consuming a decision AND by the
+    // shared physical entry path after arm/setup, at the final save boundary.
+    const char* sleepTransportBlockedReason()
+    {
+        if (!protocolReady) return "RUNTIME_NOT_READY";
+        if (waitingForAck) return "ACK_PENDING";
+        if (controlCount != 0) return "CONTROL_QUEUED";
+        if (PowerManager::transaction().active) return "TRANSACTION_ACTIVE";
+        if (ESPNowRadio::txInFlight() != 0) return "TX_IN_FLIGHT";
+        if (ESPNowRadio::receiveCallbackActive()) return "RX_CALLBACK_ACTIVE";
+        if (!receiveQueue) return "RX_QUEUE_MISSING";
+        if (uxQueueMessagesWaiting(receiveQueue) != 0) return "RX_QUEUED";
+        return nullptr;
+    }
+
+    void serviceSleepExecution()
+    {
+        if (PowerManager::localState() != PowerManager::LocalState::SLEEPING)
+        {
+            sleepDrainWaiting = false;
+            return;
+        }
+        if (!sleepDrainWaiting)
+        {
+            sleepDrainWaiting = true;
+            sleepDrainStarted = millis();
+        }
+        if (const char* reason = sleepTransportBlockedReason())
+        {
+            if (uint32_t(millis() - sleepDrainStarted) >= SLEEP_DRAIN_TIMEOUT_MS)
+            {
+                Serial.printf("COORDINATED DEEP SLEEP | ABORTED | reason=DRAIN_TIMEOUT/%s\n", reason);
+                PowerManager::notifySleepExecutionFailed(millis());
+                sleepDrainWaiting = false;
+            }
+            return;
+        }
+        PowerManager::SleepDecision decision{};
+        if (!PowerManager::takeSleepDecision(decision)) return;
+        Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
+                      decision.sleepId, PowerManager::toString(decision.role));
+        Serial.println("SLEEP TRANSPORT DRAINED");
+        CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepTransportBlockedReason, true);
+        // Successful deep sleep reboots. A return always means entry failed.
+        PowerManager::notifySleepExecutionFailed(millis());
+        sleepDrainWaiting = false;
+    }
 
     void servicePowerTest()
     {
@@ -899,12 +964,10 @@ namespace
                 if (bootInfo.deep) CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
                 break;
             case 'x':
-                if (!protocolReady || waitingForAck || controlCount != 0 ||
-                    uxQueueMessagesWaiting(receiveQueue) != 0 ||
-                    !PowerManager::automaticHeartbeatAllowed() || PowerManager::transaction().active)
+                if (sleepTransportBlockedReason() || !PowerManager::automaticHeartbeatAllowed())
                     Serial.println("BENCH DEEP SLEEP | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
                 else
-                    CC1101WakeRecovery::benchDeepSleep(saveRtcHistory);
+                    CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepTransportBlockedReason, false);
                 break;
             case 'w':
             {
@@ -947,7 +1010,7 @@ namespace
             case '?':
                 Serial.println("Power tests: p=status i=IDLE s=handshake a=activity/cancel "
                                "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep "
-                               "w=BENCH CC1101 wake EVENT; handshake stays awake");
+                               "w=BENCH CC1101 wake EVENT; successful handshake enters deep sleep");
                 break;
             default: return; // Includes serial line endings.
         }
@@ -1099,24 +1162,8 @@ void loop()
     handleAckTimeout();
     sendNextControl();
 
-    // Semantic completion can precede the final SLEEP_ACK's packet receipt.
-    // Wait for all reliable work to finish (ACK or bounded retry exhaustion).
-    // This checkpoint only reports readiness; CPU and radio remain awake.
-    if (!waitingForAck && controlCount == 0)
-    {
-        PowerManager::SleepDecision decision{};
-        if (PowerManager::takeSleepDecision(decision))
-        {
-            Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
-                          decision.sleepId, PowerManager::toString(decision.role));
-            const auto arm = CC1101SleepArm::prepareForSleep();
-            Serial.printf("CC1101 SLEEP ARM | %s | reason=%s | PART=0x%02X VERSION=0x%02X "
-                          "IOCFG0=0x%02X MARCSTATE=0x%02X RXBYTES=0x%02X GDO0=%d | CPU stays awake\n",
-                          arm.result == CC1101SleepArm::Result::Ready ? "READY" : "FAILED",
-                          CC1101SleepArm::toString(arm.result), arm.part, arm.version,
-                          arm.iocfg0, arm.marc, arm.rxBytes, arm.gdo);
-        }
-    }
+    // Physical execution is separate from semantic agreement.
+    serviceSleepExecution();
 
 
     // ------------------------------------------------------

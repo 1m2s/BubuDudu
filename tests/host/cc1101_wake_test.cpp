@@ -12,6 +12,7 @@ namespace WakePlatform
 {
     bool deepReset = true, sources = false, held = true, deepHeld = true;
     bool failSetup = false, failRelease = false;
+    bool returnFromSleep = false;
     esp_sleep_wakeup_cause_t cause = ESP_SLEEP_WAKEUP_GPIO;
     uint64_t mask = 1ULL << 4;
 }
@@ -20,6 +21,12 @@ using Device = Protocol::DeviceId;
 using namespace CC1101WakeRecovery;
 unsigned deliveries = 0, callbacks = 0, saves = 0;
 bool duplicateEvent = false, highDuringSave = false;
+unsigned guardCalls = 0, blockAtGuard = 0;
+const char* guard()
+{
+    ++guardCalls;
+    return blockAtGuard && guardCalls >= blockAtGuard ? "TX_IN_FLIGHT" : nullptr;
+}
 const Protocol::Message event{1, Type::Event, 70, Device::Dudu, Protocol::EventType::Heartbeat, 0};
 
 Protocol::Message handle(const Protocol::Message& packet, bool& processed)
@@ -40,8 +47,9 @@ void fresh()
     SPI.commands.clear(); SPI.fifoReads = 0;
     WakePlatform::held = true; WakePlatform::deepHeld = true;
     WakePlatform::sources = false; WakePlatform::failSetup = false; WakePlatform::failRelease = false;
+    WakePlatform::returnFromSleep = false;
     deliveries = 0; callbacks = 0; saves = 0; duplicateEvent = false; highDuringSave = false;
-    Serial.log.clear(); RtcState::invalidate();
+    Serial.log.clear(); RtcState::invalidate(); guardCalls = blockAtGuard = 0;
 }
 
 void latch(Protocol::Message packet = event)
@@ -54,6 +62,8 @@ void latch(Protocol::Message packet = event)
 
 void save()
 {
+    assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources);
+    assert(guardCalls == 2); // After arm AND all setup/logging, at final boundary.
     ++saves;
     RtcState::save({123, true, 70, {true, 40}});
     if (highDuringSave) gdoLevel = HIGH;
@@ -129,17 +139,50 @@ int main()
 
     fresh(); WakePlatform::held = false; WakePlatform::deepHeld = false;
     highDuringSave = true;
-    benchDeepSleep(save);
+    enterDeepSleep(save, guard, false);
     RtcState::History history{};
     assert(saves == 1 && !RtcState::load(history));
     assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
     assert(Serial.log.find("ABORTED") != std::string::npos);
     fresh(); WakePlatform::failSetup = true;
-    benchDeepSleep(save); assert(saves == 0 && !WakePlatform::held && !WakePlatform::sources);
+    enterDeepSleep(save, guard, false); assert(saves == 0 && !WakePlatform::held && !WakePlatform::sources);
     fresh();
     bool entered = false;
-    try { benchDeepSleep(save); } catch (const WakePlatform::Entered&) { entered = true; }
+    try { enterDeepSleep(save, guard, false); } catch (const WakePlatform::Entered&) { entered = true; }
     assert(entered && saves == 1 && RtcState::load(history));
     assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources && csLevel == HIGH);
+    for (bool coordinated : {false, true})
+    {
+        for (unsigned blocked : {1U, 2U, 3U})
+        {
+            fresh(); blockAtGuard = blocked;
+            enterDeepSleep(save, guard, coordinated);
+            assert(saves == unsigned(blocked == 3) && !RtcState::load(history));
+            assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
+            assert(Serial.log.find("reason=TX_IN_FLIGHT") != std::string::npos);
+            for (auto command : SPI.commands) assert(command & 0x80);
+        }
+        for (unsigned failure = 0; failure < 4; ++failure)
+        {
+            fresh();
+            if (failure == 0) SPI.registers[0x02] = 6; // Arm failure.
+            if (failure == 1) WakePlatform::failSetup = true;
+            if (failure == 2) highDuringSave = true;
+            if (failure == 3) WakePlatform::returnFromSleep = true;
+            enterDeepSleep(save, guard, coordinated);
+            assert(saves == unsigned(failure >= 2) && !RtcState::load(history));
+            assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
+            if (failure == 2) assert(Serial.log.find("reason=GDO_HIGH") != std::string::npos);
+            if (failure == 3) assert(Serial.log.find("reason=DEEP_SLEEP_RETURNED") != std::string::npos);
+            for (auto command : SPI.commands) assert(command & 0x80);
+        }
+        fresh(); entered = false;
+        try { enterDeepSleep(save, guard, coordinated); } catch (const WakePlatform::Entered&) { entered = true; }
+        assert(entered && saves == 1 && guardCalls == 3 && RtcState::load(history));
+        assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources);
+        assert(Serial.log.find("INTEGRATION SAFETY TIMER") != std::string::npos);
+        for (auto command : SPI.commands) assert(command & 0x80);
+    }
     puts("PASS: retained FIFO before destructive strobes, bounds/format/RTC rejection, ACK/RX failures, timer, final-GDO abort and bench entry");
+    puts("PASS: shared manual/coordinated entry, final RTC boundary, transport rechecks, setup/GDO/API-return cleanup");
 }
