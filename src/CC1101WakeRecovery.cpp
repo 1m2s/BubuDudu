@@ -1,5 +1,6 @@
 #include "CC1101WakeRecovery.h"
 #include "CC1101Bus.h"
+#include "Config.h"
 #include "RtcState.h"
 #include <esp_sleep.h>
 #include <esp_system.h>
@@ -143,6 +144,8 @@ namespace CC1101WakeRecovery
         if (boot.cause == Cause::Gpio) boot.gpioMask = esp_sleep_get_gpio_wakeup_status();
         pinMode(GDO0, INPUT_PULLDOWN);
         boot.gdoAtBoot = digitalRead(GDO0);
+        pinMode(MOTION_INT1_PIN, INPUT);
+        boot.motionAtBoot = digitalRead(MOTION_INT1_PIN);
         return boot;
     }
 
@@ -273,9 +276,13 @@ namespace CC1101WakeRecovery
     {
         const char* cause = boot.cause == Cause::Gpio ? "GPIO" :
                             boot.cause == Cause::Timer ? "TIMER" : "OTHER";
-        Serial.printf("DEEP WAKE | cause=%s | mask=0x%llX | CC1101_GPIO_WAKE=%d\n", cause,
-                      static_cast<unsigned long long>(boot.gpioMask),
-                      boot.cause == Cause::Gpio && (boot.gpioMask & (1ULL << GDO0)) != 0);
+        const bool radioWake = boot.wokeFromGpio(GDO0);
+        const bool motionWake = boot.wokeFromGpio(MOTION_INT1_PIN);
+        const char* source = radioWake && motionWake ? "CC1101+MOTION" :
+                             radioWake ? "CC1101" : motionWake ? "MOTION" : cause;
+        Serial.printf("DEEP WAKE | cause=%s | mask=0x%llX | source=%s | CC1101_GPIO_WAKE=%d MOTION_GPIO_WAKE=%d\n",
+                      cause, static_cast<unsigned long long>(boot.gpioMask), source, radioWake, motionWake);
+        Serial.printf("MOTION WAKE | GPIO3_BOOT=%d\n", boot.motionAtBoot);
         Serial.printf("RTC RESTORE | %s\n", restored ? "OK" : "INVALID");
         Serial.printf("CC1101 WAKE | GDO0_BOOT=%d MARCSTATE=0x%02X RXBYTES=0x%02X IOCFG0=0x%02X\n",
                       boot.gdoAtBoot, report.radio.marc, report.radio.rxBytes, report.radio.iocfg0);
@@ -299,7 +306,8 @@ namespace CC1101WakeRecovery
         {
             result = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
             if (result == ESP_OK)
-                result = esp_deep_sleep_enable_gpio_wakeup(1ULL << GDO0, ESP_GPIO_WAKEUP_GPIO_HIGH);
+                result = esp_deep_sleep_enable_gpio_wakeup((1ULL << GDO0) | (1ULL << MOTION_INT1_PIN),
+                                                           ESP_GPIO_WAKEUP_GPIO_HIGH);
             if (result == ESP_OK) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
             if (result == ESP_OK)
             {
@@ -310,7 +318,7 @@ namespace CC1101WakeRecovery
             reason = "SETUP_FAILED";
             if (result == ESP_OK)
             {
-                Serial.printf("%s | ARMED | GPIO4 HIGH | timer=30s INTEGRATION SAFETY TIMER\n", label);
+                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH | mask=0x18 | timer=30s INTEGRATION SAFETY TIMER\n", label);
                 Serial.printf("%s | ENTERING | USB may disconnect; p reprints wake report\n", label);
                 Serial.flush();
                 // Recheck AFTER arm inspection, wake-source setup and logging.

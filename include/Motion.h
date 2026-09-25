@@ -39,6 +39,12 @@ public:
         uint8_t interruptPin
     );
 
+    // Pause the ISR, clear latched events, and enable only activity on INT1.
+    // A failed preparation must be followed by cancelSleepPreparation().
+    bool prepareForSleep();
+    // Restore normal awake LINK/activity/inactivity after any sleep refusal.
+    bool cancelSleepPreparation();
+
     // Check whether the ISR reported a new motion event.
     MotionEvent getEvent();
 
@@ -63,6 +69,7 @@ public:
 
 private:
     uint8_t interruptPin = 255;
+    bool initialized = false;
 
     MotionEvent startupEvent = MotionEvent::None;
 
@@ -76,7 +83,7 @@ private:
 
 
     // ADXL345 register helpers.
-    void writeRegister(
+    bool writeRegister(
         uint8_t reg,
         uint8_t value
     );
@@ -85,6 +92,9 @@ private:
         uint8_t reg
     );
 
+
+    // Checked read for sleep preparation; never confuse I2C failure with zero.
+    bool readRegister(uint8_t reg, uint8_t& value);
 
     // Convert INT_SOURCE bits into a MotionEvent.
     MotionEvent decodeEvent(

@@ -20,11 +20,12 @@ using Type = Protocol::MessageType;
 using Device = Protocol::DeviceId;
 using namespace CC1101WakeRecovery;
 unsigned deliveries = 0, callbacks = 0, saves = 0;
-bool duplicateEvent = false, highDuringSave = false;
+bool duplicateEvent = false, highDuringSave = false, motionHighDuringSave = false;
 unsigned guardCalls = 0, blockAtGuard = 0;
 const char* guard()
 {
     ++guardCalls;
+    if (motionGpioLevel() != LOW) return "MOTION_INT1_HIGH";
     return blockAtGuard && guardCalls >= blockAtGuard ? "TX_IN_FLIGHT" : nullptr;
 }
 const Protocol::Message event{1, Type::Event, 70, Device::Dudu, Protocol::EventType::Heartbeat, 0};
@@ -49,6 +50,8 @@ void fresh()
     WakePlatform::sources = false; WakePlatform::failSetup = false; WakePlatform::failRelease = false;
     WakePlatform::returnFromSleep = false;
     deliveries = 0; callbacks = 0; saves = 0; duplicateEvent = false; highDuringSave = false;
+    motionGpioLevel() = LOW; motionHighDuringSave = false;
+    WakePlatform::mask = 0x10; WakePlatform::cause = ESP_SLEEP_WAKEUP_GPIO;
     Serial.log.clear(); RtcState::invalidate(); guardCalls = blockAtGuard = 0;
     haveWakeAck = false; awakeState = AwakeState::Listening;
 }
@@ -68,6 +71,7 @@ void save()
     ++saves;
     RtcState::save({123, true, 70, {true, 40}});
     if (highDuringSave) gdoLevel = HIGH;
+    if (motionHighDuringSave) motionGpioLevel() = HIGH;
 }
 
 void service()
@@ -182,9 +186,45 @@ void testAwakeRetry()
     puts("PASS: awake bounds, incomplete FIFO preserved, TX timeout, RX failure cutoff, micros rollover");
 }
 
+void testWakeSources()
+{
+    for (uint64_t mask : {0ULL, 8ULL, 16ULL, 24ULL})
+    {
+        fresh();
+        WakePlatform::mask = mask;
+        WakePlatform::cause = mask ? ESP_SLEEP_WAKEUP_GPIO : ESP_SLEEP_WAKEUP_TIMER;
+        motionGpioLevel() = (mask & 8) ? HIGH : LOW;
+        if (mask & 16) latch();
+        const auto boot = captureBoot();
+        assert(boot.wokeFromGpio(3) == bool(mask & 8));
+        assert(boot.wokeFromGpio(4) == bool(mask & 16));
+        assert(boot.motionAtBoot == motionGpioLevel() && SPI.commands.empty());
+        const auto report = recover(true, Device::Dudu, handle);
+        assert(report.rxReady && report.packetRecovered == bool(mask & 16));
+        assert(report.processed == bool(mask & 16) && report.ackSent == bool(mask & 16));
+        if (!(mask & 16))
+        {
+            assert(callbacks == 0 && SPI.fifoReads == 0 && SPI.transmissions.empty());
+            for (auto command : SPI.commands) assert(command & 0x80);
+        }
+        for (auto command : SPI.commands) assert(command != 0x30);
+        printReport(boot, true, report);
+        const char* source = mask == 24 ? "CC1101+MOTION" : mask == 16 ? "CC1101" : mask == 8 ? "MOTION" : "TIMER";
+        assert(Serial.log.find(std::string("source=") + source) != std::string::npos);
+    }
+    // A radio packet can arrive after the wake mask was captured. Preserve it
+    // even when GPIO3, rather than GPIO4, was the original electrical source.
+    fresh(); WakePlatform::mask = 8; motionGpioLevel() = HIGH;
+    const auto boot = captureBoot(); latch();
+    const auto report = recover(true, Device::Dudu, handle);
+    assert(report.processed && report.ackSent && report.rxReady && !boot.wokeFromGpio(4));
+    puts("PASS: GPIO4/Motion/timer/both masks, empty RX on motion, coincident retained packet preserved");
+}
+
 int main()
 {
     testAwakeRetry();
+    testWakeSources();
     fresh(); WakePlatform::deepReset = false;
     assert(!captureBoot().deep && SPI.commands.empty());
     WakePlatform::deepReset = true;
@@ -267,6 +307,11 @@ int main()
     assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources && csLevel == HIGH);
     for (bool coordinated : {false, true})
     {
+        fresh(); motionHighDuringSave = true;
+        enterDeepSleep(save, guard, coordinated);
+        assert(saves == 1 && !RtcState::load(history));
+        assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
+        assert(Serial.log.find("reason=MOTION_INT1_HIGH") != std::string::npos);
         for (unsigned blocked : {1U, 2U, 3U})
         {
             fresh(); blockAtGuard = blocked;

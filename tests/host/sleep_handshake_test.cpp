@@ -43,7 +43,8 @@ bool mockedRxActive = false;
 void (*afterArm)() = nullptr;
 bool entryFails = false;
 unsigned motionInitializations = 0;
-bool motionInitOk = true;
+bool motionInitOk = true, motionPrepareOk = true;
+unsigned motionPreparations = 0, motionCancels = 0;
 int motionIntLevel = 0;
 MotionEvent motionStartup = MotionEvent::None;
 bool Motion::begin(uint8_t sda, uint8_t scl, uint8_t intPin)
@@ -58,7 +59,9 @@ bool Motion::begin(uint8_t sda, uint8_t scl, uint8_t intPin)
 }
 uint8_t Motion::getInterruptPin() const { return interruptPin; }
 MotionEvent Motion::getStartupEvent() const { assert(motionInitOk); return startupEvent; }
-int digitalRead(int pin) { assert(pin == 3 && motionInitializations == 1); return motionIntLevel; }
+int digitalRead(int pin) { assert(pin == 3); return motionIntLevel; }
+bool Motion::prepareForSleep() { ++motionPreparations; return motionInitOk && motionPrepareOk; }
+bool Motion::cancelSleepPreparation() { ++motionCancels; return motionInitOk; }
 std::vector<Protocol::Message> wakeEvents;
 namespace CC1101WakeTx
 {
@@ -313,7 +316,8 @@ void freshApp()
     coordinatedAttempts = physicalSleeps = mockedTxInFlight = 0;
     mockedRxActive = entryFails = false; afterArm = nullptr;
     sleepDrainWaiting = false; sleepDrainStarted = 0;
-    motionInitializations = 0; motionInitOk = true;
+    motionInitializations = 0; motionInitOk = motionPrepareOk = true;
+    motionPreparations = motionCancels = 0;
     motionIntLevel = 0; motionStartup = MotionEvent::None;
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
 }
@@ -1149,6 +1153,48 @@ void testMotionInitialization()
     puts("PASS: Motion initialized once after CC1101 boot/recovery, startup/pin diagnostics, failure isolation, no motion policy");
 }
 
+void testMotionSleepEntry()
+{
+    // Failed sensor/arm and final GPIO race all return via the existing
+    // one-shot execution-failed path, with no automatic rearm or peer TX.
+    for (unsigned failure = 0; failure < 4; ++failure)
+    {
+        completedAwaitingCallbacks(false);
+        mockedTxInFlight = 0;
+        if (failure == 0) motionInitOk = false;
+        if (failure == 1) motionPrepareOk = false;
+        if (failure == 2) motionIntLevel = 1;
+        if (failure == 3) afterArm = [] { motionIntLevel = 1; };
+        loop();
+        assert(physicalSleeps == 0 && motionPreparations == 1 && motionCancels == 1);
+        assert(localState() == LocalState::IDLE && peerState() != PeerState::OFFLINE);
+        for (unsigned i = 0; i < 20; ++i) loop();
+        assert(motionPreparations == 1 && wakeEvents.empty());
+    }
+    freshApp(); motionPrepareOk = false;
+    command('x');
+    assert(benchSleepCalls == 0 && motionCancels == 1 && localState() == LocalState::ACTIVE);
+
+    // All deep sources restore RTC and inspect retained CC before Motion.
+    for (uint64_t mask : {0ULL, 8ULL, 16ULL, 24ULL})
+    {
+        freshApp(); protocolReady = false;
+        delete receiveQueue; receiveQueue = nullptr;
+        injectedBoot.deep = true; injectedBoot.gpioMask = mask;
+        injectedBoot.cause = mask ? CC1101WakeRecovery::Cause::Gpio : CC1101WakeRecovery::Cause::Timer;
+        injectWakePacket = (mask & 16) != 0;
+        injectedPacket = {1, Type::Event, 70, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+        RtcState::save({123, false, 0, {false, 0}});
+        setup();
+        assert(rtcRestored && protocolReady && motionInitializations == 1);
+        assert(wakeRecoveries == 1 && armInitializations == 0);
+        assert(wakeReport.processed == injectWakePacket && wakeReport.ackSent == injectWakePacket);
+        assert(localState() == LocalState::ACTIVE && !transaction().active && wakeEvents.empty());
+        assert(nextMessageId == (injectWakePacket ? 124 : 123));
+    }
+    puts("PASS: GPIO3/GPIO4/both/timer startup ordering; Motion arm failure and GPIO race abort once without peer wake");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -1156,6 +1202,7 @@ int main()
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
     testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
     testMotionInitialization();
+    testMotionSleepEntry();
     testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
