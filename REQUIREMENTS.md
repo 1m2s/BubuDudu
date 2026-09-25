@@ -1,5 +1,21 @@
 # BubuDudu Requirements
 
+These are product requirements and candidate capabilities, not a list of completed features.
+Current implementation status is checked against firmware checkpoint `1b10419`.
+
+| Requirement area | Current integrated status | Evidence / remaining work |
+| --- | --- | --- |
+| Symmetric EVENT/ACK communication | Implemented; both directions physically tested | [Protocol](docs/protocol.md) |
+| Coordinated sleep and peer availability | Bounded handshake and real sleep implemented | [Power management](docs/power-management.md); sleeping is distinct from offline |
+| Local and remote wake | GPIO3 motion, GPIO4 radio and timer tested; one-shot motion-to-peer wake tested | [Deep sleep and wake](docs/deep-sleep-wake.md) |
+| Motion while awake | Driver initialized; no application motion-event policy | Sensitive movement profile and proximity refresh remain future work |
+| Button, OLED and heartbeat LED interaction | Product intent / separate subsystem history | Not invoked by current `main.cpp`; [module audit](docs/repository-audit.md) |
+| Gestures, proximity and radio fallback | Planned/experimental requirements | No integrated gestures, RSSI distance estimate or general fallback transport |
+| Battery and power hardware | Incomplete | No battery-life or current-consumption claim |
+
+The original requirement outline follows. “Will”, “must” and proposed gestures describe intent.
+Implementation and physical validation are tracked separately in [validation](docs/validation.md).
+
 ## 1. Device concept
 
 Bubu and Dudu are two symmetric wireless companion devices.

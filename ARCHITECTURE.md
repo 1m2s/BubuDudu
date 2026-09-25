@@ -1,5 +1,7 @@
 # BubuDudu System Architecture
 
+> **Historical design sketch.** This early product-level architecture predates the verified integration. For the active firmware at `1b10419`, use [Current architecture](docs/architecture.md). Inputs and outputs listed below are intended capabilities, not proof that those modules run today.
+
 ## Device Architecture
 
 Bubu and Dudu use the same hardware and firmware architecture.

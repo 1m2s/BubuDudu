@@ -1,5 +1,7 @@
 # BubuDudu Hardware Interfaces
 
+> **Historical interface budget.** The resource estimate below is retained as design history, not the current wiring specification. Use [Hardware and wiring](docs/hardware.md) for confirmed pins, active interfaces, and unintegrated peripherals.
+
 | Component | Interface | Required ESP32 Resources | Purpose |
 |---|---|---|---|
 | Button | Digital input | 1 GPIO | User input |
