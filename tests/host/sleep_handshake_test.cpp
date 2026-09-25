@@ -3,6 +3,9 @@
 #include "Arduino.h"
 #include "../../src/PowerManager.cpp"
 #include "../../src/RtcState.cpp"
+// MCU attributes/GPIO and the existing Motion driver are substituted on host.
+#define IRAM_ATTR
+int digitalRead(int pin);
 #define loop firmwareLoop
 #include "../../src/main.cpp"
 #undef loop
@@ -39,6 +42,23 @@ unsigned coordinatedAttempts = 0, physicalSleeps = 0, mockedTxInFlight = 0;
 bool mockedRxActive = false;
 void (*afterArm)() = nullptr;
 bool entryFails = false;
+unsigned motionInitializations = 0;
+bool motionInitOk = true;
+int motionIntLevel = 0;
+MotionEvent motionStartup = MotionEvent::None;
+bool Motion::begin(uint8_t sda, uint8_t scl, uint8_t intPin)
+{
+    assert(sda == 0 && scl == 1 && intPin == 3);
+    assert(!protocolReady);
+    assert(bootInfo.deep ? wakeRecoveries == 1 : armInitializations == 1);
+    ++motionInitializations;
+    interruptPin = intPin;
+    startupEvent = motionStartup;
+    return motionInitOk;
+}
+uint8_t Motion::getInterruptPin() const { return interruptPin; }
+MotionEvent Motion::getStartupEvent() const { assert(motionInitOk); return startupEvent; }
+int digitalRead(int pin) { assert(pin == 3 && motionInitializations == 1); return motionIntLevel; }
 std::vector<Protocol::Message> wakeEvents;
 namespace CC1101WakeTx
 {
@@ -284,6 +304,8 @@ void freshApp()
     coordinatedAttempts = physicalSleeps = mockedTxInFlight = 0;
     mockedRxActive = entryFails = false; afterArm = nullptr;
     sleepDrainWaiting = false; sleepDrainStarted = 0;
+    motionInitializations = 0; motionInitOk = true;
+    motionIntLevel = 0; motionStartup = MotionEvent::None;
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
 }
 void command(char c) { Serial.input.push_back(c); loop(); }
@@ -1061,12 +1083,45 @@ void testCoordinatedExecution()
     puts("PASS: timer reboot restores history only, fresh drain/retry/queue/deadline state, ESP-NOW peer rediscovery");
 }
 
+void testMotionInitialization()
+{
+    for (bool deep : {false, true}) for (bool ok : {false, true})
+    for (auto event : {MotionEvent::None, MotionEvent::Activity, MotionEvent::Inactivity})
+    for (int level : {0, 1})
+    {
+        freshApp(); protocolReady = false;
+        injectedBoot.deep = deep;
+        injectedBoot.cause = CC1101WakeRecovery::Cause::Gpio;
+        RtcState::save({123, false, 0, {false, 0}});
+        injectWakePacket = deep;
+        injectedPacket = {1, Type::Event, 70, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+        motionInitOk = ok; motionStartup = event; motionIntLevel = level;
+        delete receiveQueue; receiveQueue = nullptr;
+        setup();
+        assert(motionInitializations == 1 && protocolReady);
+        assert(localState() == LocalState::ACTIVE && !transaction().active);
+        assert(peerState() == (deep ? PeerState::ONLINE : PeerState::UNKNOWN));
+        if (deep) assert(wakeReport.processed && wakeReport.ackSent && nextMessageId == 124);
+        const std::string expected = ok ? "MOTION INIT | OK (DEVID=0xE5)" : "MOTION INIT | FAILED (DEVID check)";
+        assert(Serial.log.find(expected) != std::string::npos);
+        assert(Serial.log.find("GPIO3 INT1=" + std::to_string(level)) != std::string::npos);
+        assert(Serial.log.find(ok ? "startup=" + std::to_string(static_cast<int>(event)) :
+                                   "startup=UNAVAILABLE | continuing") != std::string::npos);
+        for (int i = 0; i < 20; ++i) loop();
+        assert(motionInitializations == 1 && physicalSleeps == 0 && wakeEvents.empty());
+        startHeartbeatEvent(); receive(incoming(Type::Ack, pendingMessage.messageId));
+        assert(!waitingForAck && peerState() == PeerState::ONLINE);
+    }
+    puts("PASS: Motion initialized once after CC1101 boot/recovery, startup/pin diagnostics, failure isolation, no motion policy");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
     testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
+    testMotionInitialization();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

@@ -12,6 +12,7 @@
 #include "RtcState.h"
 #include "CC1101WakeRecovery.h"
 #include "CC1101WakeTx.h"
+#include "Motion.h"
 
 void saveRtcHistory();
 bool restoreRtcHistory();
@@ -19,6 +20,9 @@ bool restoreRtcHistory();
 
 namespace
 {
+    constexpr uint8_t MOTION_SDA_PIN = 0, MOTION_SCL_PIN = 1, MOTION_INT1_PIN = 3;
+    Motion motion;
+
     constexpr UBaseType_t RX_QUEUE_LENGTH = 8;
     QueueHandle_t receiveQueue = nullptr;
     bool protocolReady = false;
@@ -1084,6 +1088,17 @@ void setup()
         const auto armInit = CC1101SleepArm::begin();
         Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
     }
+    // Recover and ACK any retained CC1101 wake packet before doing sensor I2C work.
+    const bool motionReady = motion.begin(MOTION_SDA_PIN, MOTION_SCL_PIN, MOTION_INT1_PIN);
+    const int motionLevel = digitalRead(motion.getInterruptPin());
+    if (motionReady)
+        Serial.printf("MOTION INIT | OK (DEVID=0xE5) | GPIO%u INT1=%d | startup=%d "
+                      "(0=None, 1=Activity, 2=Inactivity)\n",
+                      motion.getInterruptPin(), motionLevel, static_cast<int>(motion.getStartupEvent()));
+    else
+        Serial.printf("MOTION INIT | FAILED (DEVID check) | GPIO%u INT1=%d | startup=UNAVAILABLE | continuing\n",
+                      motion.getInterruptPin(), motionLevel);
+
     Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
 
