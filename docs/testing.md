@@ -50,6 +50,8 @@ bash tests/host/run.sh
 
 The script uses `${CXX:-c++}`, C++11, `-Wall -Wextra -Werror`, AddressSanitizer, UndefinedBehaviorSanitizer and frame pointers. Bash and a compatible host compiler/runtime are required. It compiles into a temporary directory printed at the end; no flashing or Git operations occur.
 
+Local validation uses Apple Clang 17; CI selects Clang through the existing `CXX` option. Ubuntu GCC 13 currently rejects three pre-existing single-line `for`/`assert` test statements under `-Werror=misleading-indentation`. Source formatting was left unchanged in this pass. To use the CI compiler family locally, run `CXX=clang++ bash tests/host/run.sh`.
+
 These tests include production implementation files with deterministic platform substitutes. They exercise decisions and boundaries, not physical RF, sleep current, actual USB reconnection or scheduling latency.
 
 | Test source | What it checks | Identities |

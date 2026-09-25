@@ -36,6 +36,8 @@ The existing [`.gitignore`](../.gitignore) excludes `.pio` and generated VS Code
 
 The new [CI workflow](../.github/workflows/firmware-ci.yml) runs host tests and build-only PlatformIO commands, with read-only repository permissions and official Actions pinned by commit. PlatformIO Core is pinned to `6.2.0`; firmware platform/library versions in `platformio.ini` remain unpinned. Download caching is not a dependency lock.
 
+CI selects Clang through the host script's existing `CXX` option, matching the locally validated compiler family. The initial Ubuntu GCC 13 run stopped on three existing misleading-indentation warnings in test code; no firmware or test changes, warning suppression, or sanitizer changes were made to address that compiler difference.
+
 A local archived checkout built both environments without an initial project `.pio` directory or connected-board discovery. The existing script generated its ignored `ports.ini`. That check reused installed global PlatformIO packages; it was not a fresh-machine or Linux-runner test. Remote CI success must be checked on the actual run, not inferred from workflow syntax validation.
 
 Automatic upload/monitor discovery currently assumes macOS `/dev/cu.*` devices. Build portability does not establish upload portability. See [testing.md](testing.md) for the supported commands and USB reset/probe caveat. No firmware/tooling changes were made to satisfy CI.

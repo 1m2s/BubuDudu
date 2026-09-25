@@ -18,6 +18,8 @@ jobs:
           persist-credentials: false
 
       - name: Run host tests for both device identities
+        env:
+          CXX: clang++
         run: bash tests/host/run.sh
 
       - name: Set up Python
