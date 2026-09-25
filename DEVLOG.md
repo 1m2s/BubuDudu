@@ -2403,3 +2403,295 @@ All six checkpoints are committed on `feature/sleep-execution` and were confirme
 Integrate the ADXL345 motion interrupt into the proven coordinated deep-sleep/wake architecture, incrementally, without destabilizing CC1101 peer wake or the sleep handshake.
 
 Keep the integration timer while validating that next checkpoint. Preserve the current working state and continue one understandable change, build, flash, physical test, understand, commit, then the next change.
+
+---
+
+## 2026-09-25
+
+### Development Strategy
+
+Continued from the verified `feature/sleep-execution` architecture, starting with `d62f0fc` — `feat: connect coordinated sleep to deep sleep`.
+
+The goal was to reconnect ADXL345 motion without destabilizing the retained CC1101 wake-packet path. Work remained incremental: one understandable change, build, flash, physical test, understand the result, commit, then the next change.
+
+Historical subsystem branches supplied hardware knowledge and earlier experiments. They were not merged wholesale, and the abandoned large integration was not restored. Motion initialization, awake CC1101 retry handling, local motion deep wake and motion-triggered peer wake were separately verified checkpoints.
+
+This entry covers the continuous September 25 session, including the final Checkpoint 3 validation and commit completed after midnight on September 26.
+
+### Lost CC1101 Wake ACK and Awake Retry Handling
+
+The retained wake path exposed a reliability gap after an otherwise successful wake:
+
+```text
+sleeping receiver accepts wake EVENT N
+    -> ESP32 wakes and processes EVENT
+    -> receiver sends ACK, but ACK is lost
+    -> sender retries the same EVENT N
+    -> receiver is now awake
+    -> earlier firmware does not service that retry
+    -> sender can exhaust retries despite successful peer wake
+```
+
+The sender's retry logic was already bounded and reused the same ID. The missing behavior was on the awakened receiver.
+
+Added narrow awake CC1101 service for retries of the EVENT accepted during boot. The receiver retains that EVENT's receipt, validates the incoming packet and peer, and matches the accepted wake ID. A matching retry retransmits the retained ACK without calling the application EVENT handler again, then restores RX.
+
+This receipt remains valid even if subsequent ESP-NOW traffic advances the application's last-EVENT history. A new or malformed awake CC1101 EVENT does not gain permission to execute application behavior through this path. It is not a general awake CC1101 transport or fallback mechanism.
+
+ACK completion is polled from the existing loop with bounded timing. Existing RX recovery remains bounded, and failed RX restart or unavailable radio state stops service instead of creating an automatic recovery loop. Physical sleep and competing manual wake transmission are blocked while the re-ACK is in progress.
+
+Temporary deterministic first-ACK suppression proved this recovery path on both boards. Representative sender evidence included:
+
+```text
+CC1101 WAKE TX | id=69 | attempt=0
+CC1101 WAKE TX | id=69 | attempt=1
+CC1101 WAKE ACK | id=69 | OK | RX_READY=1
+```
+
+The awakened receiver also reported:
+
+```text
+CC1101 AWAKE RETRY | id=69 | re-ACK started
+```
+
+Both Bubu-to-Dudu and Dudu-to-Bubu tests passed. The temporary ACK-drop flag, RAM-only suppression state, injection logging and injection-only tests were removed before committing. Permanent lost-ACK, duplicate, no-second-delivery, RX recovery and sender retry tests remain.
+
+The permanent fix is `ed1d227` — `fix: re-ack CC1101 wake retries while awake`.
+
+### ADXL345 Initialization Checkpoint
+
+Integrated the existing Motion module into the current firmware without changing sleep policy first.
+
+The confirmed wiring is SDA on GPIO0, SCL on GPIO1 and ADXL345 INT1 on GPIO3. The driver uses I2C address `0x53` and checks DEVID against `0xE5`.
+
+Motion already provides activity/inactivity configuration, an awake ISR, startup-event inspection, interrupt pause/resume, and reading/clearing `INT_SOURCE`. The new integration calls `Motion::begin()` once and reports `MOTION INIT`, the INT1 level and the startup event. A failed DEVID check is reported while the rest of startup continues.
+
+The ordering rule remained explicit:
+
+```text
+CC1101 cold initialization OR retained deep-wake recovery
+    -> Motion/I2C initialization
+    -> normal ESP-NOW runtime
+```
+
+On deep wake, the external radio may still hold the packet that caused the reboot. Sensor initialization must not move ahead of that inspection, EVENT processing and ACK. No normal radio reset or FIFO flush was introduced to make Motion startup convenient.
+
+An intermittent Dudu I2C failure was investigated before adding more behavior. The same sensor worked on Bubu, and Dudu's GPIO0/GPIO1 showed I2C-like traffic. A temporary bounded address scan later found the OLED at `0x3C` and ADXL345 at `0x53`; `MOTION INIT | OK (DEVID=0xE5)` also returned.
+
+That evidence pointed toward breadboard, jumper, contact or supply intermittency rather than a reproducible firmware architecture defect. The exact intermittent connection was not isolated by software. No arbitrary firmware delays or retry machinery were added to hide it. The scanner and scanner-only host support were removed after the diagnostic completed.
+
+Initialization and continued runtime were physically verified on both boards. The permanent checkpoint is `89014ad` — `feat: integrate ADXL345 motion initialization`. It did not yet enable GPIO3 deep wake, inactivity-driven sleep or peer wake from motion.
+
+### ADXL345 Deep-Sleep Wake — Checkpoint 2
+
+Created `feature/adxl345-motion-wake` from the verified integration branch. The older `feature/adxl345` commits were read for the previously proven GPIO3 wake API, active-HIGH interrupt behavior and interrupt clearing. Their old startup flow and automatic inactivity-sleep policy were not restored.
+
+The ESP32-C3 now arms both GPIO sources in one `esp_deep_sleep_enable_gpio_wakeup()` call using HIGH-level wake:
+
+* GPIO4 / CC1101 GDO0: mask `0x10`
+
+* GPIO3 / ADXL345 INT1: mask `0x08`
+
+* combined GPIO mask: `0x18`
+
+The 30-second timer remains enabled as an integration safety fallback.
+
+`BootInfo` captures the wake cause, actual GPIO wake mask and both input levels early. Diagnostics distinguish `CC1101`, `MOTION`, `CC1101+MOTION` and `TIMER`. GPIO wake alone is no longer interpreted as proof that CC1101 caused the wake.
+
+Retained CC1101 inspection still happens on every deep wake. An empty healthy RX FIFO is normal for motion or timer wake; it does not require a fabricated radio EVENT or ACK. Conversely, an RF packet arriving near a motion wake is not reset away merely because GPIO4 was absent from the captured mask. If both bits are set, both sources are reported and the retained radio path is still serviced before Motion initialization.
+
+### Sleep-Specific Motion Preparation
+
+The normal awake sensor setup enables linked activity/inactivity detection. Simply adding GPIO3 to the wake mask would also allow inactivity on INT1 to wake the ESP32. Linked detection also expects interrupt servicing that the sleeping CPU cannot perform.
+
+Added a small sleep-preparation helper inside Motion. It pauses the awake ISR, disables sensor interrupts, moves through standby to clear LINK, clears the latched `INT_SOURCE`, then enables an activity-only measurement configuration:
+
+```text
+POWER_CTL = 0x08
+INT_ENABLE = 0x10
+INT_MAP = 0x00
+```
+
+Important state is checked through I2C readback, including interrupt enable, mapping, power mode and the active-HIGH data format. GPIO3 must be LOW after clearing the old source, and it is checked again at the physical sleep-entry boundaries. A newly asserted or stuck-HIGH input aborts entry rather than blindly entering an immediate wake cycle.
+
+The sensor remains powered and measuring while the ESP32 sleeps. Its activity interrupt remains latched until the wake startup reads the source. The existing threshold is unchanged: `THRESH_ACT = 48`, approximately 3 g, with full-resolution +/-4 g operation. This relatively insensitive sleep profile is intentional: deliberate pickup, tap or movement should wake the device rather than minor desk vibration. It is a tested starting point, not a guarantee of vibration rejection in every enclosure or mounting arrangement.
+
+On any returned/aborted entry, Motion attempts to restore the normal awake `POWER_CTL = 0x28`, `INT_ENABLE = 0x18` and `INT_MAP = 0x00`, then resumes its ISR. I2C work is bounded with no retry loop; restoration failure is logged. The existing coordinated execution-failure path remains responsible for semantic state and cooldown. Motion does not take ownership of PowerManager.
+
+A more sensitive awake threshold was not implemented in this checkpoint; the current awake configuration still uses the existing threshold.
+
+### Checkpoint 2 Physical Validation and Integration
+
+CC1101 deep wake remained working in both directions. `source=CC1101` was followed by RTC restoration, retained FIFO recovery, EVENT processing, ACK transmission and RX ready.
+
+Local motion wake passed on Bubu and Dudu. Representative evidence was `source=MOTION` and `GPIO3_BOOT=1`, with RTC restore OK, no retained CC1101 packet, no false EVENT processing, no false wake ACK and the radio ready in RX. At this checkpoint, local motion woke only the local board.
+
+Timer wake also passed: TIMER was reported without inventing a radio EVENT or wake ACK. All three individual wake routes were physically demonstrated. Combined GPIO3/GPIO4 reporting and routing were covered by host tests; the individual-source bench results are not a claim that a simultaneous two-pin hardware stimulus was reproduced.
+
+After physical validation, Checkpoint 2 was committed and pushed:
+
+`4fe8171dd29f409aeaa19a00fe7eff2039f078a6` — `feat: wake from ADXL345 motion during deep sleep`
+
+It was explicitly merged back into `feature/sleep-execution`:
+
+`8ce8f23a61072959d802d1fbfbfc961502284bf7` — `merge: integrate ADXL345 motion wake`
+
+The merge tree matched the verified feature tree. Full host tests, both PlatformIO builds and `git diff --check` passed during checkpoint verification and after integration. The historical `feature/adxl345` branch was not merged wholesale.
+
+### Motion Wake Wakes the Peer — Checkpoint 3
+
+Connected pure local motion wake to the existing bounded CC1101 peer-wake transmitter:
+
+```text
+both devices sleeping
+    -> Bubu moves; GPIO3 wakes Bubu
+    -> retained radio inspection and safe startup complete
+    -> Bubu starts one bounded CC1101 wake transaction
+    -> GPIO4 wakes Dudu
+    -> Dudu recovers EVENT, processes it and returns ACK
+    -> both devices ACTIVE
+```
+
+The reverse Dudu-to-Bubu sequence uses the same code.
+
+Extracted `requestPeerWake()` from the proven manual `w` command. Both callers use the same runtime/transport guards, one EVENT allocation and `CC1101WakeTx::send()`. The existing eight-byte heartbeat EVENT, ACK matching, 300 ms ACK timeout, maximum two retries, same-ID retransmission and RX restoration are unchanged. This is reuse of the existing wake mechanism, not a new radio protocol.
+
+The automatic policy uses captured wake evidence:
+
+* GPIO3 present and GPIO4 absent: request peer wake once
+
+* GPIO4 only: no return wake
+
+* GPIO3 and GPIO4 together: no additional wake
+
+* timer or cold boot: no peer wake
+
+This prevents the radio-woken peer from automatically waking the sender back. The trigger runs once at the end of successful `setup()`, after retained CC1101 recovery, Motion initialization and normal ESP-NOW runtime setup. It is not polled from `loop()` and needs no persistent pending flag.
+
+A runtime guard refusal or failed bounded transaction does not rearm the automatic request. Incomplete startup does not send. The wake EVENT retains its established application meaning at the receiver; local motion does not separately execute a local heartbeat action, and retries do not bypass the accepted-wake duplicate/re-ACK path.
+
+### Checkpoint 3 Physical Validation
+
+Two-board tests passed in both directions:
+
+* Bubu motion wake -> one CC1101 transaction -> Dudu GPIO4 wake and ACK
+
+* Dudu motion wake -> one CC1101 transaction -> Bubu GPIO4 wake and ACK
+
+The motion side reported `source=MOTION`, followed by `MOTION PEER WAKE | one-shot request`, `CC1101 WAKE TX` and a successful ACK. The peer reported `source=CC1101`, recovered and processed the retained packet, transmitted its ACK and returned RX ready. Both devices became ACTIVE.
+
+The radio-woken receiver did not initiate a return motion-triggered transaction. A separate CC1101-only test and timer-wake test also produced no automatic peer wake. No ping-pong or repeated automatic wake transaction occurred in the tested scenarios.
+
+### Unavailable-Peer Failure Test
+
+With Dudu powered off, Bubu entered deep sleep and was then moved. GPIO3 woke Bubu, startup completed and one automatic CC1101 transaction attempted to wake Dudu. No ACK arrived; the existing retries exhausted cleanly.
+
+Representative bench output:
+
+```text
+CC1101 WAKE TX | id=536 | GIVE_UP | retries=2 | reason=ACK_TIMEOUT | RX_READY=1
+POWER: LOCAL=ACTIVE PEER=OFFLINE
+TRANSPORT: pending=0
+```
+
+Message ID 536 is a session example, not a protocol constant. Bubu remained ACTIVE and responsive, CC1101 returned to RX, and the automatic CC1101 transaction did not restart. No infinite search or retry loop followed.
+
+Normal automatic ESP-NOW heartbeat traffic is separate. The bench `h` pause flag is RAM-only and resets on reboot, so ordinary ESP-NOW EVENTs can resume after a motion wake. Each uses its own bounded retry episode. That traffic is not evidence that the one-shot CC1101 wake is looping. The existing ESP-NOW loss path can subsequently mark an unreachable peer OFFLINE; the CC1101 helper itself does not directly change that peer state.
+
+### Host Tests and Build Verification
+
+Focused application tests cover pure-motion startup, suppression for CC1101/both-pin/timer/cold wakes, safe startup ordering, successful/failed/unavailable peer results, one ID allocation including rollover, and repeated loop execution without another automatic transaction. They also verify that startup failure or a guard refusal cannot turn into an unbounded deferred request.
+
+Existing radio tests exercise the real transmitter's same-ID/payload retries, ACK matching, retry cutoff and bounded RX recovery. Retained-packet and awake re-ACK tests preserve the lost-first-ACK scenario and absence of duplicate application execution. Manual `w`, coordinated sleep, collision handling, callback drain, RTC history and Motion failure regressions continue to pass.
+
+Checkpoint 2 additionally covered GPIO3/GPIO4/both/timer classification, healthy empty RX on motion wake, preservation of coincident packets, stuck-HIGH input, checked-I2C failures, configuration readback and abort restoration. A GPIO3 assertion injected after the RTC save caused entry to abort and the saved checkpoint/wake configuration to be cleared.
+
+The full host suite passed with compiler warnings as errors and address/undefined-behavior sanitizers. Bubu and Dudu firmware builds passed without warnings or errors, and `git diff --check` passed. Software fault injection in host tests is distinct from the real two-board evidence above.
+
+After physical verification, Checkpoint 3 was committed and pushed as:
+
+`1b1041976b4200668c3090d27c8138dc80aa53f2` — `feat: wake sleeping peer after local motion wake`
+
+Only `src/main.cpp` and `tests/host/sleep_handshake_test.cpp` were included in that commit.
+
+### Future Awake Motion and Emotional UI
+
+The next product requirement is recorded here, not implemented by today's firmware: Motion should eventually have separate sensitivity profiles for SLEEP and AWAKE.
+
+SLEEP should remain relatively insensitive; the current approximately 3 g threshold is acceptable for deliberate wake movement. AWAKE should detect ordinary pickup/movement more sensitively, with its threshold determined through physical tuning.
+
+Movement while ACTIVE must not take ownership of the emotional UI. Keep confirmed proximity separate from the status of an update:
+
+* confirmed proximity: `CLOSE` or `FAR`
+
+* update status: `READY`, `MOVING`, or `WAITING/CHECKING`
+
+For example:
+
+```text
+last confirmed proximity = FAR
+    -> movement begins: status MOVING; FAR display/heartbeat continues
+    -> movement settles: status CHECKING; retain FAR while measuring
+    -> fresh proximity result confirmed CLOSE
+    -> update confirmed proximity and LED behavior; status READY
+```
+
+Movement alone must not blank LEDs, stop the heartbeat animation, erase the last confirmed CLOSE/FAR value, immediately change proximity or create an emotional heartbeat EVENT. This future awake-motion policy is separate from the already-defined CC1101 wake EVENT used by Checkpoint 3.
+
+No awake-sensitive movement detection, proximity refresh or emotional UI integration was implemented during this session.
+
+### Current Working State
+
+The integration branch now combines reliable ESP-NOW transport and application ACK/retries, duplicate handling, bounded coordinated sleep negotiation, real deep-sleep execution and RTC history persistence with retained CC1101 packet recovery, awake duplicate re-ACK service, ADXL345 deliberate-motion wake and one-shot motion-triggered peer wake.
+
+Both directions and the unavailable-peer path were physically verified. The tested failures remain bounded, with local runtime usable after peer-wake failure and no infinite wake/search loop in those scenarios. This is not a production-ready claim or proof against every RF-loss condition.
+
+The 30-second timer remains an integration safety net. Awake-sensitive motion/proximity refresh, battery and power hardware, and final repository polish/evidence remain unfinished.
+
+Firmware remains committed and pushed on `feature/sleep-execution`. This DEVLOG is maintained on `main`; this documentation update does not merge or cherry-pick feature source or tests into `main`.
+
+### Problems Solved
+
+* lost first CC1101 wake ACK causing sender failure despite successful peer wake
+
+* servicing awake retries with a retained ACK and no second application execution
+
+* integrating Motion after, rather than ahead of, retained CC1101 recovery
+
+* ADXL345 deep wake on GPIO3 alongside the existing GPIO4 radio source
+
+* explicit combined GPIO mask and separate wake-source reporting
+
+* sleep-specific Motion preparation, asserted-input refusal and bounded abort restoration
+
+* propagating local motion wake to the sleeping peer in both directions
+
+* suppressing automatic return wakes and tested ping-pong behavior
+
+* bounded unavailable-peer failure with CC1101 restored to RX
+
+* keeping local state ACTIVE and runtime responsive after peer-wake failure
+
+### Git Commits
+
+The session's firmware checkpoints and integration commit:
+
+* `89014ad` — `feat: integrate ADXL345 motion initialization`
+
+* `ed1d227` — `fix: re-ack CC1101 wake retries while awake`
+
+* `4fe8171` — `feat: wake from ADXL345 motion during deep sleep`
+
+* `8ce8f23` — `merge: integrate ADXL345 motion wake`
+
+* `1b10419` — `feat: wake sleeping peer after local motion wake`
+
+All five were verified in `feature/sleep-execution` history, with its local HEAD matching origin before this DEVLOG update. They remain on the feature/integration history and are not being merged into `main` by the documentation commit.
+
+### Next Step
+
+Begin the more sensitive AWAKE Motion profile as a separate, physically testable checkpoint. First establish reliable ordinary movement detection without changing the existing wake path or taking control of the emotional UI.
+
+The later sequence should be MOVING while retaining confirmed CLOSE/FAR and uninterrupted heartbeat LEDs, then CHECKING after movement settles, followed by a fresh rough RSSI/proximity result. Only a confirmed result should change CLOSE/FAR. RSSI remains a rough proximity mechanism, not exact distance.
+
+Do not combine sensor tuning, UI ownership and proximity refresh into one large change. Preserve the verified power/wake checkpoints and continue build, flash, physical test, understand, commit, then the next step.
