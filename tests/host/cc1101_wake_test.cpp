@@ -50,6 +50,7 @@ void fresh()
     WakePlatform::returnFromSleep = false;
     deliveries = 0; callbacks = 0; saves = 0; duplicateEvent = false; highDuringSave = false;
     Serial.log.clear(); RtcState::invalidate(); guardCalls = blockAtGuard = 0;
+    haveWakeAck = false; awakeState = AwakeState::Listening;
 }
 
 void latch(Protocol::Message packet = event)
@@ -69,8 +70,121 @@ void save()
     if (highDuringSave) gdoLevel = HIGH;
 }
 
+void service()
+{
+    const auto started = hostUs;
+    serviceAwake(Device::Dudu);
+    // No 200-ms TX wait inside one loop call. Includes the existing 50-ms
+    // restart budget and worst-case packet inspection/ACK setup failure.
+    assert(uint32_t(hostUs - started) < 110000);
+    assert(!SPI.active && csLevel == HIGH);
+    for (auto command : SPI.commands) assert(command != 0x30);
+}
+
+void finishRetry()
+{
+    for (unsigned i = 0; i < 25 && awakeBusy(); ++i)
+    {
+        hostUs += 10000;
+        service();
+    }
+    assert(!awakeBusy());
+}
+
+void testAwakeRetry()
+{
+    fresh(); latch();
+    const auto boot = recover(true, Device::Dudu, handle);
+    assert(boot.processed && boot.ackSent && boot.rxReady && deliveries == 1);
+    const auto firstAck = SPI.transmissions.front(); // Conceptually lost over RF.
+    for (unsigned retry = 0; retry < 3; ++retry)
+    {
+        latch(); service(); assert(awakeBusy());
+        assert(SPI.transmissions.back() == firstAck && SPI.transmissions.size() == retry + 2);
+        finishRetry();
+        assert(deliveries == 1 && callbacks == 1); // Application handler is never called again.
+        assert(SPI.rxFifo.empty() && gdoLevel == LOW && SPI.registers[0x35] == 0x0D);
+    }
+    assert(Serial.log.find("processed=0 duplicate=1 | ACK_SENT=1 | RX_READY=1") != std::string::npos);
+    const auto commands = SPI.commands; const auto time = hostUs; const auto log = Serial.log;
+    for (unsigned i = 0; i < 50; ++i) service();
+    assert(SPI.commands == commands && Serial.log == log && hostUs - time < 2000);
+
+    // No new application behavior: wrong envelopes, lengths, or fresh EVENTs
+    // are consumed/rejected once, with a bounded restart and no receipt.
+    for (unsigned bad = 0; bad < 9; ++bad)
+    {
+        fresh(); latch(); recover(true, Device::Dudu, handle);
+        auto packet = event;
+        if (bad == 0) packet.version = 2;
+        if (bad == 1) packet.sender = Device::Bubu;
+        if (bad == 2) packet.type = Type::Ack;
+        if (bad == 3) packet.event = Protocol::EventType::None;
+        if (bad == 4) packet.ackForMessageId = 99;
+        if (bad == 5) ++packet.messageId;
+        latch(packet);
+        if (bad == 6) SPI.rxFifo[0] = 7;
+        if (bad == 7) { SPI.rxFifo.resize(4); SPI.registers[0x3B] = 4; }
+        if (bad == 8) { SPI.rxFifo.resize(11); SPI.registers[0x3B] = 11; } // No appended status allowed.
+        service();
+        assert(!awakeBusy() && SPI.transmissions.size() == 1 && deliveries == 1 && callbacks == 1);
+        assert(SPI.rxFifo.empty() && SPI.registers[0x35] == 0x0D);
+    }
+    fresh(); latch(); service(); // Cold boot has no accepted wake EVENT to replay.
+    assert(SPI.transmissions.empty() && callbacks == 0 && SPI.registers[0x35] == 0x0D);
+    for (uint8_t count : {uint8_t(0), uint8_t(65), uint8_t(127), uint8_t(0x80)})
+    {
+        fresh(); gdoLevel = HIGH; SPI.registers[0x3B] = count; SPI.registers[0x35] = 1;
+        service(); assert(SPI.fifoReads == 0 && callbacks == 0 && SPI.registers[0x35] == 0x0D);
+    }
+    fresh(); latch(); SPI.registers[0x35] = 0x0D;
+    const auto fifo = SPI.rxFifo;
+    service(); assert(SPI.rxFifo == fifo && SPI.fifoReads == 0); // Incomplete, never flush.
+    fresh(); latch(); SPI.registers[0x02] = 6;
+    service(); assert(SPI.fifoReads == 0 && SPI.rxFifo.size() == 9);
+    const auto stoppedCommands = SPI.commands;
+    service(); assert(SPI.commands == stoppedCommands); // Unknown configuration cutoff.
+
+    fresh(); latch(); recover(true, Device::Dudu, handle);
+    latch(); SPI.finishTx = false; service(); assert(awakeBusy());
+    finishRetry(); assert(deliveries == 1 && SPI.registers[0x35] == 0x0D);
+    assert(Serial.log.find("ACK_TX_TIMEOUT") != std::string::npos);
+    fresh(); latch(); recover(true, Device::Dudu, handle);
+    latch(); SPI.reachRx = false; service(); finishRetry();
+    assert(Serial.log.find("STOPPED | RX restart failed") != std::string::npos);
+    const auto failedCommands = SPI.commands;
+    for (unsigned i = 0; i < 50; ++i) service();
+    assert(SPI.commands == failedCommands && deliveries == 1);
+    fresh(); latch(); recover(true, Device::Dudu, handle);
+    latch(); SPI.failAfterFifo = true; service();
+    assert(!awakeBusy() && deliveries == 1 && SPI.transmissions.size() == 1);
+    assert(Serial.log.find("STOPPED | RX restart failed") != std::string::npos);
+    const auto spiFailureCommands = SPI.commands;
+    service(); assert(SPI.commands == spiFailureCommands);
+    fresh(); latch();
+    SPI.statusHook = [] { if (SPI.command == 0xFB) misoHigh = true; };
+    service(); // SPI fails after inspection but before FIFO selection.
+    assert(SPI.fifoReads == 0 && SPI.rxFifo.size() == 9 && SPI.transmissions.empty());
+    for (auto command : SPI.commands) assert(command & 0x80);
+    const auto unreadCommands = SPI.commands;
+    service(); assert(SPI.commands == unreadCommands);
+    fresh(); latch(); recover(false, Device::Dudu, handle);
+    latch(); service(); // Invalid RTC never grants awake receipt authority.
+    assert(deliveries == 0 && SPI.transmissions.empty());
+    fresh(); latch(); recover(true, Device::Dudu, handle);
+    latch(); service(); SPI.registers[0x35] = 0x16; hostUs += 1000; service();
+    assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
+    assert(Serial.log.find("ACK_TX_UNDERFLOW") != std::string::npos);
+    fresh(); latch(); recover(true, Device::Dudu, handle);
+    latch(); hostUs = 0xFFFFFE00; service(); finishRetry(); // micros wrap.
+    assert(SPI.registers[0x35] == 0x0D && deliveries == 1);
+    puts("PASS: lost boot ACK, repeated awake re-ACK without delivery, malformed/new rejection, idle no-op");
+    puts("PASS: awake bounds, incomplete FIFO preserved, TX timeout, RX failure cutoff, micros rollover");
+}
+
 int main()
 {
+    testAwakeRetry();
     fresh(); WakePlatform::deepReset = false;
     assert(!captureBoot().deep && SPI.commands.empty());
     WakePlatform::deepReset = true;

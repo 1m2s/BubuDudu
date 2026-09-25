@@ -911,6 +911,7 @@ namespace
     const char* sleepTransportBlockedReason()
     {
         if (!protocolReady) return "RUNTIME_NOT_READY";
+        if (CC1101WakeRecovery::awakeBusy()) return "CC1101_ACK_PENDING";
         if (waitingForAck) return "ACK_PENDING";
         if (controlCount != 0) return "CONTROL_QUEUED";
         if (PowerManager::transaction().active) return "TRANSACTION_ACTIVE";
@@ -975,6 +976,11 @@ namespace
                 break;
             case 'w':
             {
+                if (CC1101WakeRecovery::awakeBusy())
+                {
+                    Serial.println("CC1101 WAKE TX | REFUSED | awake re-ACK pending");
+                    break;
+                }
                 if (!protocolReady || waitingForAck || controlCount != 0 ||
                     uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
                     !PowerManager::automaticHeartbeatAllowed())
@@ -1176,6 +1182,8 @@ void loop()
     discardObsoleteControls();
     handleAckTimeout();
     sendNextControl();
+
+    CC1101WakeRecovery::serviceAwake(PEER_DEVICE);
 
     // Physical execution is separate from semantic agreement.
     serviceSleepExecution();

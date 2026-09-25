@@ -27,6 +27,11 @@ namespace CC1101WakeRecovery
     // Validated EVENT -> application dedup/history -> receipt packet for CC1101.
     using EventHandler = Protocol::Message (*)(const Protocol::Message&, bool& processed);
     Report recover(bool historyRestored, Protocol::DeviceId peer, EventHandler handler);
+    // Loop-owned, GDO-triggered service for retries of the boot-accepted EVENT.
+    // No application delivery; ACK completion is polled across loop iterations.
+    // Failed RX restart/unknown radio disables service until reboot.
+    void serviceAwake(Protocol::DeviceId peer);
+    bool awakeBusy(); // Prevent manual TX or physical sleep during this ACK.
     void printReport(const BootInfo& boot, bool historyRestored, const Report& report);
     // Shared manual/coordinated physical entry. Guard returns nullptr when
     // drained, otherwise a diagnostic reason. Success does not return; ANY

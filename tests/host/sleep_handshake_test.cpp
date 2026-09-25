@@ -75,6 +75,8 @@ namespace CC1101WakeTx
 }
 CC1101WakeRecovery::BootInfo injectedBoot;
 bool injectWakePacket = false;
+bool awakeAckBusy = false;
+unsigned awakeServices = 0;
 Protocol::Message injectedPacket{};
 namespace CC1101WakeRecovery
 {
@@ -95,6 +97,12 @@ namespace CC1101WakeRecovery
         }
         return report;
     }
+    void serviceAwake(Protocol::DeviceId peer)
+    {
+        assert(protocolReady && peer == PEER_DEVICE);
+        ++awakeServices;
+    }
+    bool awakeBusy() { return awakeAckBusy; }
     void printReport(const BootInfo&, bool, const Report&) {}
     void enterDeepSleep(void (*save)(), const char* (*guard)(), bool coordinated)
     {
@@ -300,6 +308,7 @@ void freshApp()
     armAttempts = 0; armResult = CC1101SleepArm::Result::Ready;
     armInitializations = 0; wakeRecoveries = 0; benchSleepCalls = 0;
     injectedBoot = {}; injectWakePacket = false;
+    awakeAckBusy = false; awakeServices = 0;
     wakeEvents.clear();
     coordinatedAttempts = physicalSleeps = mockedTxInFlight = 0;
     mockedRxActive = entryFails = false; afterArm = nullptr;
@@ -1083,6 +1092,31 @@ void testCoordinatedExecution()
     puts("PASS: timer reboot restores history only, fresh drain/retry/queue/deadline state, ESP-NOW peer rediscovery");
 }
 
+void testAwakeWakeService()
+{
+    freshApp();
+    awakeAckBusy = true;
+    assert(std::string(sleepTransportBlockedReason()) == "CC1101_ACK_PENDING");
+    command('w'); assert(wakeEvents.empty());
+    command('x'); assert(benchSleepCalls == 0);
+    // The radio's in-flight ACK must not prevent ordinary ESP-NOW receipt work.
+    startHeartbeatEvent();
+    const auto id = pendingMessage.messageId;
+    receive(incoming(Type::Ack, id));
+    assert(!waitingForAck && peerState() == PeerState::ONLINE && awakeServices >= 3);
+    awakeAckBusy = false;
+    assert(sleepTransportBlockedReason() == nullptr);
+    command('w'); assert(wakeEvents.size() == 1);
+    completedAwaitingCallbacks(false);
+    mockedTxInFlight = 0; awakeAckBusy = true;
+    loop(); assert(physicalSleeps == 0 && coordinatedAttempts == 0);
+    awakeAckBusy = false;
+    loop(); assert(physicalSleeps == 1 && coordinatedAttempts == 1);
+    freshApp(); protocolReady = false;
+    loop(); assert(awakeServices == 0);
+    puts("PASS: awake CC1101 service stays in loop, ACK blocks competing sleep/TX, ESP-NOW still drains");
+}
+
 void testMotionInitialization()
 {
     for (bool deep : {false, true}) for (bool ok : {false, true})
@@ -1122,6 +1156,7 @@ int main()
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
     testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
     testMotionInitialization();
+    testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);
