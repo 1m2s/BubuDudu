@@ -49,7 +49,7 @@ void IRAM_ATTR Motion::handleInterrupt()
 // Register write
 // ======================================================
 
-void Motion::writeRegister(
+bool Motion::writeRegister(
     uint8_t reg,
     uint8_t value
 )
@@ -59,7 +59,7 @@ void Motion::writeRegister(
     Wire.write(reg);
     Wire.write(value);
 
-    Wire.endTransmission();
+    return Wire.endTransmission() == 0;
 }
 
 
@@ -71,26 +71,19 @@ uint8_t Motion::readRegister(
     uint8_t reg
 )
 {
+    uint8_t value = 0;
+    readRegister(reg, value);
+    return value;
+}
+
+bool Motion::readRegister(uint8_t reg, uint8_t& value)
+{
     Wire.beginTransmission(ADXL345_ADDRESS);
-
     Wire.write(reg);
-
-    Wire.endTransmission(false);
-
-
-    Wire.requestFrom(
-        ADXL345_ADDRESS,
-        (uint8_t)1
-    );
-
-
-    if (Wire.available())
-    {
-        return Wire.read();
-    }
-
-
-    return 0;
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(ADXL345_ADDRESS, uint8_t(1)) != 1) return false;
+    value = Wire.read();
+    return true;
 }
 
 
@@ -130,6 +123,7 @@ bool Motion::begin(
     uint8_t intPin
 )
 {
+    initialized = false;
     interruptPin = intPin;
 
 
@@ -282,6 +276,7 @@ bool Motion::begin(
     );
 
 
+    initialized = true;
     return true;
 }
 
@@ -365,4 +360,46 @@ void Motion::resumeInterrupt()
         handleInterrupt,
         RISING
     );
+}
+
+bool Motion::prepareForSleep()
+{
+    if (!initialized) return false;
+    pauseInterrupt();
+    // Awake LINK mode requires servicing inactivity too. For this explicit
+    // sleep interval use independent activity only, keeping all thresholds.
+    // ADXL345 datasheet: clear LINK via standby before returning to MEASURE.
+    uint8_t source, enabled, mapping, power, format;
+    if (!writeRegister(INT_ENABLE, 0x00) ||
+        !writeRegister(POWER_CTL, 0x00) ||
+        !writeRegister(INT_MAP, 0x00) ||
+        !readRegister(INT_SOURCE, source) ||
+        !writeRegister(POWER_CTL, 0x08) ||
+        !writeRegister(INT_ENABLE, 0x10) ||
+        !readRegister(INT_ENABLE, enabled) || enabled != 0x10 ||
+        !readRegister(INT_MAP, mapping) || mapping != 0x00 ||
+        !readRegister(POWER_CTL, power) || power != 0x08 ||
+        !readRegister(DATA_FORMAT, format) || format != 0x09)
+        return false;
+    // Old latched activity was cleared above. New/stuck HIGH refuses sleep.
+    return digitalRead(interruptPin) == LOW;
+}
+
+bool Motion::cancelSleepPreparation()
+{
+    if (!initialized) return false;
+    // Fixed number of I2C operations, no retries. Restore ISR even on I2C
+    // failure and report the failure to main; never silently claim success.
+    const bool disabled = writeRegister(INT_ENABLE, 0x00);
+    const bool standby = writeRegister(POWER_CTL, 0x00);
+    const bool mapped = writeRegister(INT_MAP, 0x00);
+    const bool linked = writeRegister(POWER_CTL, 0x28);
+    const bool enabled = writeRegister(INT_ENABLE, 0x18);
+    uint8_t mapping = 0xFF, interrupts = 0, power = 0;
+    const bool readMap = readRegister(INT_MAP, mapping);
+    const bool readEnable = readRegister(INT_ENABLE, interrupts);
+    const bool readPower = readRegister(POWER_CTL, power);
+    resumeInterrupt();
+    return disabled && standby && mapped && linked && enabled && readMap && readEnable && readPower &&
+           mapping == 0x00 && interrupts == 0x18 && power == 0x28;
 }

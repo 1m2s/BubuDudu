@@ -22,7 +22,7 @@ done
 "$build_dir/test_rtc_state"
 "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
     -fsanitize=address,undefined -fno-omit-frame-pointer \
-    -I"$test_dir/wake" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
+    -DDEVICE_BUBU -I"$test_dir/wake" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
     "$test_dir/cc1101_wake_test.cpp" -o "$build_dir/test_cc1101_wake"
 "$build_dir/test_cc1101_wake"
 for device in BUBU DUDU; do
@@ -37,4 +37,9 @@ for device in BUBU DUDU; do
         "$test_dir/espnow_drain_test.cpp" -o "$build_dir/test_espnow_drain_$device"
     "$build_dir/test_espnow_drain_$device"
 done
+"${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$test_dir/motion" -I"$test_dir" -I"$repo_dir/include" \
+    "$test_dir/motion_sleep_test.cpp" -o "$build_dir/test_motion_sleep"
+"$build_dir/test_motion_sleep"
 echo "Host binaries: $build_dir"

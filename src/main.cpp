@@ -20,7 +20,6 @@ bool restoreRtcHistory();
 
 namespace
 {
-    constexpr uint8_t MOTION_SDA_PIN = 0, MOTION_SCL_PIN = 1, MOTION_INT1_PIN = 3;
     Motion motion;
 
     constexpr UBaseType_t RX_QUEUE_LENGTH = 8;
@@ -922,6 +921,30 @@ namespace
         return nullptr;
     }
 
+    const char* sleepEntryBlockedReason()
+    {
+        if (const char* reason = sleepTransportBlockedReason()) return reason;
+        return digitalRead(MOTION_INT1_PIN) != 0 ? "MOTION_INT1_HIGH" : nullptr;
+    }
+
+    void enterPhysicalSleep(bool coordinated)
+    {
+        const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
+        if (motion.prepareForSleep())
+        {
+            Serial.println("MOTION SLEEP ARM | READY | GPIO3 LOW | activity only | INT_ENABLE=0x10 POWER_CTL=0x08");
+            CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepEntryBlockedReason, coordinated);
+        }
+        else
+        {
+            RtcState::invalidate();
+            Serial.printf("%s | ABORTED | reason=MOTION_NOT_READY_OR_INT1_HIGH\n", label);
+        }
+        // Successful deep sleep reboots. Every return restores awake sensing.
+        Serial.printf("MOTION SLEEP ARM | CANCELLED | awake_restore=%s\n",
+                      motion.cancelSleepPreparation() ? "OK" : "FAILED");
+    }
+
     void serviceSleepExecution()
     {
         if (PowerManager::localState() != PowerManager::LocalState::SLEEPING)
@@ -949,7 +972,7 @@ namespace
         Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
                       decision.sleepId, PowerManager::toString(decision.role));
         Serial.println("SLEEP TRANSPORT DRAINED");
-        CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepTransportBlockedReason, true);
+        enterPhysicalSleep(true);
         // Successful deep sleep reboots. A return always means entry failed.
         PowerManager::notifySleepExecutionFailed(millis());
         sleepDrainWaiting = false;
@@ -972,7 +995,7 @@ namespace
                 if (sleepTransportBlockedReason() || !PowerManager::automaticHeartbeatAllowed())
                     Serial.println("BENCH DEEP SLEEP | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
                 else
-                    CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepTransportBlockedReason, false);
+                    enterPhysicalSleep(false);
                 break;
             case 'w':
             {
@@ -1083,6 +1106,9 @@ void setup()
         // No USB delay, normal CC1101 begin, reset or configuration here.
         rtcRestored = restoreRtcHistory();
         if (!rtcRestored) RtcState::invalidate();
+        // GPIO mask identifies the wake SOURCE, not whether FIFO data exists.
+        // Inspect retained RX even for motion/timer (empty is normal); never
+        // reset away a coincident packet. Both GPIO bits use this same path.
         wakeReport = CC1101WakeRecovery::recover(rtcRestored, PEER_DEVICE, handleWakeEvent);
         CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
     }

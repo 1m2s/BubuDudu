@@ -2,7 +2,7 @@
 #include "Arduino.h"
 #include <array>
 
-constexpr int HIGH = 1, LOW = 0, OUTPUT = 1, INPUT_PULLDOWN = 2;
+constexpr int HIGH = 1, LOW = 0, OUTPUT = 1, INPUT = 0, INPUT_PULLDOWN = 2;
 constexpr int MSBFIRST = 1, SPI_MODE0 = 0;
 extern uint32_t hostUs;
 extern bool misoHigh;
@@ -11,7 +11,8 @@ inline uint32_t micros() { hostUs += 10; return hostUs; }
 inline void delayMicroseconds(uint32_t us) { hostUs += us; }
 inline void pinMode(int, int) {}
 inline void digitalWrite(int pin, int value) { assert(pin == 10); csLevel = value; }
-inline int digitalRead(int pin) { return pin == 20 ? int(misoHigh) : gdoLevel; }
+inline int& motionGpioLevel() { static int level = LOW; return level; }
+inline int digitalRead(int pin) { return pin == 20 ? int(misoHigh) : pin == 3 ? motionGpioLevel() : gdoLevel; }
 struct SPISettings { SPISettings(uint32_t, int, int) {} };
 
 struct HostSPI

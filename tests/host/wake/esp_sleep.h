@@ -19,7 +19,7 @@ inline esp_err_t esp_sleep_disable_wakeup_source(esp_sleep_wakeup_cause_t)
 { WakePlatform::sources = false; return ESP_OK; }
 inline esp_err_t esp_deep_sleep_enable_gpio_wakeup(uint64_t mask, int mode)
 {
-    assert(mask == (1ULL << 4) && mode == ESP_GPIO_WAKEUP_GPIO_HIGH);
+    assert(mask == ((1ULL << 4) | (1ULL << 3)) && mode == ESP_GPIO_WAKEUP_GPIO_HIGH);
     WakePlatform::sources = true;
     return WakePlatform::failSetup ? -1 : ESP_OK;
 }
