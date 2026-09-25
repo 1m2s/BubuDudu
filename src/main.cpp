@@ -978,6 +978,33 @@ namespace
         sleepDrainWaiting = false;
     }
 
+    // Shared manual/boot wake request. The transmitter owns the entire bounded
+    // retry episode; this layer allocates exactly one EVENT after runtime guards.
+    void requestPeerWake()
+    {
+        if (CC1101WakeRecovery::awakeBusy())
+        {
+            Serial.println("CC1101 WAKE TX | REFUSED | awake re-ACK pending");
+            return;
+        }
+        if (!protocolReady || waitingForAck || controlCount != 0 ||
+            uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
+            !PowerManager::automaticHeartbeatAllowed())
+        {
+            Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
+            return;
+        }
+        const Protocol::Message event{Protocol::VERSION, Protocol::MessageType::Event,
+            nextMessageId++, LOCAL_DEVICE, Protocol::EventType::Heartbeat, 0};
+        const auto result = CC1101WakeTx::send(event, PEER_DEVICE);
+        if (result.result == CC1101WakeTx::Result::Acked)
+            Serial.printf("CC1101 WAKE ACK | id=%u | OK | RX_READY=%d\n", event.messageId, result.rxReady);
+        else
+            Serial.printf("CC1101 WAKE TX | id=%u | GIVE_UP | retries=%u | reason=%s | RX_READY=%d\n",
+                event.messageId, result.attempts ? result.attempts - 1 : 0,
+                CC1101WakeTx::toString(result.result), result.rxReady);
+    }
+
     void servicePowerTest()
     {
         const uint32_t now = millis();
@@ -997,31 +1024,7 @@ namespace
                 else
                     enterPhysicalSleep(false);
                 break;
-            case 'w':
-            {
-                if (CC1101WakeRecovery::awakeBusy())
-                {
-                    Serial.println("CC1101 WAKE TX | REFUSED | awake re-ACK pending");
-                    break;
-                }
-                if (!protocolReady || waitingForAck || controlCount != 0 ||
-                    uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
-                    !PowerManager::automaticHeartbeatAllowed())
-                {
-                    Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
-                    break;
-                }
-                const Protocol::Message event{Protocol::VERSION, Protocol::MessageType::Event,
-                    nextMessageId++, LOCAL_DEVICE, Protocol::EventType::Heartbeat, 0};
-                const auto result = CC1101WakeTx::send(event, PEER_DEVICE);
-                if (result.result == CC1101WakeTx::Result::Acked)
-                    Serial.printf("CC1101 WAKE ACK | id=%u | OK | RX_READY=%d\n", event.messageId, result.rxReady);
-                else
-                    Serial.printf("CC1101 WAKE TX | id=%u | GIVE_UP | retries=%u | reason=%s | RX_READY=%d\n",
-                        event.messageId, result.attempts ? result.attempts - 1 : 0,
-                        CC1101WakeTx::toString(result.result), result.rxReady);
-                break;
-            }
+            case 'w': requestPeerWake(); break;
             case 'i': PowerManager::forceIdle(now); break;
             case 's':
                 if (!protocolReady || waitingForAck || controlCount != 0)
@@ -1167,6 +1170,15 @@ void setup()
         FIRST_EVENT_DELAY_MS;
 
     protocolReady = true;
+
+    // One-shot boot policy, after retained recovery, Motion and runtime setup.
+    // GPIO4 is CC1101 GDO0: its participation suppresses a return wake, even
+    // when GPIO3 also fired. Never re-evaluate this from loop() or rearm on failure.
+    if (bootInfo.wokeFromGpio(MOTION_INT1_PIN) && !bootInfo.wokeFromGpio(4))
+    {
+        Serial.println("MOTION PEER WAKE | one-shot request");
+        requestPeerWake();
+    }
 }
 
 

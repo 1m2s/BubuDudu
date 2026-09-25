@@ -63,15 +63,24 @@ int digitalRead(int pin) { assert(pin == 3); return motionIntLevel; }
 bool Motion::prepareForSleep() { ++motionPreparations; return motionInitOk && motionPrepareOk; }
 bool Motion::cancelSleepPreparation() { ++motionCancels; return motionInitOk; }
 std::vector<Protocol::Message> wakeEvents;
+CC1101WakeTx::Result wakeTxResult = CC1101WakeTx::Result::AckTimeout;
+bool radioStarts = true;
+void (*atRadioStart)() = nullptr;
 namespace CC1101WakeTx
 {
     Report send(const Protocol::Message& event, Protocol::DeviceId peer)
     {
         assert(protocolReady && !waitingForAck && controlCount == 0 && !PowerManager::transaction().active);
         assert(receiveQueue->items.empty() && peer == PEER_DEVICE);
+        if (Serial.log.find("MOTION PEER WAKE | one-shot request") != std::string::npos)
+        {
+            assert(wakeRecoveries == 1 && armInitializations == 0 && motionInitializations == 1);
+            assert(Serial.log.find("ESP-NOW startup successful.") != std::string::npos);
+            assert(PowerManager::localState() == PowerManager::LocalState::ACTIVE);
+        }
         wakeEvents.push_back(event);
         Report report;
-        report.result = Result::AckTimeout; report.attempts = 3; report.rxReady = true;
+        report.result = wakeTxResult; report.attempts = wakeTxResult == Result::RadioUnavailable ? 0 : 3; report.rxReady = true;
         return report;
     }
     const char* toString(Result) { return "ACK_TIMEOUT"; }
@@ -128,7 +137,7 @@ namespace ESPNowRadio
 {
     unsigned txInFlight() { return mockedTxInFlight; }
     bool receiveCallbackActive() { return mockedRxActive; }
-    bool begin(ReceiveHandler) { return true; }
+    bool begin(ReceiveHandler) { if (atRadioStart) atRadioStart(); return radioStarts; }
     bool send(const uint8_t* data, size_t length)
     {
         assert(length == 8);
@@ -312,7 +321,8 @@ void freshApp()
     armInitializations = 0; wakeRecoveries = 0; benchSleepCalls = 0;
     injectedBoot = {}; injectWakePacket = false;
     awakeAckBusy = false; awakeServices = 0;
-    wakeEvents.clear();
+    wakeEvents.clear(); wakeTxResult = CC1101WakeTx::Result::AckTimeout;
+    radioStarts = true; atRadioStart = nullptr;
     coordinatedAttempts = physicalSleeps = mockedTxInFlight = 0;
     mockedRxActive = entryFails = false; afterArm = nullptr;
     sleepDrainWaiting = false; sleepDrainStarted = 0;
@@ -1189,10 +1199,72 @@ void testMotionSleepEntry()
         assert(rtcRestored && protocolReady && motionInitializations == 1);
         assert(wakeRecoveries == 1 && armInitializations == 0);
         assert(wakeReport.processed == injectWakePacket && wakeReport.ackSent == injectWakePacket);
-        assert(localState() == LocalState::ACTIVE && !transaction().active && wakeEvents.empty());
-        assert(nextMessageId == (injectWakePacket ? 124 : 123));
+        assert(localState() == LocalState::ACTIVE && !transaction().active);
+        assert(wakeEvents.size() == (mask == 8 ? 1U : 0U));
+        assert(nextMessageId == ((injectWakePacket || mask == 8) ? 124 : 123));
     }
-    puts("PASS: GPIO3/GPIO4/both/timer startup ordering; Motion arm failure and GPIO race abort once without peer wake");
+    puts("PASS: GPIO3/GPIO4/both/timer startup ordering; Motion arm failure and GPIO race abort once; only pure motion startup requests peer wake");
+}
+
+void testMotionPeerWake()
+{
+    for (auto result : {CC1101WakeTx::Result::Acked, CC1101WakeTx::Result::AckTimeout,
+                        CC1101WakeTx::Result::RadioUnavailable})
+    for (uint64_t mask : {0ULL, 8ULL, 16ULL, 24ULL})
+    for (bool deep : {false, true})
+    {
+        freshApp(); protocolReady = false;
+        delete receiveQueue; receiveQueue = nullptr;
+        injectedBoot.deep = deep; injectedBoot.gpioMask = mask;
+        injectedBoot.cause = mask ? CC1101WakeRecovery::Cause::Gpio : CC1101WakeRecovery::Cause::Timer;
+        injectWakePacket = deep && (mask & 16);
+        injectedPacket = {1, Type::Event, 70, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+        RtcState::save({0xFFFF, false, 0, {false, 0}});
+        wakeTxResult = result;
+        setup();
+        const bool automaticWake = deep && mask == 8;
+        assert(protocolReady && motionInitializations == 1 && localState() == LocalState::ACTIVE);
+        assert(wakeEvents.size() == (automaticWake ? 1U : 0U));
+        assert(occurrences(Serial.log, "MOTION PEER WAKE | one-shot request") == (automaticWake ? 1U : 0U));
+        if (automaticWake)
+        {
+            const auto& packet = wakeEvents.front();
+            assert(packet.messageId == 0xFFFF && packet.version == Protocol::VERSION);
+            assert(packet.sender == LOCAL_DEVICE && packet.type == Type::Event);
+            assert(packet.event == Protocol::EventType::Heartbeat && packet.ackForMessageId == 0);
+            assert(!haveLastPeerEvent); // No local application EVENT executed for motion.
+            assert(nextMessageId == 0); // Exactly one allocation, including rollover.
+            assert(Serial.log.find(result == CC1101WakeTx::Result::Acked ? "| OK |" : "| GIVE_UP |") != std::string::npos);
+        }
+        else if (injectWakePacket)
+            assert(wakeReport.processed && wakeReport.ackSent && lastPeerEventId == 70);
+        const auto idAfterBoot = nextMessageId;
+        for (unsigned i = 0; i < 500; ++i) loop();
+        assert(wakeEvents.size() == (automaticWake ? 1U : 0U) && nextMessageId == idAfterBoot);
+        assert(localState() == LocalState::ACTIVE && !waitingForAck && wire.empty());
+    }
+    // Incomplete runtime setup cannot send; a guard refusal is also one-shot,
+    // never converted into an unbounded deferred request after the queue drains.
+    for (bool startupFailure : {false, true})
+    {
+        freshApp(); protocolReady = false;
+        delete receiveQueue; receiveQueue = nullptr;
+        injectedBoot.deep = true; injectedBoot.cause = CC1101WakeRecovery::Cause::Gpio;
+        injectedBoot.gpioMask = 8;
+        RtcState::save({123, false, 0, {false, 0}});
+        if (startupFailure) radioStarts = false;
+        else atRadioStart = [] {
+            const auto ack = incoming(Type::Ack, 99);
+            queueReceivedData(reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+        };
+        setup();
+        assert(wakeEvents.empty() && nextMessageId == 123);
+        if (!startupFailure) assert(Serial.log.find("CC1101 WAKE TX | REFUSED") != std::string::npos);
+        for (unsigned i = 0; i < 100; ++i) loop();
+        assert(wakeEvents.empty() && nextMessageId == 123 && localState() == LocalState::ACTIVE);
+    }
+    puts("PASS: pure-motion one-shot after safe startup; radio/both/timer/cold suppressed; ACK/timeout/unavailable outcomes");
+    puts("PASS: one allocator increment/rollover, no local delivery, no loop retrigger, startup failure/guard refusal bounded");
 }
 
 int main()
@@ -1203,6 +1275,7 @@ int main()
     testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
     testMotionInitialization();
     testMotionSleepEntry();
+    testMotionPeerWake();
     testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
