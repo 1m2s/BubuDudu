@@ -54,9 +54,11 @@ namespace CC1101WakeRecovery
         // valid even if ESP-NOW advances the application's last EVENT history.
         Protocol::Message wakeAck{};
         bool haveWakeAck = false;
-        enum class AwakeState { Listening, AckTx, Stopped };
+        enum class AwakeState { Listening, RxPending, Tx, Stopped };
         AwakeState awakeState = AwakeState::Listening;
         uint32_t awakeTxStarted = 0;
+        bool wakeRetryTx = false;
+        bool receiptTx = false;
 
         bool startAck(const Protocol::Message& ack)
         {
@@ -95,7 +97,8 @@ namespace CC1101WakeRecovery
         // Caller has checked overflow/count and established a complete IDLE
         // packet. The profile disables appended status: length + eight bytes.
         enum class PacketRead { Unavailable, Rejected, Valid };
-        PacketRead readWakePacket(Report& report, Protocol::DeviceId peer, Protocol::Message& packet)
+        PacketRead readWakePacket(Report& report, Protocol::DeviceId peer, Protocol::Message& packet,
+                                  bool application = false)
         {
             const auto count = report.radio.rxBytes & 0x7F;
             uint8_t raw[64];
@@ -111,9 +114,11 @@ namespace CC1101WakeRecovery
             }
             memcpy(&packet, &raw[1], sizeof(packet));
             report.packetRecovered = true;
-            if (packet.version != Protocol::VERSION || packet.sender != peer ||
-                packet.type != Protocol::MessageType::Event ||
-                packet.event != Protocol::EventType::Heartbeat || packet.ackForMessageId != 0)
+            const bool event = packet.type == Protocol::MessageType::Event &&
+                packet.event == Protocol::EventType::Heartbeat && packet.ackForMessageId == 0;
+            const bool ack = application && packet.type == Protocol::MessageType::Ack &&
+                packet.event == Protocol::EventType::None;
+            if (packet.version != Protocol::VERSION || packet.sender != peer || (!event && !ack))
             {
                 report.reason = "PACKET_FORMAT_INVALID";
                 return PacketRead::Rejected;
@@ -207,28 +212,83 @@ namespace CC1101WakeRecovery
 
     bool awakeBusy()
     {
-        return awakeState == AwakeState::AckTx;
+        return awakeState == AwakeState::Tx || awakeState == AwakeState::RxPending || digitalRead(GDO0) == HIGH;
     }
 
-    void serviceAwake(Protocol::DeviceId peer)
+    SubmitResult submitAwake(const Protocol::Message& packet)
+    {
+        if (awakeState == AwakeState::Stopped) return SubmitResult::Failed;
+        if (awakeBusy()) return SubmitResult::Busy;
+        const bool event = packet.type == Protocol::MessageType::Event &&
+            packet.event == Protocol::EventType::Heartbeat && packet.ackForMessageId == 0;
+        const bool ack = packet.type == Protocol::MessageType::Ack && packet.event == Protocol::EventType::None;
+        if (packet.version != Protocol::VERSION || (!event && !ack)) return SubmitResult::Failed;
+        const auto radio = CC1101SleepArm::prepareForSleep();
+        if (radio.result != CC1101SleepArm::Result::Ready)
+        {
+            using Result = CC1101SleepArm::Result;
+            if (radio.result == Result::RxPending || radio.result == Result::GdoHigh)
+            {
+                awakeState = AwakeState::RxPending;
+                awakeTxStarted = micros(); // Bounded wait for the packet to finish.
+                return SubmitResult::Busy;
+            }
+            if (radio.result == Result::RadioUnavailable || radio.result == Result::WrongConfig)
+            {
+                awakeState = AwakeState::Stopped;
+                Serial.println("CC1101 AWAKE | STOPPED | TX preflight failed");
+            }
+            else finishAwake("TX_NOT_IN_RX", false, false);
+            return SubmitResult::Failed;
+        }
+
+        // Close the RX-to-TX race before touching either FIFO. If a frame arrives
+        // during IDLE entry, leave it for the single receive consumer.
+        const uint32_t started = micros();
+        uint8_t count;
+        if (!strobe(SIDLE, started) || !waitState(1, started) || !read(0x3B, count, started))
+        {
+            awakeState = AwakeState::Stopped; // Unknown/unread FIFO: do not flush.
+            Serial.println("CC1101 AWAKE | STOPPED | TX inspection failed");
+            return SubmitResult::Failed;
+        }
+        if (count || digitalRead(GDO0) == HIGH)
+        {
+            awakeState = AwakeState::RxPending;
+            awakeTxStarted = micros();
+            return SubmitResult::Busy;
+        }
+        if (!startAck(packet)) // Same verified FIFO/PATABLE/STX sequence, no ACK wait.
+        {
+            finishAwake("TX_SETUP_FAILED", false, false);
+            return SubmitResult::Failed;
+        }
+        wakeRetryTx = false;
+        receiptTx = ack;
+        awakeTxStarted = micros();
+        awakeState = AwakeState::Tx;
+        return SubmitResult::Accepted;
+    }
+
+    void serviceAwake(Protocol::DeviceId peer, ReceiveHandler handler)
     {
         if (awakeState == AwakeState::Stopped) return;
-        if (awakeState == AwakeState::AckTx)
+        if (awakeState == AwakeState::Tx)
         {
             const uint32_t elapsed = uint32_t(micros() - awakeTxStarted);
             if (elapsed < 1000) return; // Same TX settling interval as boot, without waiting.
             uint8_t state;
             if (!read(MARCSTATE, state, micros()) || state == 0xFF)
-                finishAwake("ACK_TX_FAILED", true, false);
+                finishAwake("ACK_TX_FAILED", wakeRetryTx, false);
             else if (elapsed >= 200000)
-                finishAwake("ACK_TX_TIMEOUT", true, false);
+                finishAwake("ACK_TX_TIMEOUT", wakeRetryTx, false);
             else if ((state & 0x1F) == 1)
-                finishAwake("REACK", true, true);
+                finishAwake(wakeRetryTx ? "REACK" : "PACKET_TX_DONE", wakeRetryTx, receiptTx);
             else if ((state & 0x1F) == 0x16)
-                finishAwake("ACK_TX_UNDERFLOW", true, false);
+                finishAwake("ACK_TX_UNDERFLOW", wakeRetryTx, false);
             return; // At most one status sample; ESP-NOW/FSM work runs every loop.
         }
-        if (digitalRead(GDO0) == LOW) return; // No SPI traffic or waiting without a packet.
+        if (digitalRead(GDO0) == LOW && awakeState != AwakeState::RxPending) return;
         Report report;
         report.radio = CC1101SleepArm::prepareForSleep();
         using Result = CC1101SleepArm::Result;
@@ -240,19 +300,41 @@ namespace CC1101WakeRecovery
         }
         const auto count = report.radio.rxBytes & 0x7F;
         const auto state = report.radio.marc & 0x1F;
+        if (report.radio.result == Result::Ready)
+        {
+            awakeState = AwakeState::Listening; // Pending frame was rejected by hardware; RX is healthy.
+            return;
+        }
         if ((report.radio.rxBytes & 0x80) || state == 0x11 || count > 64)
         {
             finishAwake("RX_COUNT_OR_OVERFLOW", false, false);
             return;
         }
-        if (state != 1) return; // In-progress data must not be consumed or flushed.
+        if (state != 1)
+        {
+            // Preserve in-progress FIFO. A TX refusal must not leave an endless
+            // runtime operation if that packet never completes.
+            if (awakeState == AwakeState::RxPending && uint32_t(micros() - awakeTxStarted) >= BUDGET_US)
+            {
+                awakeState = AwakeState::Stopped;
+                Serial.println("CC1101 AWAKE | STOPPED | pending RX timeout");
+            }
+            return;
+        }
+        if (digitalRead(GDO0) == LOW && count != 0)
+        {
+            // IDLE forced by a refused TX can leave a partial, non-CRC-valid
+            // frame. Never deliver it as an application packet.
+            finishAwake("INCOMPLETE_TX_RACE", false, false);
+            return;
+        }
         if (count == 0)
         {
             finishAwake("EMPTY_FIFO", false, false);
             return;
         }
         Protocol::Message packet{};
-        const auto readResult = readWakePacket(report, peer, packet);
+        const auto readResult = readWakePacket(report, peer, packet, handler != nullptr);
         if (readResult == PacketRead::Unavailable)
         {
             awakeState = AwakeState::Stopped; // FIFO was not copied; never flush it blindly.
@@ -260,14 +342,22 @@ namespace CC1101WakeRecovery
         }
         else if (readResult == PacketRead::Rejected)
             finishAwake(report.reason, false, false);
-        else if (!haveWakeAck || packet.messageId != wakeAck.ackForMessageId)
-            finishAwake("NOT_WAKE_RETRY", false, false); // No new awake application behavior.
+        else if (packet.type != Protocol::MessageType::Event ||
+                 !haveWakeAck || packet.messageId != wakeAck.ackForMessageId)
+        {
+            finishAwake(handler ? "APP_RX" : "NOT_WAKE_RETRY", false, false);
+            // Delivery survives an RX restart failure. Receipt submission will
+            // then fail explicitly; the application still owns duplicate history.
+            if (handler) handler(packet);
+        }
         else if (!startAck(wakeAck))
             finishAwake("ACK_TX_FAILED", true, false);
         else
         {
             awakeTxStarted = micros();
-            awakeState = AwakeState::AckTx;
+            awakeState = AwakeState::Tx;
+            wakeRetryTx = true;
+            receiptTx = true;
             Serial.printf("CC1101 AWAKE RETRY | id=%u | re-ACK started\n", packet.messageId);
         }
     }

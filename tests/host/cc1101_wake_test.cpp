@@ -19,6 +19,14 @@ namespace WakePlatform
 using Type = Protocol::MessageType;
 using Device = Protocol::DeviceId;
 using namespace CC1101WakeRecovery;
+#ifdef DEVICE_BUBU
+constexpr Device local = Device::Bubu, peer = Device::Dudu;
+#else
+constexpr Device local = Device::Dudu, peer = Device::Bubu;
+#endif
+std::vector<Protocol::Message> appPackets;
+bool receipt = false;
+SubmitResult receiptResult = SubmitResult::Failed;
 unsigned deliveries = 0, callbacks = 0, saves = 0;
 bool duplicateEvent = false, highDuringSave = false, motionHighDuringSave = false;
 unsigned guardCalls = 0, blockAtGuard = 0;
@@ -28,7 +36,7 @@ const char* guard()
     if (motionGpioLevel() != LOW) return "MOTION_INT1_HIGH";
     return blockAtGuard && guardCalls >= blockAtGuard ? "TX_IN_FLIGHT" : nullptr;
 }
-const Protocol::Message event{1, Type::Event, 70, Device::Dudu, Protocol::EventType::Heartbeat, 0};
+const Protocol::Message event{1, Type::Event, 70, peer, Protocol::EventType::Heartbeat, 0};
 
 Protocol::Message handle(const Protocol::Message& packet, bool& processed)
 {
@@ -37,7 +45,7 @@ Protocol::Message handle(const Protocol::Message& packet, bool& processed)
     for (auto command : SPI.commands) assert(command & 0x80);
     ++callbacks; processed = !duplicateEvent;
     if (processed) ++deliveries;
-    return {1, Type::Ack, 123, Device::Bubu, Protocol::EventType::None, packet.messageId};
+    return {1, Type::Ack, 123, local, Protocol::EventType::None, packet.messageId};
 }
 
 void fresh()
@@ -53,7 +61,8 @@ void fresh()
     motionGpioLevel() = LOW; motionHighDuringSave = false;
     WakePlatform::mask = 0x10; WakePlatform::cause = ESP_SLEEP_WAKEUP_GPIO;
     Serial.log.clear(); RtcState::invalidate(); guardCalls = blockAtGuard = 0;
-    haveWakeAck = false; awakeState = AwakeState::Listening;
+    haveWakeAck = false; awakeState = AwakeState::Listening; wakeRetryTx = false;
+    appPackets.clear(); receipt = false; receiptResult = SubmitResult::Failed;
 }
 
 void latch(Protocol::Message packet = event)
@@ -77,7 +86,7 @@ void save()
 void service()
 {
     const auto started = hostUs;
-    serviceAwake(Device::Dudu);
+    serviceAwake(peer);
     // No 200-ms TX wait inside one loop call. Includes the existing 50-ms
     // restart budget and worst-case packet inspection/ACK setup failure.
     assert(uint32_t(hostUs - started) < 110000);
@@ -98,7 +107,7 @@ void finishRetry()
 void testAwakeRetry()
 {
     fresh(); latch();
-    const auto boot = recover(true, Device::Dudu, handle);
+    const auto boot = recover(true, peer, handle);
     assert(boot.processed && boot.ackSent && boot.rxReady && deliveries == 1);
     const auto firstAck = SPI.transmissions.front(); // Conceptually lost over RF.
     for (unsigned retry = 0; retry < 3; ++retry)
@@ -118,10 +127,10 @@ void testAwakeRetry()
     // are consumed/rejected once, with a bounded restart and no receipt.
     for (unsigned bad = 0; bad < 9; ++bad)
     {
-        fresh(); latch(); recover(true, Device::Dudu, handle);
+        fresh(); latch(); recover(true, peer, handle);
         auto packet = event;
         if (bad == 0) packet.version = 2;
-        if (bad == 1) packet.sender = Device::Bubu;
+        if (bad == 1) packet.sender = local;
         if (bad == 2) packet.type = Type::Ack;
         if (bad == 3) packet.event = Protocol::EventType::None;
         if (bad == 4) packet.ackForMessageId = 99;
@@ -149,17 +158,17 @@ void testAwakeRetry()
     const auto stoppedCommands = SPI.commands;
     service(); assert(SPI.commands == stoppedCommands); // Unknown configuration cutoff.
 
-    fresh(); latch(); recover(true, Device::Dudu, handle);
+    fresh(); latch(); recover(true, peer, handle);
     latch(); SPI.finishTx = false; service(); assert(awakeBusy());
     finishRetry(); assert(deliveries == 1 && SPI.registers[0x35] == 0x0D);
     assert(Serial.log.find("ACK_TX_TIMEOUT") != std::string::npos);
-    fresh(); latch(); recover(true, Device::Dudu, handle);
+    fresh(); latch(); recover(true, peer, handle);
     latch(); SPI.reachRx = false; service(); finishRetry();
     assert(Serial.log.find("STOPPED | RX restart failed") != std::string::npos);
     const auto failedCommands = SPI.commands;
     for (unsigned i = 0; i < 50; ++i) service();
     assert(SPI.commands == failedCommands && deliveries == 1);
-    fresh(); latch(); recover(true, Device::Dudu, handle);
+    fresh(); latch(); recover(true, peer, handle);
     latch(); SPI.failAfterFifo = true; service();
     assert(!awakeBusy() && deliveries == 1 && SPI.transmissions.size() == 1);
     assert(Serial.log.find("STOPPED | RX restart failed") != std::string::npos);
@@ -172,14 +181,14 @@ void testAwakeRetry()
     for (auto command : SPI.commands) assert(command & 0x80);
     const auto unreadCommands = SPI.commands;
     service(); assert(SPI.commands == unreadCommands);
-    fresh(); latch(); recover(false, Device::Dudu, handle);
+    fresh(); latch(); recover(false, peer, handle);
     latch(); service(); // Invalid RTC never grants awake receipt authority.
     assert(deliveries == 0 && SPI.transmissions.empty());
-    fresh(); latch(); recover(true, Device::Dudu, handle);
+    fresh(); latch(); recover(true, peer, handle);
     latch(); service(); SPI.registers[0x35] = 0x16; hostUs += 1000; service();
     assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
     assert(Serial.log.find("ACK_TX_UNDERFLOW") != std::string::npos);
-    fresh(); latch(); recover(true, Device::Dudu, handle);
+    fresh(); latch(); recover(true, peer, handle);
     latch(); hostUs = 0xFFFFFE00; service(); finishRetry(); // micros wrap.
     assert(SPI.registers[0x35] == 0x0D && deliveries == 1);
     puts("PASS: lost boot ACK, repeated awake re-ACK without delivery, malformed/new rejection, idle no-op");
@@ -199,7 +208,7 @@ void testWakeSources()
         assert(boot.wokeFromGpio(3) == bool(mask & 8));
         assert(boot.wokeFromGpio(4) == bool(mask & 16));
         assert(boot.motionAtBoot == motionGpioLevel() && SPI.commands.empty());
-        const auto report = recover(true, Device::Dudu, handle);
+        const auto report = recover(true, peer, handle);
         assert(report.rxReady && report.packetRecovered == bool(mask & 16));
         assert(report.processed == bool(mask & 16) && report.ackSent == bool(mask & 16));
         if (!(mask & 16))
@@ -216,13 +225,141 @@ void testWakeSources()
     // even when GPIO3, rather than GPIO4, was the original electrical source.
     fresh(); WakePlatform::mask = 8; motionGpioLevel() = HIGH;
     const auto boot = captureBoot(); latch();
-    const auto report = recover(true, Device::Dudu, handle);
+    const auto report = recover(true, peer, handle);
     assert(report.processed && report.ackSent && report.rxReady && !boot.wokeFromGpio(4));
     puts("PASS: GPIO4/Motion/timer/both masks, empty RX on motion, coincident retained packet preserved");
 }
 
+
+void appReceive(const Protocol::Message& packet)
+{
+    appPackets.push_back(packet);
+    if (receipt && packet.type == Type::Event)
+        receiptResult = submitAwake({1, Type::Ack, 501, local, Protocol::EventType::None, packet.messageId});
+}
+void serviceApplication()
+{
+    const auto began = hostUs;
+    serviceAwake(peer, appReceive);
+    assert(uint32_t(hostUs - began) < 110000);
+    assert(csLevel == HIGH && !SPI.active);
+}
+void testApplicationRuntime()
+{
+    const Protocol::Message outbound{1, Type::Event, 88, local, Protocol::EventType::Heartbeat, 0};
+    const Protocol::Message incomingAck{1, Type::Ack, 90, peer, Protocol::EventType::None, 88};
+    fresh(); const auto began = hostUs;
+    assert(submitAwake(outbound) == SubmitResult::Accepted);
+    assert(uint32_t(hostUs - began) < 51000 && awakeBusy()); // No 300 ms ACK wait.
+    assert(SPI.transmissions.size() == 1 && SPI.transmissions[0].size() == 9);
+    assert(SPI.transmissions[0][0] == 8 && memcmp(&SPI.transmissions[0][1], &outbound, 8) == 0);
+    assert(submitAwake(outbound) == SubmitResult::Busy && SPI.transmissions.size() == 1);
+    hostUs += 10000; serviceApplication();
+    assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
+    const auto transmissions = SPI.transmissions;
+    for (unsigned i = 0; i < 40; ++i) { hostUs += 10000; serviceApplication(); }
+    assert(SPI.transmissions == transmissions); // No application retries in driver.
+    latch(incomingAck); serviceApplication();
+    assert(appPackets.size() == 1 && appPackets[0].ackForMessageId == 88 && !awakeBusy());
+
+    fresh(); receipt = true; latch(); serviceApplication();
+    assert(appPackets.size() == 1 && receiptResult == SubmitResult::Accepted && awakeBusy());
+    assert(submitAwake(outbound) == SubmitResult::Busy); // Receipt has priority.
+    assert(SPI.transmissions.size() == 1);
+    Protocol::Message sent{}; memcpy(&sent, &SPI.transmissions[0][1], 8);
+    assert(sent.type == Type::Ack && sent.ackForMessageId == event.messageId);
+    hostUs += 10000; serviceApplication(); assert(!awakeBusy());
+    assert(SPI.registers[0x35] == 0x0D);
+
+    // The saved wake EVENT is never forwarded as general traffic, even after
+    // other app packets. Preserve the exact saved receipt on every wake retry.
+    fresh(); latch(); recover(true, peer, handle);
+    const auto wakeReceipt = SPI.transmissions[0];
+    auto newer = event; ++newer.messageId;
+    latch(newer); serviceApplication(); assert(appPackets.size() == 1);
+    latch(); serviceApplication(); assert(appPackets.size() == 1 && awakeBusy());
+    assert(SPI.transmissions.back() == wakeReceipt && deliveries == 1);
+    hostUs += 10000; serviceApplication(); assert(!awakeBusy());
+    latch(incomingAck); serviceApplication(); assert(appPackets.size() == 2);
+
+    for (unsigned bad = 0; bad < 10; ++bad)
+    {
+        fresh(); auto packet = event;
+        if (bad == 0) packet.version = 2;
+        if (bad == 1) packet.sender = local;
+        if (bad == 2) packet.type = Type::SleepRequest;
+        if (bad == 3) packet.event = Protocol::EventType::None;
+        if (bad == 4) packet.ackForMessageId = 99;
+        if (bad == 5) packet.type = Type::Ack; // ACK with heartbeat payload invalid.
+        latch(packet);
+        if (bad == 6) SPI.rxFifo[0] = 7;
+        if (bad == 7) { SPI.rxFifo.resize(4); SPI.registers[0x3B] = 4; }
+        if (bad == 8) { SPI.rxFifo.resize(11); SPI.registers[0x3B] = 11; }
+        if (bad == 9) SPI.registers[0x3B] = 0x80;
+        serviceApplication(); assert(appPackets.empty() && SPI.registers[0x35] == 0x0D);
+    }
+    // Refuse TX without consuming or overwriting a pending valid packet.
+    fresh(); latch(); const auto retained = SPI.rxFifo;
+    assert(submitAwake(outbound) == SubmitResult::Busy && SPI.rxFifo == retained && SPI.transmissions.empty());
+    serviceApplication(); assert(appPackets.size() == 1);
+    // Inject a CRC-valid frame precisely between preflight and SIDLE/readback.
+    fresh(); bool injected = false;
+    SPI.statusHook = [] {
+        if (SPI.command == 0xFB && SPI.registers[0x35] == 1 && SPI.rxFifo.empty()) latch();
+    };
+    assert(submitAwake(outbound) == SubmitResult::Busy);
+    injected = !SPI.rxFifo.empty(); SPI.statusHook = nullptr;
+    assert(injected && SPI.transmissions.empty()); serviceApplication(); assert(appPackets.size() == 1);
+
+    // Partially received packet at refusal: preserve while RX, bound a stuck RX.
+    fresh(); SPI.rxFifo = {8, 1}; SPI.registers[0x3B] = 2; gdoLevel = LOW;
+    assert(submitAwake(outbound) == SubmitResult::Busy && awakeBusy());
+    serviceApplication(); assert(SPI.rxFifo.size() == 2 && appPackets.empty());
+    hostUs += 50000; serviceApplication();
+    assert(awakeState == AwakeState::Stopped && SPI.rxFifo.size() == 2);
+    const auto stopped = SPI.commands;
+    for (unsigned i = 0; i < 40; ++i) serviceApplication();
+    assert(SPI.commands == stopped);
+
+    fresh(); SPI.rxFifo = {8, 1}; SPI.registers[0x3B] = 2;
+    assert(submitAwake(outbound) == SubmitResult::Busy);
+    SPI.rxFifo.clear(); SPI.registers[0x3B] = 0; // Hardware rejected it and resumed RX.
+    serviceApplication(); assert(!awakeBusy() && awakeState == AwakeState::Listening);
+    fresh(); SPI.finishTx = false;
+    assert(submitAwake(outbound) == SubmitResult::Accepted);
+    hostUs += 200000; serviceApplication(); assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
+    assert(SPI.transmissions.size() == 1);
+    fresh(); assert(submitAwake(outbound) == SubmitResult::Accepted);
+    SPI.registers[0x35] = 0x16; hostUs += 10000; serviceApplication();
+    assert(SPI.registers[0x35] == 0x0D && !awakeBusy());
+    fresh(); assert(submitAwake(outbound) == SubmitResult::Accepted);
+    SPI.reachRx = false; hostUs += 10000; serviceApplication();
+    assert(awakeState == AwakeState::Stopped && submitAwake(outbound) == SubmitResult::Failed);
+    const auto failedCommands = SPI.commands;
+    for (unsigned i = 0; i < 50; ++i) serviceApplication();
+    assert(SPI.commands == failedCommands);
+    fresh(); misoHigh = true; assert(submitAwake(outbound) == SubmitResult::Failed);
+    assert(awakeState == AwakeState::Stopped && SPI.transmissions.empty());
+    fresh(); SPI.registers[0x02] = 6; assert(submitAwake(outbound) == SubmitResult::Failed);
+    assert(SPI.transmissions.empty());
+    fresh(); latch(); SPI.reachRx = false; serviceApplication();
+    assert(appPackets.size() == 1 && awakeState == AwakeState::Stopped); // Delivery survives RX failure.
+    fresh(); latch(); SPI.failAfterFifo = true; serviceApplication();
+    assert(appPackets.size() == 1 && awakeState == AwakeState::Stopped);
+    fresh(); hostUs = UINT32_MAX - 5000;
+    assert(submitAwake(outbound) == SubmitResult::Accepted);
+    hostUs += 10000; serviceApplication(); assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
+    // Rejected physical entry leaves the same runtime radio usable, no reset.
+    fresh(); WakePlatform::failSetup = true; enterDeepSleep(save, guard, false);
+    assert(submitAwake(outbound) == SubmitResult::Accepted);
+    hostUs += 10000; serviceApplication(); assert(SPI.registers[0x35] == 0x0D);
+    for (auto command : SPI.commands) assert(command != 0x30);
+    puts("PASS: awake application TX/RX, receipt priority, wake retry precedence, FIFO races, failure cutoff and aborted sleep");
+}
+
 int main()
 {
+    testApplicationRuntime();
     testAwakeRetry();
     testWakeSources();
     fresh(); WakePlatform::deepReset = false;
@@ -234,7 +371,7 @@ int main()
         const auto boot = captureBoot();
         assert(boot.deep && boot.cause == Cause::Gpio && boot.gpioMask == 0x10 && boot.gdoAtBoot == HIGH);
         assert(SPI.commands.empty());
-        const auto result = recover(true, Device::Dudu, handle);
+        const auto result = recover(true, peer, handle);
         assert(result.packetRecovered && result.ackSent && result.rxReady);
         assert(result.duplicate == duplicate && deliveries == unsigned(!duplicate) && callbacks == 1);
         assert(SPI.transmissions.size() == 1 && SPI.transmissions[0].size() == 9);
@@ -250,42 +387,42 @@ int main()
     {
         fresh(); SPI.registers[0x3B] = count; SPI.registers[0x35] = 1; gdoLevel = HIGH;
         const auto began = hostUs;
-        const auto result = recover(true, Device::Dudu, handle);
+        const auto result = recover(true, peer, handle);
         assert(!result.packetRecovered && !result.ackSent && callbacks == 0 && SPI.fifoReads == 0);
         assert(uint32_t(hostUs - began) < 110000 && result.rxReady);
     }
     fresh(); latch(); SPI.rxFifo[0] = 63;
-    assert(!recover(true, Device::Dudu, handle).packetRecovered && callbacks == 0);
+    assert(!recover(true, peer, handle).packetRecovered && callbacks == 0);
     for (int bad = 0; bad < 5; ++bad)
     {
         fresh(); auto packet = event;
         if (bad == 0) packet.version = 2;
-        if (bad == 1) packet.sender = Device::Bubu;
+        if (bad == 1) packet.sender = local;
         if (bad == 2) packet.type = Type::SleepRequest;
         if (bad == 3) packet.event = Protocol::EventType::None;
         if (bad == 4) packet.ackForMessageId = 99;
-        latch(packet); const auto result = recover(true, Device::Dudu, handle);
+        latch(packet); const auto result = recover(true, peer, handle);
         assert(result.packetRecovered && !result.ackSent && callbacks == 0 && result.rxReady);
     }
     fresh(); latch();
-    assert(!recover(false, Device::Dudu, handle).ackSent && callbacks == 0);
+    assert(!recover(false, peer, handle).ackSent && callbacks == 0);
     fresh(); latch(); SPI.failAfterFifo = true;
-    const auto failed = recover(true, Device::Dudu, handle);
+    const auto failed = recover(true, peer, handle);
     assert(failed.packetRecovered && failed.processed && !failed.ackSent && !failed.rxReady);
     fresh(); latch(); SPI.finishTx = false;
     const auto began = hostUs;
-    const auto stalled = recover(true, Device::Dudu, handle);
+    const auto stalled = recover(true, peer, handle);
     assert(stalled.processed && !stalled.ackSent && stalled.rxReady && uint32_t(hostUs - began) < 310000);
     fresh(); latch(); SPI.registers[0x08] ^= 1;
-    assert(!recover(true, Device::Dudu, handle).packetRecovered && SPI.fifoReads == 0 && gdoLevel == HIGH);
+    assert(!recover(true, peer, handle).packetRecovered && SPI.fifoReads == 0 && gdoLevel == HIGH);
     for (auto command : SPI.commands) assert(command & 0x80);
     fresh(); latch(); SPI.registers[0x35] = 0x0D; // Packet still in progress.
-    assert(!recover(true, Device::Dudu, handle).packetRecovered && SPI.fifoReads == 0);
+    assert(!recover(true, peer, handle).packetRecovered && SPI.fifoReads == 0);
     for (auto command : SPI.commands) assert(command & 0x80);
     fresh(); latch(); WakePlatform::failRelease = true;
-    assert(!recover(true, Device::Dudu, handle).packetRecovered && SPI.commands.empty());
+    assert(!recover(true, peer, handle).packetRecovered && SPI.commands.empty());
     fresh(); WakePlatform::cause = ESP_SLEEP_WAKEUP_TIMER;
-    const auto timer = captureBoot(); const auto empty = recover(true, Device::Dudu, handle);
+    const auto timer = captureBoot(); const auto empty = recover(true, peer, handle);
     assert(timer.cause == Cause::Timer && timer.gpioMask == 0 && empty.rxReady && !empty.packetRecovered);
     for (auto command : SPI.commands) assert(command & 0x80);
     printReport(timer, true, empty);

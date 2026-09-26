@@ -98,6 +98,9 @@ CC1101WakeRecovery::BootInfo injectedBoot;
 bool injectWakePacket = false;
 bool awakeAckBusy = false;
 unsigned awakeServices = 0;
+std::vector<Protocol::Message> ccWire;
+std::deque<Protocol::Message> ccIncoming;
+bool ccAccepts = true, ccHoldTx = false;
 Protocol::Message injectedPacket{};
 namespace CC1101WakeRecovery
 {
@@ -118,12 +121,25 @@ namespace CC1101WakeRecovery
         }
         return report;
     }
-    void serviceAwake(Protocol::DeviceId peer)
+    void serviceAwake(Protocol::DeviceId peer, ReceiveHandler handler)
     {
         assert(protocolReady && peer == PEER_DEVICE);
         ++awakeServices;
+        if (!awakeAckBusy && !ccIncoming.empty())
+        {
+            const auto packet = ccIncoming.front(); ccIncoming.pop_front();
+            handler(packet);
+        }
     }
-    bool awakeBusy() { return awakeAckBusy; }
+    bool awakeBusy() { return awakeAckBusy || !ccIncoming.empty(); }
+    SubmitResult submitAwake(const Protocol::Message& packet)
+    {
+        if (awakeBusy()) return SubmitResult::Busy;
+        if (!ccAccepts) return SubmitResult::Failed;
+        ccWire.push_back(packet);
+        if (ccHoldTx) awakeAckBusy = true;
+        return SubmitResult::Accepted;
+    }
     void printReport(const BootInfo&, bool, const Report&) {}
     void enterDeepSleep(void (*save)(), const char* (*guard)(), bool coordinated)
     {
@@ -331,6 +347,8 @@ void testFsm()
 
 void freshApp()
 {
+    selectedTransport = pendingTransport = Transport::ESP_NOW;
+    ccWire.clear(); ccIncoming.clear(); ccAccepts = true; ccHoldTx = false;
     resetProximityCheck();
     rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
@@ -1134,7 +1152,7 @@ void testAwakeWakeService()
 {
     freshApp();
     awakeAckBusy = true;
-    assert(std::string(sleepTransportBlockedReason()) == "CC1101_ACK_PENDING");
+    assert(std::string(sleepTransportBlockedReason()) == "CC1101_RUNTIME_BUSY");
     command('w'); assert(wakeEvents.empty());
     command('x'); assert(benchSleepCalls == 0);
     // The radio's in-flight ACK must not prevent ordinary ESP-NOW receipt work.
@@ -1172,7 +1190,9 @@ void testMotionInitialization()
         proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = 123;
         proximitySampleCount = 1; proximitySamples[0] = {7, -60};
         delete receiveQueue; receiveQueue = nullptr;
+        selectedTransport = pendingTransport = Transport::CC1101;
         setup();
+        assert(selectedTransport == Transport::ESP_NOW && pendingTransport == Transport::ESP_NOW);
         assert(movementState == MovementState::READY && settleStartedAt == 0);
         assert(proximityUpdateState == ProximityUpdateState::READY && proximitySampleCount == 0 && checkStartedAt == 0);
         assert(motionInitializations == 1 && protocolReady);
@@ -1810,6 +1830,140 @@ void testProximityIsolation()
     puts("PASS: completed measurement preserves normal EVENT/ACK/dedup/retry, heartbeat schedule, message IDs and power/peer state");
 }
 
+
+void receiveVia(const Protocol::Message& packet, Transport transport)
+{
+    if (transport == Transport::ESP_NOW) receive(packet);
+    else { ccIncoming.push_back(packet); loop(); }
+}
+
+void testApplicationTransports()
+{
+    freshApp(); assert(selectedTransport == Transport::ESP_NOW);
+    command('c'); assert(selectedTransport == Transport::CC1101);
+    command('e'); assert(selectedTransport == Transport::ESP_NOW);
+    command('p'); assert(Serial.log.find("selected=ESP-NOW pending=NONE") != std::string::npos);
+    for (unsigned guard = 0; guard < 6; ++guard)
+    {
+        freshApp();
+        if (guard == 0) startHeartbeatEvent();
+        if (guard == 1) { command('i'); command('s'); }
+        if (guard == 2) awakeAckBusy = true;
+        if (guard == 3) mockedTxInFlight = 1;
+        if (guard == 4) protocolReady = false;
+        if (guard == 5) completedAwaitingCallbacks(false);
+        command('c'); assert(selectedTransport == Transport::ESP_NOW);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
+    }
+    for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); selectedTransport = transport;
+        startHeartbeatEvent(); const auto original = pendingMessage;
+        assert(waitingForAck && pendingTransport == transport);
+        auto& sent = transport == Transport::ESP_NOW ? wire : ccWire;
+        assert(sent.size() == 1 && memcmp(&sent[0], &original, 8) == 0);
+        command(transport == Transport::ESP_NOW ? 'c' : 'e');
+        assert(selectedTransport == transport && waitingForAck);
+        const auto other = transport == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
+        receiveVia(incoming(Type::Ack, original.messageId), other);
+        assert(waitingForAck && peerState() == PeerState::UNKNOWN);
+        auto wrongPeer = incoming(Type::Ack, original.messageId); wrongPeer.sender = LOCAL_DEVICE;
+        receiveVia(wrongPeer, transport); assert(waitingForAck);
+        receiveVia(incoming(Type::Ack, original.messageId + 1), transport); assert(waitingForAck);
+        hostNow = ackWaitStart + 300;
+        receiveVia(incoming(Type::Ack, original.messageId), transport);
+        assert(!waitingForAck && retryCount == 0 && sent.size() == 1); // ACK beats exact deadline.
+        assert(peerState() == PeerState::ONLINE);
+        assert(Serial.log.find(std::string("ACK MATCHED | message=") + std::to_string(original.messageId) +
+                               " | via=" + transportName(transport)) != std::string::npos);
+
+        // One shared retry machine; even a forced selector change cannot reroute
+        // an in-flight packet (the public command already refuses that change).
+        freshApp(); selectedTransport = transport; startHeartbeatEvent();
+        const auto retryPacket = pendingMessage;
+        selectedTransport = other;
+        for (unsigned retry = 1; retry <= 2; ++retry)
+        { hostNow = ackWaitStart + 300; loop(); assert(retryCount == retry && pendingTransport == transport); }
+        auto& retries = transport == Transport::ESP_NOW ? wire : ccWire;
+        assert(retries.size() == 3);
+        for (const auto& packet : retries) assert(memcmp(&packet, &retryPacket, 8) == 0);
+        hostNow = ackWaitStart + 300; loop();
+        assert(!waitingForAck && peerState() == PeerState::OFFLINE);
+        for (unsigned i = 0; i < 50; ++i) loop();
+        assert(retries.size() == 3);
+    }
+    for (auto first : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp();
+        const auto other = first == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
+        selectedTransport = other;
+        const auto event = proximityObservation(77, -50, 0).message;
+        receiveVia(event, first); receiveVia(event, other);
+        assert(occurrences(Serial.log, "RX NEW EVENT") == 1 && occurrences(Serial.log, "RX DUPLICATE") == 1);
+        assert(wire.size() == 1 && ccWire.size() == 1);
+        assert(wire[0].type == Type::Ack && ccWire[0].type == Type::Ack);
+        assert(wire[0].ackForMessageId == 77 && ccWire[0].ackForMessageId == 77);
+    }
+    // Bidirectional independent EVENTs: receiving/re-ACKing the peer's EVENT
+    // cannot replace our own pending packet. First peer receipt is lost.
+    freshApp(); command('c'); startHeartbeatEvent(); const auto ours = pendingMessage;
+    const auto peerEvent = proximityObservation(99, -50, 0).message;
+    receiveVia(peerEvent, Transport::CC1101);
+    receiveVia(peerEvent, Transport::CC1101);
+    assert(waitingForAck && memcmp(&ours, &pendingMessage, 8) == 0);
+    assert(ccWire.size() == 3 && ccWire[1].ackForMessageId == 99 && ccWire[2].ackForMessageId == 99);
+    assert(occurrences(Serial.log, "RX NEW EVENT") == 1);
+    hostNow = ackWaitStart + 300; loop(); assert(retryCount == 1);
+    assert(memcmp(&ccWire.back(), &ours, 8) == 0);
+    receiveVia(incoming(Type::Ack, ours.messageId), Transport::CC1101);
+    assert(!waitingForAck && retryCount == 0);
+
+    // Receipt TX blocks a due heartbeat, mode change, synchronous w, and sleep.
+    freshApp(); command('c'); ccHoldTx = true;
+    pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+    receiveVia(peerEvent, Transport::CC1101);
+    assert(awakeAckBusy && ccWire.size() == 1 && ccWire[0].type == Type::Ack && !waitingForAck);
+    command('e'); command('w'); command('x');
+    assert(selectedTransport == Transport::CC1101 && wakeEvents.empty() && benchSleepCalls == 0);
+    awakeAckBusy = false; ccHoldTx = false; loop();
+    assert(waitingForAck && ccWire.size() == 2 && ccWire.back().type == Type::Event);
+
+    // Every sleep control stays on ESP-NOW, independent of the app selector.
+    freshApp(); command('c'); command('i'); command('s');
+    const auto request = pendingMessage;
+    assert(request.type == Type::SleepRequest && pendingTransport == Transport::ESP_NOW && ccWire.empty());
+    receiveVia(incoming(Type::Ack, request.messageId), Transport::CC1101); assert(waitingForAck);
+    receive(incoming(Type::Ack, request.messageId));
+    receive(incoming(Type::SleepReady, request.messageId));
+    assert(pendingMessage.type == Type::SleepCommit && pendingTransport == Transport::ESP_NOW);
+    const auto commit = pendingMessage;
+    receive(incoming(Type::Ack, commit.messageId));
+    receive(incoming(Type::SleepAck, request.messageId));
+    assert(physicalSleeps == 1 && ccWire.empty());
+    freshApp(); command('c'); command('i'); command('s'); command('a');
+    assert(countWire(Type::SleepCancel) == 1 && ccWire.empty());
+    freshApp(); command('c'); command('i'); receive(incoming(Type::SleepRequest, 40, 40));
+    assert(pendingMessage.type == Type::SleepReady && pendingTransport == Transport::ESP_NOW);
+    receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepCommit, 40));
+    assert(pendingMessage.type == Type::SleepAck && pendingTransport == Transport::ESP_NOW && ccWire.empty());
+    receive(incoming(Type::Ack, pendingMessage.messageId)); assert(physicalSleeps == 1);
+
+    // Existing ESP-NOW receive/ACK and RSSI/Motion path remain alive in CC mode.
+    freshApp(); command('c'); settleForCheck(2000);
+    receive(peerEvent); assert(wire.size() == 1 && wire[0].type == Type::Ack);
+    for (unsigned i = 0; i < 3; ++i) rssiObservations.push_back(proximityObservation(i, -50 - i, 2010 + i));
+    movementStep(2020); movementStep(2030);
+    assertProximityReset(); assert(Serial.log.find("median=-51 dBm") != std::string::npos);
+    assert(selectedTransport == Transport::CC1101 && ccWire.empty());
+    command('x'); assert(benchSleepCalls == 1 && motionCancels == 1);
+    startHeartbeatEvent(); assert(ccWire.size() == 1); // Aborted bench entry resumes runtime.
+    freshApp(); command('c'); ccAccepts = false; startHeartbeatEvent();
+    for (unsigned i = 0; i < 3; ++i) { hostNow = ackWaitStart + 300; loop(); }
+    assert(!waitingForAck && ccWire.empty() && peerState() == PeerState::OFFLINE);
+    puts("PASS: manual transports, route-pinned retries, matching ACK before expiry, cross-radio dedup and receipt priority");
+    puts("PASS: simultaneous independent EVENTs, lost ACK/retry/re-ACK, sleep guards/ESP-NOW controls, RSSI/Motion in CC mode");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -1824,6 +1978,7 @@ int main()
     testRssiDiagnostics();
     testProximitySamples(); testProximityTimeout(); testProximityCancellation(); testProximityIsolation();
     testAwakeWakeService();
+    testApplicationTransports();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

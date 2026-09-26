@@ -231,6 +231,12 @@ namespace
         1;
 
 
+    enum class Transport : uint8_t { ESP_NOW, CC1101 };
+    Transport selectedTransport = Transport::ESP_NOW;
+    Transport pendingTransport = Transport::ESP_NOW;
+    const char* transportName(Transport transport)
+    { return transport == Transport::ESP_NOW ? "ESP-NOW" : "CC1101"; }
+
     Protocol::Message pendingMessage{};
 
 
@@ -307,9 +313,18 @@ namespace
     // ======================================================
 
     bool sendProtocolMessage(
-        const Protocol::Message& message
+        const Protocol::Message& message,
+        Transport transport = Transport::ESP_NOW
     )
     {
+        if (transport == Transport::CC1101)
+        {
+            const auto result = CC1101WakeRecovery::submitAwake(message);
+            if (result != CC1101WakeRecovery::SubmitResult::Accepted)
+                Serial.printf("CC1101 APP TX | %s | id=%u\n",
+                              result == CC1101WakeRecovery::SubmitResult::Busy ? "BUSY" : "FAILED", message.messageId);
+            return result == CC1101WakeRecovery::SubmitResult::Accepted;
+        }
         const uint8_t* bytes =
             reinterpret_cast<const uint8_t*>(
                 &message
@@ -328,7 +343,8 @@ namespace
     // ======================================================
 
     bool sendAck(
-        uint16_t receivedMessageId
+        uint16_t receivedMessageId,
+        Transport transport = Transport::ESP_NOW
     )
     {
         Protocol::Message ack{};
@@ -360,16 +376,16 @@ namespace
 
         bool accepted =
             sendProtocolMessage(
-                ack
+                ack, transport
             );
 
 
         if (accepted)
         {
             Serial.printf(
-                "TX ACK | id=%u | ackFor=%u\n",
+                "TX ACK | id=%u | ackFor=%u | via=%s\n",
                 ack.messageId,
-                ack.ackForMessageId
+                ack.ackForMessageId, transportName(transport)
             );
         }
         else
@@ -405,7 +421,7 @@ namespace
         }
         bool accepted =
             sendProtocolMessage(
-                pendingMessage
+                pendingMessage, pendingTransport
             );
 
 
@@ -427,10 +443,10 @@ namespace
             Serial.printf(
                 "RETRY %u/%u"
                 " | id=%u"
-                " | waiting for ACK\n",
+                " | via=%s | waiting for ACK\n",
                 retryCount,
                 MAX_RETRIES,
-                pendingMessage.messageId
+                pendingMessage.messageId, transportName(pendingTransport)
             );
         }
         else
@@ -439,20 +455,18 @@ namespace
                 "TX EVENT"
                 " | sender=%s"
                 " | id=%u"
-                " | waiting for ACK\n",
+                " | via=%s | waiting for ACK\n",
                 deviceName(
                     LOCAL_DEVICE
                 ),
-                pendingMessage.messageId
+                pendingMessage.messageId, transportName(pendingTransport)
             );
         }
 
 
         if (!accepted)
         {
-            Serial.println(
-                "WARNING: ESP-NOW TX request failed"
-            );
+            Serial.printf("WARNING: %s TX request failed\n", transportName(pendingTransport));
         }
         else if (Protocol::isSleepControl(pendingMessage.type))
         {
@@ -524,6 +538,7 @@ namespace
             uint32_t(uint32_t(millis()) - controlQueue[0].notBefore) >= 0x80000000UL)
             return;
         pendingMessage = controlQueue[0].message;
+        pendingTransport = Transport::ESP_NOW; // Sleep controls never follow the application selector.
         for (size_t i = 1; i < controlCount; ++i)
             controlQueue[i - 1] = controlQueue[i];
         --controlCount;
@@ -539,6 +554,7 @@ namespace
 
     void startHeartbeatEvent()
     {
+        pendingTransport = selectedTransport;
         pendingMessage.version =
             Protocol::VERSION;
 
@@ -582,7 +598,7 @@ namespace
     // ======================================================
 
     void handleAck(
-        const Protocol::Message& message
+        const Protocol::Message& message, Transport transport
     )
     {
         Serial.printf(
@@ -603,15 +619,15 @@ namespace
          * we are currently waiting for.
          */
         if (
-            waitingForAck &&
+            waitingForAck && transport == pendingTransport &&
             message.ackForMessageId ==
                 pendingMessage.messageId
         )
         {
             Serial.printf(
                 "ACK MATCHED"
-                " | message=%u\n",
-                pendingMessage.messageId
+                " | message=%u | via=%s\n",
+                pendingMessage.messageId, transportName(transport)
             );
 
 
@@ -645,7 +661,7 @@ namespace
 
     bool handleEvent(
         const Protocol::Message& message,
-        bool receiptOverEspNow = true
+        bool sendReceipt = true, Transport transport = Transport::ESP_NOW
     )
     {
         bool duplicate =
@@ -683,7 +699,7 @@ namespace
              *
              * Therefore ACK the duplicate again.
              */
-            if (receiptOverEspNow) sendAck(message.messageId);
+            if (sendReceipt) sendAck(message.messageId, transport);
 
 
             return false;
@@ -737,7 +753,7 @@ namespace
         // --------------------------------------------------
 
         if (
-            receiptOverEspNow && DROP_FIRST_ACK_FOR_TEST &&
+            sendReceipt && transport == Transport::ESP_NOW && DROP_FIRST_ACK_FOR_TEST &&
             !testAckAlreadyDropped
         )
         {
@@ -760,7 +776,7 @@ namespace
         // Normal ACK
         // --------------------------------------------------
 
-        if (receiptOverEspNow) sendAck(message.messageId);
+        if (sendReceipt) sendAck(message.messageId, transport);
         return true;
     }
 
@@ -788,7 +804,7 @@ namespace
 
     void handleReceivedData(
         const uint8_t* data,
-        size_t length
+        size_t length, Transport transport = Transport::ESP_NOW
     )
     {
         // --------------------------------------------------
@@ -864,6 +880,7 @@ namespace
 
         if (Protocol::isSleepControl(message.type))
         {
+            if (transport != Transport::ESP_NOW) return;
             if (message.event != Protocol::EventType::None ||
                 (message.type == Protocol::MessageType::SleepRequest && message.ackForMessageId != message.messageId))
             {
@@ -891,7 +908,7 @@ namespace
             case Protocol::MessageType::Event:
 
                 handleEvent(
-                    message
+                    message, true, transport
                 );
                 PowerManager::notePeerSeen();
 
@@ -900,11 +917,11 @@ namespace
 
             case Protocol::MessageType::Ack:
             {
-                const bool heartbeatAcknowledged = waitingForAck &&
+                const bool heartbeatAcknowledged = waitingForAck && transport == pendingTransport &&
                     pendingMessage.type == Protocol::MessageType::Event &&
                     message.ackForMessageId == pendingMessage.messageId;
                 handleAck(
-                    message
+                    message, transport
                 );
                 // A late receipt for COMMIT/CANCEL does not resolve uncertainty
                 // about the peer's semantic sleep state.
@@ -1036,7 +1053,7 @@ namespace
     const char* sleepTransportBlockedReason()
     {
         if (!protocolReady) return "RUNTIME_NOT_READY";
-        if (CC1101WakeRecovery::awakeBusy()) return "CC1101_ACK_PENDING";
+        if (CC1101WakeRecovery::awakeBusy()) return "CC1101_RUNTIME_BUSY";
         if (waitingForAck) return "ACK_PENDING";
         if (controlCount != 0) return "CONTROL_QUEUED";
         if (PowerManager::transaction().active) return "TRANSACTION_ACTIVE";
@@ -1112,7 +1129,7 @@ namespace
     {
         if (CC1101WakeRecovery::awakeBusy())
         {
-            Serial.println("CC1101 WAKE TX | REFUSED | awake re-ACK pending");
+            Serial.println("CC1101 WAKE TX | REFUSED | awake CC1101 operation pending");
             return;
         }
         if (!protocolReady || waitingForAck || controlCount != 0 ||
@@ -1133,6 +1150,24 @@ namespace
                 CC1101WakeTx::toString(result.result), result.rxReady);
     }
 
+    void receiveCc1101(const Protocol::Message& message)
+    {
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message), Transport::CC1101);
+    }
+
+    void selectApplicationTransport(Transport transport)
+    {
+        // Single loop owner: no command can run inside synchronous wake TX or
+        // physical entry. These guards also cover pending callbacks/RX and drain.
+        if (sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed())
+        {
+            Serial.println("APP TRANSPORT | REFUSED | require awake, drained transport and no sleep transaction");
+            return;
+        }
+        selectedTransport = transport;
+        Serial.printf("APP TRANSPORT | selected=%s\n", transportName(selectedTransport));
+    }
+
     void servicePowerTest()
     {
         const uint32_t now = millis();
@@ -1143,6 +1178,8 @@ namespace
 
         switch (Serial.read())
         {
+            case 'e': selectApplicationTransport(Transport::ESP_NOW); break;
+            case 'c': selectApplicationTransport(Transport::CC1101); break;
             case 'p':
                 if (bootInfo.deep) CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
                 break;
@@ -1174,10 +1211,13 @@ namespace
             case '?':
                 Serial.println("Power tests: p=status i=IDLE s=handshake a=activity/cancel "
                                "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep "
-                               "w=BENCH CC1101 wake EVENT; successful handshake enters deep sleep");
+                               "w=BENCH CC1101 wake EVENT e=ESP-NOW app c=CC1101 app; successful handshake enters deep sleep");
                 break;
             default: return; // Includes serial line endings.
         }
+        Serial.printf("APP TRANSPORT | selected=%s pending=%s cc1101_busy=%d\n",
+                      transportName(selectedTransport), waitingForAck ? transportName(pendingTransport) : "NONE",
+                      CC1101WakeRecovery::awakeBusy());
         PowerManager::printStatus(now);
         Serial.printf("TRANSPORT: pending=%d id=%u queued=%u auto_heartbeats=%s control_delay_ms=%u\n",
                       waitingForAck, waitingForAck ? pendingMessage.messageId : 0,
@@ -1232,6 +1272,7 @@ void setup()
     bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
     resetMovement(); // Startup sensor history is not a fresh awake movement.
     resetProximityCheck();
+    selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
     if (bootInfo.deep)
@@ -1353,11 +1394,11 @@ void loop()
     // Check ACK timeout / retry state.
     // ------------------------------------------------------
 
+    CC1101WakeRecovery::serviceAwake(PEER_DEVICE, receiveCc1101); // RX ACK before the 300 ms deadline.
     discardObsoleteControls();
     handleAckTimeout();
     sendNextControl();
 
-    CC1101WakeRecovery::serviceAwake(PEER_DEVICE);
 
     // Physical execution is separate from semantic agreement.
     serviceSleepExecution();
@@ -1373,6 +1414,7 @@ void loop()
         PowerManager::automaticHeartbeatAllowed() &&
         controlCount == 0 &&
         !waitingForAck &&
+        (selectedTransport != Transport::CC1101 || !CC1101WakeRecovery::awakeBusy()) &&
         (long)(
             millis() -
             nextEventTime

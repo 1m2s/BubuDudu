@@ -32,11 +32,17 @@ namespace CC1101WakeRecovery
     // Inspect retained radio on ANY deep wake. Healthy empty RX is valid on
     // motion/timer wake; a coincident real RF packet is preserved/processed.
     Report recover(bool historyRestored, Protocol::DeviceId peer, EventHandler handler);
-    // Loop-owned, GDO-triggered service for retries of the boot-accepted EVENT.
-    // No application delivery; ACK completion is polled across loop iterations.
+    using ReceiveHandler = void (*)(const Protocol::Message&);
+    enum class SubmitResult { Accepted, Busy, Failed };
+    // One runtime packet, no application ACK wait/retries. Acceptance starts TX;
+    // serviceAwake polls completion and performs one bounded RX restart.
+    SubmitResult submitAwake(const Protocol::Message& packet);
+    // Loop-owned, single FIFO consumer. Saved wake receipts take precedence;
+    // other validated EVENT/ACK packets go to the optional application handler.
+    // Handler runs after FIFO copy/RX restoration and may submit a receipt ACK.
     // Failed RX restart/unknown radio disables service until reboot.
-    void serviceAwake(Protocol::DeviceId peer);
-    bool awakeBusy(); // Prevent manual TX or physical sleep during this ACK.
+    void serviceAwake(Protocol::DeviceId peer, ReceiveHandler handler = nullptr);
+    bool awakeBusy(); // TX/restoration or asserted packet latch; no competing owner.
     void printReport(const BootInfo& boot, bool historyRestored, const Report& report);
     // Shared manual/coordinated physical entry. Guard returns nullptr when
     // drained, otherwise a diagnostic reason. Success does not return; ANY
