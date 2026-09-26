@@ -22,6 +22,49 @@ namespace
 {
     Motion motion;
 
+    enum class MovementState : uint8_t { READY, MOVING, WAITING };
+    MovementState movementState = MovementState::READY;
+    uint32_t settleStartedAt = 0;
+    // Physically tuned additional wait AFTER sensor Inactivity on current hardware.
+    // ADXL345 TIME_INACT remains 3 seconds.
+    constexpr uint32_t SETTLE_MS = 1000;
+
+    void resetMovement()
+    {
+        movementState = MovementState::READY;
+        settleStartedAt = 0;
+    }
+
+    // Loop-owned diagnostic state only. True is a one-shot settled result.
+    bool updateMovement(MotionEvent event, uint32_t now)
+    {
+        if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
+        {
+            resetMovement();
+            return false;
+        }
+        // Consume Activity before expiry: movement wins even at the deadline.
+        if (event == MotionEvent::Activity)
+        {
+            if (movementState != MovementState::MOVING)
+                Serial.println("MOVEMENT | MOVING");
+            movementState = MovementState::MOVING;
+            settleStartedAt = 0;
+        }
+        else if (event == MotionEvent::Inactivity && movementState == MovementState::MOVING)
+        {
+            movementState = MovementState::WAITING;
+            settleStartedAt = now; // Repeated Inactivity cannot restart this timer.
+            Serial.println("MOVEMENT | WAITING");
+        }
+        if (movementState == MovementState::WAITING && uint32_t(now - settleStartedAt) >= SETTLE_MS)
+        {
+            resetMovement();
+            return true;
+        }
+        return false;
+    }
+
     constexpr UBaseType_t RX_QUEUE_LENGTH = 8;
     QueueHandle_t receiveQueue = nullptr;
     bool protocolReady = false;
@@ -929,6 +972,7 @@ namespace
 
     void enterPhysicalSleep(bool coordinated)
     {
+        resetMovement(); // An aborted attempt must not retain an old settle timer.
         const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
         if (motion.prepareForSleep())
         {
@@ -1102,6 +1146,7 @@ Protocol::Message handleWakeEvent(const Protocol::Message& event, bool& processe
 void setup()
 {
     bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
+    resetMovement(); // Startup sensor history is not a fresh awake movement.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
     if (bootInfo.deep)
@@ -1188,11 +1233,15 @@ void setup()
 
 void loop()
 {
+    // Clear stale tracking even if a power transition returns to ACTIVE below.
+    if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
+        resetMovement();
     // Activity/deadlines take effect before any queued control can advance the
     // FSM. Receipt ACKs in the RX batch still run before transport timeouts.
     servicePowerTest();
     if (!protocolReady)
     {
+        resetMovement();
         delay(10);
         return;
     }
@@ -1248,12 +1297,15 @@ void loop()
 
     // Diagnostic only: consume both LINK-mode events without driving policy.
     // Physical entry above either reboots or restores awake Motion before returning.
-    switch (motion.getEvent())
+    const MotionEvent motionEvent = motion.getEvent();
+    switch (motionEvent)
     {
         case MotionEvent::Activity: Serial.println("MOTION AWAKE | MOVING"); break;
         case MotionEvent::Inactivity: Serial.println("MOTION AWAKE | INACTIVITY"); break;
         case MotionEvent::None: break;
     }
+    if (updateMovement(motionEvent, uint32_t(millis())))
+        Serial.println("MOVEMENT | SETTLED | state=READY");
 
     delay(
         10
