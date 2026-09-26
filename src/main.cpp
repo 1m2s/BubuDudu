@@ -1307,6 +1307,19 @@ void loop()
     if (updateMovement(motionEvent, uint32_t(millis())))
         Serial.println("MOVEMENT | SETTLED | state=READY");
 
+    // Best-effort diagnostics only, after all normal protocol/sleep/motion work.
+    // Never drain indefinitely or include this backlog in sleep-entry guards.
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        ESPNowRadio::RssiObservation observation{};
+        if (!ESPNowRadio::takeRssiObservation(observation)) break;
+        Serial.printf("ESPNOW RSSI | sender=%s | id=%u | type=%u | ackFor=%u | rssi=%d dBm | age=%lu ms\n",
+                      deviceName(observation.message.sender), observation.message.messageId,
+                      static_cast<unsigned>(observation.message.type), observation.message.ackForMessageId,
+                      static_cast<int>(observation.rssi),
+                      static_cast<unsigned long>(uint32_t(millis() - observation.receivedAt)));
+    }
+
     delay(
         10
     );

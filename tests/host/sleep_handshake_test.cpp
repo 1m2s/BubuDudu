@@ -142,8 +142,19 @@ namespace CC1101WakeRecovery
         throw PhysicalSleepEntered{};
     }
 }
+std::deque<ESPNowRadio::RssiObservation> rssiObservations;
+unsigned rssiReads = 0;
+bool refillRssi = false;
 namespace ESPNowRadio
 {
+    bool takeRssiObservation(RssiObservation& out)
+    {
+        ++rssiReads;
+        if (rssiObservations.empty()) return false;
+        out = rssiObservations.front(); rssiObservations.pop_front();
+        if (refillRssi) rssiObservations.push_back(out);
+        return true;
+    }
     unsigned txInFlight() { return mockedTxInFlight; }
     bool receiveCallbackActive() { return mockedRxActive; }
     bool begin(ReceiveHandler) { if (atRadioStart) atRadioStart(); return radioStarts; }
@@ -320,6 +331,7 @@ void testFsm()
 
 void freshApp()
 {
+    rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
     if (receiveQueue) delete receiveQueue;
     receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
@@ -1507,6 +1519,86 @@ void testMovementIsolation()
     puts("PASS: full movement/settle cycle preserves heartbeat timing, packet IDs/bytes, ACK retries, power/peer state and sleep deadlines");
 }
 
+void testRssiDiagnostics()
+{
+    freshApp();
+    ESPNowRadio::RssiObservation observation{};
+    observation.message = {Protocol::VERSION, Type::Event, 42, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+    observation.rssi = -61; observation.receivedAt = UINT32_MAX - 5;
+    rssiObservations.push_back(observation); refillRssi = true;
+    hostNow = 20;
+    loop();
+    assert(rssiReads == 2 && rssiObservations.size() == 1); // Continuous producer cannot extend the batch.
+    assert(occurrences(Serial.log, "ESPNOW RSSI |") == 2);
+    assert(Serial.log.find("rssi=-61 dBm | age=26 ms") != std::string::npos);
+    assert(nextMessageId == 1 && wire.empty() && !haveLastPeerEvent && wakeEvents.empty());
+    assert(localState() == LocalState::ACTIVE && peerState() == PeerState::UNKNOWN);
+
+    // Same traffic timeline with and without observations, including duplicate
+    // EVENT delivery, matched ACK, and an exhausted 300 ms / two-retry episode.
+    std::vector<Protocol::Message> baselineWire;
+    std::string baselineState;
+    for (bool diagnostics : {false, true})
+    {
+        freshApp(); ackWaitStart = 0; pendingMessage = {};
+        if (diagnostics) { rssiObservations.push_back(observation); refillRssi = true; }
+        std::string states;
+        for (unsigned step = 0; step < 7; ++step)
+        {
+            hostNow = step * 300;
+            if (step == 0) receive(observation.message);
+            if (step == 1) receive(observation.message);
+            if (step == 2)
+            {
+                startHeartbeatEvent();
+                receive(incoming(Type::Ack, pendingMessage.messageId));
+            }
+            if (step == 3) startHeartbeatEvent();
+            loop();
+            states += std::to_string(nextMessageId) + ":" + std::to_string(waitingForAck) + ":" +
+                std::to_string(retryCount) + ":" + std::to_string(nextEventTime) + ":" +
+                std::to_string(controlCount) + ":" + std::to_string(lastPeerEventId) + ":" +
+                std::to_string(static_cast<int>(peerState())) + ":" +
+                std::to_string(static_cast<int>(localState())) + ";";
+            PowerManager::SleepDecision decision{};
+            assert(!transaction().active && !PowerManager::takeSleepDecision(decision));
+            assert(wakeEvents.empty() && physicalSleeps == 0 && movementState == MovementState::READY);
+        }
+        assert(!waitingForAck && lastPeerEventId == 42 && haveLastPeerEvent);
+        if (!diagnostics) { baselineState = states; baselineWire = wire; }
+        else
+        {
+            assert(states == baselineState && wire.size() == baselineWire.size());
+            for (size_t i = 0; i < wire.size(); ++i)
+                assert(memcmp(&wire[i], &baselineWire[i], sizeof(Protocol::Message)) == 0);
+        }
+    }
+    freshApp(); command('i'); command('s');
+    const auto sleep = transaction();
+    const auto id = nextMessageId, pendingId = pendingMessage.messageId;
+    const auto sent = wire.size(), queued = controlCount;
+    const auto peer = peerState();
+    auto controlObservation = observation;
+    controlObservation.message = incoming(Type::SleepCancel, sleep.sleepId);
+    rssiObservations.push_back(controlObservation);
+    loop();
+    assert(localState() == LocalState::SLEEP_NEGOTIATING && peerState() == peer);
+    assert(transaction().active && transaction().sleepId == sleep.sleepId && transaction().phase == sleep.phase);
+    assert(transaction().phaseDeadline == sleep.phaseDeadline && transaction().hardDeadline == sleep.hardDeadline);
+    assert(nextMessageId == id && waitingForAck && pendingMessage.messageId == pendingId && retryCount == 0);
+    assert(wire.size() == sent && controlCount == queued);
+    completedAwaitingCallbacks(false);
+    rssiObservations.assign(4, observation);
+    mockedTxInFlight = 0;
+    const auto reads = rssiReads;
+    loop();
+    assert(physicalSleeps == 1 && rssiObservations.size() == 4 && rssiReads == reads);
+    freshApp(); protocolReady = false;
+    rssiObservations.push_back(observation); loop();
+    assert(rssiReads == 0 && rssiObservations.size() == 1);
+    puts("PASS: RSSI diagnostics bounded, no EVENT execution/ACK/IDs/power effects, retries unchanged, backlog does not defer sleep");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -1518,6 +1610,7 @@ int main()
     testMotionPeerWake();
     testAwakeMotionDiagnostics();
     testMovementSettle(); testMovementBoundaries(); testMovementIsolation();
+    testRssiDiagnostics();
     testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
