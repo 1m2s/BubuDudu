@@ -25,6 +25,11 @@ namespace
     constexpr uint8_t DATA_FORMAT     = 0x31;
 
     constexpr uint8_t EXPECTED_DEVID  = 0xE5;
+
+    // 0.75 g awake setting: physically tuned for pickup/noise rejection on current boards.
+    // Sleep keeps the independently verified deliberate-motion threshold (3 g).
+    constexpr uint8_t AWAKE_ACTIVITY_THRESHOLD = 12;
+    constexpr uint8_t SLEEP_ACTIVITY_THRESHOLD = 48;
 }
 
 
@@ -194,14 +199,11 @@ bool Motion::begin(
     );
 
 
-    // Activity threshold
-    //
-    // 48 * 0.0625 g = 3.0 g
-    //
-    writeRegister(
-        THRESH_ACT,
-        48
-    );
+    uint8_t activityThreshold;
+    if (!writeRegister(THRESH_ACT, AWAKE_ACTIVITY_THRESHOLD) ||
+        !readRegister(THRESH_ACT, activityThreshold) ||
+        activityThreshold != AWAKE_ACTIVITY_THRESHOLD)
+        return false;
 
     // Inactivity threshold
     //
@@ -287,7 +289,9 @@ bool Motion::begin(
 
 MotionEvent Motion::getEvent()
 {
-    if (!interruptOccurred)
+    // INT1 can already be HIGH when the ISR is reattached after a sleep abort.
+    // Service that latch too; an unavailable/uninitialized sensor produces no event.
+    if (!initialized || (!interruptOccurred && digitalRead(interruptPin) == LOW))
     {
         return MotionEvent::None;
     }
@@ -367,11 +371,13 @@ bool Motion::prepareForSleep()
     if (!initialized) return false;
     pauseInterrupt();
     // Awake LINK mode requires servicing inactivity too. For this explicit
-    // sleep interval use independent activity only, keeping all thresholds.
+    // sleep interval use independent activity with the verified sleep threshold.
     // ADXL345 datasheet: clear LINK via standby before returning to MEASURE.
-    uint8_t source, enabled, mapping, power, format;
+    uint8_t source, enabled, mapping, power, format, activityThreshold;
     if (!writeRegister(INT_ENABLE, 0x00) ||
         !writeRegister(POWER_CTL, 0x00) ||
+        !writeRegister(THRESH_ACT, SLEEP_ACTIVITY_THRESHOLD) ||
+        !readRegister(THRESH_ACT, activityThreshold) || activityThreshold != SLEEP_ACTIVITY_THRESHOLD ||
         !writeRegister(INT_MAP, 0x00) ||
         !readRegister(INT_SOURCE, source) ||
         !writeRegister(POWER_CTL, 0x08) ||
@@ -392,14 +398,17 @@ bool Motion::cancelSleepPreparation()
     // failure and report the failure to main; never silently claim success.
     const bool disabled = writeRegister(INT_ENABLE, 0x00);
     const bool standby = writeRegister(POWER_CTL, 0x00);
+    const bool thresholdWritten = writeRegister(THRESH_ACT, AWAKE_ACTIVITY_THRESHOLD);
     const bool mapped = writeRegister(INT_MAP, 0x00);
     const bool linked = writeRegister(POWER_CTL, 0x28);
     const bool enabled = writeRegister(INT_ENABLE, 0x18);
-    uint8_t mapping = 0xFF, interrupts = 0, power = 0;
+    uint8_t mapping = 0xFF, interrupts = 0, power = 0, activityThreshold = 0;
+    const bool readThreshold = readRegister(THRESH_ACT, activityThreshold);
     const bool readMap = readRegister(INT_MAP, mapping);
     const bool readEnable = readRegister(INT_ENABLE, interrupts);
     const bool readPower = readRegister(POWER_CTL, power);
     resumeInterrupt();
-    return disabled && standby && mapped && linked && enabled && readMap && readEnable && readPower &&
+    return disabled && standby && thresholdWritten && readThreshold &&
+           activityThreshold == AWAKE_ACTIVITY_THRESHOLD && mapped && linked && enabled && readMap && readEnable && readPower &&
            mapping == 0x00 && interrupts == 0x18 && power == 0x28;
 }

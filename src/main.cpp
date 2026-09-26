@@ -1131,7 +1131,7 @@ void setup()
                       "(0=None, 1=Activity, 2=Inactivity)\n",
                       motion.getInterruptPin(), motionLevel, static_cast<int>(motion.getStartupEvent()));
     else
-        Serial.printf("MOTION INIT | FAILED (DEVID check) | GPIO%u INT1=%d | startup=UNAVAILABLE | continuing\n",
+        Serial.printf("MOTION INIT | FAILED (DEVID/config check) | GPIO%u INT1=%d | startup=UNAVAILABLE | continuing\n",
                       motion.getInterruptPin(), motionLevel);
 
     Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
@@ -1244,6 +1244,15 @@ void loop()
     )
     {
         startHeartbeatEvent();
+    }
+
+    // Diagnostic only: consume both LINK-mode events without driving policy.
+    // Physical entry above either reboots or restores awake Motion before returning.
+    switch (motion.getEvent())
+    {
+        case MotionEvent::Activity: Serial.println("MOTION AWAKE | MOVING"); break;
+        case MotionEvent::Inactivity: Serial.println("MOTION AWAKE | INACTIVITY"); break;
+        case MotionEvent::None: break;
     }
 
     delay(

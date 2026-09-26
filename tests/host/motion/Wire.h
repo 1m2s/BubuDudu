@@ -7,12 +7,14 @@ constexpr int LOW = 0, HIGH = 1, INPUT = 0, RISING = 1;
 namespace MotionPlatform
 {
     extern bool isrAttached, stuckHigh;
+    extern void (*isr)();
 }
 inline void pinMode(int pin, int mode) { assert(pin == 3 && mode == INPUT); }
 inline int digitalPinToInterrupt(int pin) { return pin; }
-inline void attachInterrupt(int pin, void (*)(), int mode)
-{ assert(pin == 3 && mode == RISING); MotionPlatform::isrAttached = true; }
-inline void detachInterrupt(int pin) { assert(pin == 3); MotionPlatform::isrAttached = false; }
+inline void attachInterrupt(int pin, void (*handler)(), int mode)
+{ assert(pin == 3 && mode == RISING); MotionPlatform::isr = handler; MotionPlatform::isrAttached = true; }
+inline void detachInterrupt(int pin)
+{ assert(pin == 3); MotionPlatform::isrAttached = false; MotionPlatform::isr = nullptr; }
 struct HostWire
 {
     std::array<uint8_t, 64> registers{};

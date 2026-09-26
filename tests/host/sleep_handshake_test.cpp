@@ -47,6 +47,8 @@ bool motionInitOk = true, motionPrepareOk = true;
 unsigned motionPreparations = 0, motionCancels = 0;
 int motionIntLevel = 0;
 MotionEvent motionStartup = MotionEvent::None;
+MotionEvent motionPendingEvent = MotionEvent::None;
+unsigned motionEventPolls = 0;
 bool Motion::begin(uint8_t sda, uint8_t scl, uint8_t intPin)
 {
     assert(sda == 0 && scl == 1 && intPin == 3);
@@ -62,6 +64,13 @@ MotionEvent Motion::getStartupEvent() const { assert(motionInitOk); return start
 int digitalRead(int pin) { assert(pin == 3); return motionIntLevel; }
 bool Motion::prepareForSleep() { ++motionPreparations; return motionInitOk && motionPrepareOk; }
 bool Motion::cancelSleepPreparation() { ++motionCancels; return motionInitOk; }
+MotionEvent Motion::getEvent()
+{
+    ++motionEventPolls;
+    const auto event = motionPendingEvent;
+    motionPendingEvent = MotionEvent::None;
+    return motionInitOk ? event : MotionEvent::None;
+}
 std::vector<Protocol::Message> wakeEvents;
 CC1101WakeTx::Result wakeTxResult = CC1101WakeTx::Result::AckTimeout;
 bool radioStarts = true;
@@ -329,6 +338,7 @@ void freshApp()
     motionInitializations = 0; motionInitOk = motionPrepareOk = true;
     motionPreparations = motionCancels = 0;
     motionIntLevel = 0; motionStartup = MotionEvent::None;
+    motionPendingEvent = MotionEvent::None; motionEventPolls = 0;
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
 }
 void command(char c) { Serial.input.push_back(c); loop(); }
@@ -1150,7 +1160,7 @@ void testMotionInitialization()
         assert(localState() == LocalState::ACTIVE && !transaction().active);
         assert(peerState() == (deep ? PeerState::ONLINE : PeerState::UNKNOWN));
         if (deep) assert(wakeReport.processed && wakeReport.ackSent && nextMessageId == 124);
-        const std::string expected = ok ? "MOTION INIT | OK (DEVID=0xE5)" : "MOTION INIT | FAILED (DEVID check)";
+        const std::string expected = ok ? "MOTION INIT | OK (DEVID=0xE5)" : "MOTION INIT | FAILED (DEVID/config check)";
         assert(Serial.log.find(expected) != std::string::npos);
         assert(Serial.log.find("GPIO3 INT1=" + std::to_string(level)) != std::string::npos);
         assert(Serial.log.find(ok ? "startup=" + std::to_string(static_cast<int>(event)) :
@@ -1267,6 +1277,65 @@ void testMotionPeerWake()
     puts("PASS: one allocator increment/rollover, no local delivery, no loop retrigger, startup failure/guard refusal bounded");
 }
 
+void testAwakeMotionDiagnostics()
+{
+    for (auto event : {MotionEvent::Activity, MotionEvent::Inactivity})
+    for (bool negotiating : {false, true}) for (bool sensorOk : {false, true})
+    {
+        freshApp();
+        if (negotiating) { command('i'); command('s'); }
+        motionInitOk = sensorOk;
+        const auto local = localState();
+        const auto peer = peerState();
+        const auto sleep = transaction();
+        const auto id = nextMessageId;
+        const auto heartbeatAt = nextEventTime;
+        const auto sent = wire.size();
+        const auto queued = controlCount;
+        const auto pending = pendingMessage;
+        const auto retries = retryCount;
+        const bool waiting = waitingForAck;
+        const auto polls = motionEventPolls;
+        Serial.log.clear();
+        motionPendingEvent = event;
+        for (unsigned i = 0; i < 5; ++i) loop();
+        assert(motionEventPolls == polls + 5);
+        assert(occurrences(Serial.log, "MOTION AWAKE |") == (sensorOk ? 1U : 0U));
+        if (sensorOk)
+            assert(Serial.log.find(event == MotionEvent::Activity ? "MOTION AWAKE | MOVING" :
+                                  "MOTION AWAKE | INACTIVITY") != std::string::npos);
+        assert(localState() == local && peerState() == peer);
+        assert(transaction().active == sleep.active && transaction().sleepId == sleep.sleepId);
+        assert(transaction().role == sleep.role && transaction().phase == sleep.phase);
+        assert(transaction().startedAt == sleep.startedAt && transaction().phaseDeadline == sleep.phaseDeadline);
+        assert(transaction().hardDeadline == sleep.hardDeadline && cooldownLeftMs(hostNow) == 0);
+        assert(nextMessageId == id && nextEventTime == heartbeatAt && pauseAutomaticHeartbeats);
+        assert(wire.size() == sent && wakeEvents.empty() && controlCount == queued);
+        assert(waitingForAck == waiting && retryCount == retries);
+        assert(memcmp(&pendingMessage, &pending, sizeof(pending)) == 0);
+        assert(motionPreparations == 0 && motionCancels == 0 && physicalSleeps == 0 && armAttempts == 0);
+        assert(!haveLastPeerEvent);
+    }
+
+    // A normally scheduled heartbeat still runs, identically with or without motion.
+    for (auto event : {MotionEvent::None, MotionEvent::Activity, MotionEvent::Inactivity})
+    {
+        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = 10;
+        motionPendingEvent = event;
+        loop(); // Not due yet: movement must not pull the schedule forward.
+        assert(wire.empty() && nextEventTime == 10 && nextMessageId == 1);
+        motionPendingEvent = event;
+        loop();
+        assert(wire.size() == 1 && wire[0].type == Type::Event && wire[0].messageId == 1);
+        assert(waitingForAck && nextMessageId == 2 && nextEventTime == 10 && !pauseAutomaticHeartbeats);
+        assert(localState() == LocalState::ACTIVE && peerState() == PeerState::UNKNOWN && wakeEvents.empty());
+    }
+    freshApp(); protocolReady = false; motionPendingEvent = MotionEvent::Activity;
+    loop();
+    assert(motionEventPolls == 0 && Serial.log.find("MOTION AWAKE |") == std::string::npos);
+    puts("PASS: awake Motion diagnostics only; no ID/radio/power/negotiation/sleep side effects, heartbeat schedule unchanged");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -1276,6 +1345,7 @@ int main()
     testMotionInitialization();
     testMotionSleepEntry();
     testMotionPeerWake();
+    testAwakeMotionDiagnostics();
     testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
