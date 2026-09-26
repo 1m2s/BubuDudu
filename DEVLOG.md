@@ -2695,3 +2695,280 @@ Begin the more sensitive AWAKE Motion profile as a separate, physically testable
 The later sequence should be MOVING while retaining confirmed CLOSE/FAR and uninterrupted heartbeat LEDs, then CHECKING after movement settles, followed by a fresh rough RSSI/proximity result. Only a confirmed result should change CLOSE/FAR. RSSI remains a rough proximity mechanism, not exact distance.
 
 Do not combine sensor tuning, UI ownership and proximity refresh into one large change. Preserve the verified power/wake checkpoints and continue build, flash, physical test, understand, commit, then the next step.
+
+## 2026-09-27
+
+### Completed
+
+Continued practical firmware development on `feature/sleep-execution`, from the verified motion-to-peer wake checkpoint through awake motion tuning, movement settlement, passive ESP-NOW RSSI measurement and manually selectable dual-radio application transport.
+
+This session began during the previous evening and continued after midnight. It is recorded under September 27, the date the session was closed. Each practical checkpoint followed the existing sequence: one understandable change, software validation, physical testing, understanding the result, then commit.
+
+### Awake Motion Profile — Checkpoints 4A and 4B
+
+Checkpoint 4A was inspection and design only. The ADXL345 awake and sleep paths originally shared the same `THRESH_ACT` register value. Changing awake sensitivity alone would also have changed deep-sleep wake sensitivity, because sleep preparation inherited the current threshold.
+
+Inspection also found that the awake event path already existed:
+
+```text
+ADXL345 activity
+    -> INT1 / GPIO3
+    -> ISR flag
+    -> Motion::getEvent()
+```
+
+The application did not yet consume those Motion events during normal awake runtime. There was no need to introduce another ISR, task or sensor event mechanism.
+
+Checkpoint 4B separated the awake and sleep activity profiles explicitly. The provisional awake threshold of 8, approximately 0.5 g, was physically tested and found too sensitive. It was adjusted to 12, approximately 0.75 g, and accepted on both boards: ordinary pickup was detected reliably while small/random desk vibration was rejected sufficiently for the current bench setup.
+
+The sleep threshold remained 48, approximately 3 g. Sleep preparation now explicitly writes and verifies 48; returned or aborted sleep preparation restores and verifies the awake value 12. This preserves deliberate-motion wake sensitivity independently of awake tuning.
+
+Awake event consumption initially added diagnostics only:
+
+```text
+MOTION AWAKE | MOVING
+MOTION AWAKE | INACTIVITY
+```
+
+No radio transaction, power transition, proximity measurement, heartbeat policy, LED or OLED behavior was attached to awake Motion in this checkpoint. GPIO3 deep wake and the existing one-shot peer wake remained separate from ordinary awake movement.
+
+Committed and pushed as `71264056ef4a0c5bab4c9882e35b8ffedfd1d603` — `feat: add tuned awake motion detection`.
+
+### Movement Settle Detection — Checkpoint 5
+
+Added a small application-owned movement tracker in `main.cpp`, with states `READY`, `MOVING` and `WAITING`:
+
+```text
+READY + Activity       -> MOVING
+MOVING + Inactivity    -> WAITING
+WAITING + Activity     -> MOVING; cancel pending settlement
+WAITING + settle expiry -> one-shot SETTLED -> READY
+```
+
+The timestamp-based timer is non-blocking and rollover-safe. Repeated Inactivity does not restart the timer. Activity processed on the exact expiry iteration takes priority, so new movement cannot produce a stale SETTLED result.
+
+The first additional settle period was 2000 ms. Physical testing confirmed correct transitions and cancellation, but the extra two seconds felt unnecessarily slow. It was tuned to `SETTLE_MS = 1000`, which felt more natural without changing the state machine or timer rules.
+
+ADXL345 `TIME_INACT` remains 3 seconds. The practical sequence is therefore movement stopping, the sensor's inactivity period, entry into WAITING, an additional one-second settle period, then SETTLED. The application settle timer is not a replacement for the sensor's inactivity timer.
+
+Movement state remained independent of proximity and heartbeat behavior at this checkpoint. It did not begin sleep negotiation, transmit an emotional EVENT or change the confirmed proximity concept.
+
+Committed and pushed as `aab2ef03f8b5ef2fb6eca5bea7637d67f2ce2fc1` — `feat: add tuned movement settle detection`.
+
+### Passive ESP-NOW RSSI Observation — Checkpoints 6A and 6B
+
+Checkpoint 6A inspection established that the installed stack, PlatformIO Espressif32 7.1.2 with Arduino-ESP32 2.0.17 and ESP-IDF 4.4.7, does not expose per-packet RSSI through its `esp_now_recv_cb_t` callback. `WiFi.RSSI()` would describe an associated access point rather than the ESP-NOW peer and was unsuitable for this measurement.
+
+Checkpoint 6B added a separate passive Wi-Fi promiscuous observer using `wifi_promiscuous_pkt_t::rx_ctrl.rssi`. The two paths deliberately remain independent:
+
+```text
+normal ESP-NOW callback
+    -> existing Protocol::Message RX queue
+    -> application processing and receipt ACK
+
+promiscuous callback
+    -> strict peer ESP-NOW frame filtering
+    -> separate bounded RSSI observation queue
+    -> loop diagnostics
+```
+
+Each `RssiObservation` copies the `Protocol::Message`, source MAC, signed RSSI and capture timestamp. SDK buffer pointers are not retained, and neither path assumes that the other callback ran first.
+
+The application message remains exactly eight bytes, and its existing receive queue is unchanged. The diagnostic observation queue holds four entries; the loop drains at most two observations per iteration. Overflow drops observations only, not application packets. RSSI backlog is not a sleep blocker.
+
+Actual ESP-NOW v1 peer frames were observed successfully on both Bubu and Dudu while normal EVENT/ACK operation continued. Close-range movement and orientation stress produced raw RSSI from roughly the mid -40s dBm to occasional -67/-68 dBm readings. These were bench observations, not calibrated distance measurements or classification thresholds.
+
+Committed and pushed as `a7898999227ed25bc03ede4ecfe39a750f83a35f` — `feat: add passive ESP-NOW RSSI diagnostics`.
+
+### Settled RSSI Measurement — Checkpoint 6C
+
+Connected the one-shot SETTLED result to a separate `ProximityUpdateState`, with `READY` and `CHECKING`. `MovementState` remained independent. Settlement begins a measurement; it does not itself confirm proximity.
+
+CHECKING collects three fresh, distinct peer ESP-NOW observations. Each must have been captured strictly after the check started. Repeated message IDs do not count again, so RF retries cannot artificially supply multiple samples. Exactly three signed RSSI values are retained, then deterministic compare/swap logic calculates their median.
+
+For example:
+
+```text
+-52, -67, -54 dBm
+    -> median -54 dBm
+```
+
+The median reduces the effect of an isolated orientation or multipath spike compared with an average. It does not turn RSSI into exact distance.
+
+`CHECK_TIMEOUT_MS = 12000` is an absolute failure ceiling, not a mandatory measurement delay. A check completes as soon as its three valid samples arrive. Partial progress cannot extend the deadline. New Motion Activity, peer OFFLINE, a non-ACTIVE power state, unavailable runtime or sleep handoff cancels the measurement.
+
+Physical testing repeatedly completed measurements on both devices. Representative medians were approximately -52, -49, -64 and -54 dBm on Bubu, and -51, -49, -63 and -52 dBm on Dudu. Passive acquisition of three distinct samples takes noticeable time, but the filtering and reliability benefit was judged acceptable.
+
+No CLOSE/FAR classifier was implemented. Movement, check progress and a future confirmed proximity result remain separate concepts.
+
+Committed and pushed as `fc769f2a56360c7d9dff22f2de990772c5fef1ed` — `feat: add settled RSSI proximity measurement`.
+
+### Proximity Product Decision
+
+The intended user-facing model remains only `CLOSE` and `FAR`; it will not claim exact distance in meters. CLOSE intentionally includes the normal medium-range interaction area. FAR should represent clear separation and should be harder to trigger than one weak, orientation-dependent observation.
+
+During deliberately close testing, aggressive board movement and orientation changes occasionally produced approximately -67/-68 dBm while the boards were still considered CLOSE. Those readings must not be treated as a chosen FAR threshold.
+
+Future classification should be biased against false FAR and is expected to use filtered median RSSI, hysteresis and empirically tuned thresholds. No final thresholds or hysteresis values have been selected or implemented.
+
+The earlier product rule still applies: movement or CHECKING should retain the last confirmed proximity rather than replace it. A future confirmed FAR result remains FAR through MOVING, WAITING and CHECKING; only a completed fresh measurement classified as CLOSE should change it. This is a product direction, not a claim that confirmed CLOSE/FAR state or its emotional UI is already implemented.
+
+### Dual-Radio Product Direction
+
+Established the intended future division of responsibility:
+
+* ESP-NOW remains initialized whenever the device is awake, supplies proximity evidence, and carries normal application traffic when CLOSE.
+
+* CC1101 retains its deep-sleep wake role and becomes the awake application transport when FAR.
+
+* ESP-NOW remains alive while CC1101 carries FAR-mode application traffic, so fresh proximity evidence can eventually return application routing to ESP-NOW without reboot or Wi-Fi reinitialization.
+
+FAR must not mean disabling ESP-NOW. Future automatic switching will need hysteresis to avoid repeated ESP-NOW/CC1101 changes near a boundary. This session implemented manual selection only; it did not implement the classifier or automatic policy.
+
+### CC1101 Runtime Inspection — Checkpoint 7A
+
+Inspection showed that the active firmware did not yet support general awake CC1101 application EVENT/ACK traffic. Active ownership was concentrated in `CC1101Bus`, `CC1101SleepArm`, `CC1101WakeTx` and `CC1101WakeRecovery`, including the retained wake EVENT and saved duplicate-ACK service.
+
+The older `RadioTask` and `CC1101Radio` runtime still exist in the repository but are inactive and retain stale ownership assumptions. The decision was to keep them inactive. The synchronous `CC1101WakeTx` remains a bounded wake transaction, not the normal awake application transmitter.
+
+The radio already uses the same packed eight-byte `Protocol::Message`:
+
+```text
+CC1101 FIFO: length byte 8 + eight Protocol::Message bytes
+```
+
+There was no need to redesign the wire protocol. The application ACK/retry and duplicate machinery in `main.cpp` was identified as the shared owner for both transports.
+
+### Selectable Dual-Radio Application Transport — Checkpoint 7B
+
+Added a local transport selection, `ESP_NOW` or `CC1101`. Boot defaults to ESP-NOW; selection exists in RAM only and is not persisted in RTC memory.
+
+The bench controls include `e` to select ESP-NOW, `c` to select CC1101, `p` to report selected/pending transport and CC1101 busy state, and `h` to pause/resume automatic heartbeats. Selection is guarded while transport or sleep work is pending.
+
+There is one shared application reliability state machine. A new reliable EVENT captures `selectedTransport` into `pendingTransport`. Every retry preserves the same message bytes, message ID and pending transport. The existing 300 ms ACK timeout and maximum two retries remain unchanged.
+
+ACK matching requires the expected peer, the acknowledged message ID matching the pending transaction, and an incoming transport matching `pendingTransport`. A receipt on the other radio cannot finish the transaction.
+
+Receipt ACK routing follows the incoming EVENT, independently of the receiver's selected outbound transport:
+
+```text
+EVENT received through ESP-NOW -> ACK through ESP-NOW
+EVENT received through CC1101  -> ACK through CC1101
+```
+
+Application duplicate history is shared across radios. No second radio-specific application ACK/retry or duplicate state machine was created.
+
+Extended the existing `CC1101WakeRecovery` awake owner with general EVENT/ACK reception, bounded submission, TX completion polling and RX restoration. Submission reports accepted, busy or failed; it does not wait for the application's receipt ACK or own its retries. `main.cpp` retains that responsibility.
+
+Saved wake-EVENT retry handling and its retained ACK take precedence over general awake delivery. The runtime protects pending FIFO contents, bounds TX/RX handling, participates in physical-sleep guards and reports persistent radio failures. Retained boot recovery and the existing wake transaction remain distinct from normal application transport. Legacy `RadioTask` and `CC1101Radio` were not activated.
+
+Selecting CC1101 does not deinitialize ESP-NOW, disable Wi-Fi, change its channel, enable Wi-Fi sleep, stop callbacks or remove the RSSI observer. Coordinated `SLEEP_REQUEST`, `SLEEP_READY`, `SLEEP_COMMIT`, `SLEEP_ACK` and `SLEEP_CANCEL` controls remain on ESP-NOW regardless of application selection.
+
+### Checkpoint 7B Physical Validation
+
+Two-board bench testing passed for:
+
+* default ESP-NOW application EVENT/ACK operation
+
+* CC1101 application EVENT/ACK in both Bubu-to-Dudu and Dudu-to-Bubu directions, including repeated transactions
+
+* manual ESP-NOW -> CC1101 -> ESP-NOW selection without reboot or Wi-Fi reinitialization
+
+* mixed transport operation, with one device sending application EVENTs over CC1101 and the other over ESP-NOW
+
+* receipt ACKs returning through the incoming EVENT's radio rather than the receiver's selected outbound transport
+
+* bounded retries and pending transactions retaining their selected transport
+
+* Motion responsiveness during CC1101 traffic and continued ESP-NOW availability
+
+Some serial retry/GIVE_UP and disconnect sequences occurred while boards were intentionally unplugged and replugged. Those observations were not treated as evidence of a new CC1101 runtime design defect. Repeated application transactions succeeded once both boards were powered and running, and bounded retry behavior handled transient startup/transition conditions.
+
+### Post-7B Sleep and Wake Regression
+
+The bench command `x` was confirmed still present and still calls `enterPhysicalSleep(false)`. Initial bench confusion involved asymmetric sleep conditions, not removal of the command.
+
+Moving an already ACTIVE board produces ordinary awake Motion events. It does not automatically wake a sleeping peer. The automatic peer-wake policy is specifically a one-shot startup action after a local Motion deep wake:
+
+```text
+both devices sleeping
+    -> move one device
+    -> ADXL345 / GPIO3 wakes the local ESP32
+    -> startup identifies local Motion wake and completes safely
+    -> one bounded CC1101 peer-wake transaction
+    -> peer wakes through GPIO4
+    -> retained wake EVENT recovery and ACK
+    -> both devices ACTIVE
+```
+
+This full Motion deep-wake -> CC1101 peer-wake path was physically retested after 7B and passed. The tested regression confirms that the new awake CC1101 application runtime preserved the previously verified motion-to-peer wake behavior. It is distinct from a policy that would wake peers on every awake movement.
+
+Checkpoint 7B was committed and pushed as `aad3045c46bd0bf0949329676472488fb919b400` — `feat: add selectable dual-radio application transport`.
+
+### RSSI Availability While CC1101 Carries Application Traffic
+
+Physical testing exposed an expected limitation for the next checkpoint: ESP-NOW being initialized does not guarantee that any ESP-NOW frames are being transmitted.
+
+When both devices route normal application heartbeats through CC1101, SETTLED can start CHECKING without any fresh ESP-NOW RSSI samples arriving. The check can therefore reach its bounded timeout even though ESP-NOW itself remains available.
+
+Future FAR-mode operation needs a bounded ESP-NOW monitoring/probe mechanism. The planned direction is a small probe/reply exchange during CHECKING, allowing the existing observer to collect fresh samples while normal application EVENTs continue through CC1101. This is not implemented in 7B, and no background probe policy was added during this session.
+
+### Host Tests and Build Verification
+
+Final Checkpoint 7B validation passed before its commit and push:
+
+* focused application/transport tests for both Bubu and Dudu, including route-pinned retries, wrong-transport ACK rejection, mixed routing and shared duplicate handling
+
+* CC1101 awake runtime, retained wake, duplicate re-ACK, wake-TX, FIFO protection and bounded-failure tests
+
+* automated coordinated sleep/wake, transport drain, startup ordering and one-shot Motion-to-peer wake regressions
+
+* ESP-NOW observer/drain and Motion/proximity measurement tests
+
+* full host suite with AddressSanitizer and UndefinedBehaviorSanitizer, with compiler warnings treated as errors
+
+* Bubu and Dudu PlatformIO firmware builds
+
+* `git diff --check`
+
+No compiler warnings or errors were reported. These automated results complement the physical evidence above; host fault injection is not a substitute for the reported two-board tests.
+
+### Current Working State
+
+The practical firmware remains on `feature/sleep-execution` at `aad3045c46bd0bf0949329676472488fb919b400`, with the local and origin feature refs matching at session close.
+
+Verified settings remain: eight-byte `Protocol::Message`, 300 ms ACK timeout, maximum two retries, awake activity threshold 12, sleep activity threshold 48, three-second sensor inactivity, one-second application settlement, three fresh distinct RSSI samples with median filtering, a 12-second absolute check ceiling, and the 30-second safety wake timer.
+
+Manual dual-radio application selection is implemented. CLOSE/FAR classification, RSSI thresholds, hysteresis, automatic switching and a bounded ESP-NOW probe policy remain future work. No new LED/OLED integration or emotional UI behavior was introduced by these checkpoints.
+
+`main` intentionally does not contain the current practical firmware. This DEVLOG update is documentation only on `main`; it does not merge or cherry-pick firmware or tests. `chore/repository-polish` remains frozen and untouched. Existing stashes are preserved. The unrelated `.vscode/extensions.json` modification remains unchanged and unstaged, and practical work resumes on the verified feature branch after the documentation update.
+
+### Git Commits
+
+The session's practical checkpoints, all verified in `feature/sleep-execution` history:
+
+* `71264056ef4a0c5bab4c9882e35b8ffedfd1d603` — `feat: add tuned awake motion detection`
+
+* `aab2ef03f8b5ef2fb6eca5bea7637d67f2ce2fc1` — `feat: add tuned movement settle detection`
+
+* `a7898999227ed25bc03ede4ecfe39a750f83a35f` — `feat: add passive ESP-NOW RSSI diagnostics`
+
+* `fc769f2a56360c7d9dff22f2de990772c5fef1ed` — `feat: add settled RSSI proximity measurement`
+
+* `aad3045c46bd0bf0949329676472488fb919b400` — `feat: add selectable dual-radio application transport`
+
+### Next Step
+
+Begin with inspection/design for bounded ESP-NOW proximity probes while CC1101 is selected for application traffic. Determine how a lightweight probe/reply can generate fresh RSSI evidence during CHECKING without triggering emotional EVENT behavior, taking over the normal application reliability transaction, changing CC1101 routing, interfering with sleep, changing peer semantics or changing the eight-byte `Protocol::Message` layout.
+
+After that inspection, implement and physically verify one narrow sequence:
+
+```text
+manual CC1101 application mode
+    -> movement -> settlement -> CHECKING
+    -> bounded ESP-NOW probe/reply
+    -> three fresh distinct RSSI samples
+    -> median COMPLETE
+```
+
+Normal application EVENTs must remain on CC1101 during that experiment. Probes serve proximity measurement/recovery only. CLOSE/FAR classification remains a later checkpoint; do not combine probe transport, threshold tuning and automatic radio switching into one change.
