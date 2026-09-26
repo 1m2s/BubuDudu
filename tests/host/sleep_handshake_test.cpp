@@ -331,6 +331,7 @@ void testFsm()
 
 void freshApp()
 {
+    resetProximityCheck();
     rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
     if (receiveQueue) delete receiveQueue;
@@ -1168,9 +1169,12 @@ void testMotionInitialization()
         injectedPacket = {1, Type::Event, 70, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
         motionInitOk = ok; motionStartup = event; motionIntLevel = level;
         movementState = MovementState::WAITING; settleStartedAt = 123;
+        proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = 123;
+        proximitySampleCount = 1; proximitySamples[0] = {7, -60};
         delete receiveQueue; receiveQueue = nullptr;
         setup();
         assert(movementState == MovementState::READY && settleStartedAt == 0);
+        assert(proximityUpdateState == ProximityUpdateState::READY && proximitySampleCount == 0 && checkStartedAt == 0);
         assert(motionInitializations == 1 && protocolReady);
         assert(localState() == LocalState::ACTIVE && !transaction().active);
         assert(peerState() == (deep ? PeerState::ONLINE : PeerState::UNKNOWN));
@@ -1599,6 +1603,213 @@ void testRssiDiagnostics()
     puts("PASS: RSSI diagnostics bounded, no EVENT execution/ACK/IDs/power effects, retries unchanged, backlog does not defer sleep");
 }
 
+ESPNowRadio::RssiObservation proximityObservation(uint16_t id, int8_t rssi, uint32_t captured)
+{
+    ESPNowRadio::RssiObservation observation{};
+    observation.message = {Protocol::VERSION, Type::Event, id, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
+    observation.rssi = rssi; observation.receivedAt = captured;
+    return observation;
+}
+
+void settleForCheck(uint32_t settledAt)
+{
+    movementStep(uint32_t(settledAt - SETTLE_MS - 10), MotionEvent::Activity);
+    movementStep(uint32_t(settledAt - SETTLE_MS), MotionEvent::Inactivity);
+    movementStep(settledAt);
+    assert(movementState == MovementState::READY && proximityUpdateState == ProximityUpdateState::CHECKING);
+    assert(checkStartedAt == settledAt && proximitySampleCount == 0);
+}
+
+void assertProximityReset()
+{
+    assert(proximityUpdateState == ProximityUpdateState::READY && checkStartedAt == 0 && proximitySampleCount == 0);
+    for (const auto& sample : proximitySamples) assert(sample.messageId == 0 && sample.rssi == 0);
+}
+
+void testProximitySamples()
+{
+    freshApp(); assertProximityReset();
+    movementStep(0, MotionEvent::Activity); movementStep(10, MotionEvent::Inactivity);
+    // A prior partial batch must be cleared when a new operation starts.
+    proximitySampleCount = 2; proximitySamples[0] = {40, -30}; proximitySamples[1] = {41, -31};
+    rssiObservations.push_back(proximityObservation(1, -10, 1009));
+    rssiObservations.push_back(proximityObservation(2, -11, 1010));
+    movementStep(1010); // Strictly older AND equal-timestamp queued samples excluded.
+    assert(proximityUpdateState == ProximityUpdateState::CHECKING && checkStartedAt == 1010 && proximitySampleCount == 0);
+    for (const auto& sample : proximitySamples) assert(sample.messageId == 0 && sample.rssi == 0);
+    assert(rssiObservations.empty());
+    for (unsigned i = 0; i < 5; ++i) loop();
+    assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+    auto wrongPeer = proximityObservation(9, -20, 1090);
+    wrongPeer.message.sender = LOCAL_DEVICE;
+    rssiObservations.push_back(wrongPeer);
+    rssiObservations.push_back(proximityObservation(10, -20, 1200)); // Future timestamp.
+    movementStep(1090); assert(proximitySampleCount == 0);
+    rssiObservations.push_back(proximityObservation(65535, -52, 1100));
+    movementStep(1110); assert(proximitySampleCount == 1);
+    rssiObservations.push_back(proximityObservation(65535, -99, 1120));
+    rssiObservations.push_back(proximityObservation(0, -67, 1121));
+    movementStep(1130); assert(proximitySampleCount == 2 && checkStartedAt == 1010);
+    assert(proximitySamples[0].rssi == -52); // Retry neither replaces nor adds a sample.
+    startProximityCheck(1140); // Repeated start cannot extend an active operation.
+    assert(checkStartedAt == 1010 && proximitySampleCount == 2);
+    rssiObservations.push_back(proximityObservation(65535, -20, 1141));
+    rssiObservations.push_back(proximityObservation(0, -21, 1142));
+    movementStep(1150); assert(proximitySampleCount == 2);
+    rssiObservations.push_back(proximityObservation(1, -54, 1160));
+    movementStep(1170); assertProximityReset();
+    assert(occurrences(Serial.log, "PROXIMITY CHECK | SAMPLE") == 3);
+    assert(Serial.log.find("COMPLETE | samples=3 | median=-54 dBm") != std::string::npos);
+    rssiObservations.push_back(proximityObservation(2, -40, 1180));
+    movementStep(1190); assertProximityReset();
+    assert(occurrences(Serial.log, "PROXIMITY CHECK | COMPLETE") == 1);
+
+    const int8_t cases[][4] = {{-67,-54,-52,-54}, {-52,-54,-67,-54}, {-52,-67,-54,-54},
+                              {-54,-52,-67,-54}, {-90,-53,-53,-53}, {-128,-127,-1,-127}};
+    for (const auto& values : cases)
+    {
+        freshApp(); settleForCheck(2000);
+        for (unsigned i = 0; i < 3; ++i)
+            rssiObservations.push_back(proximityObservation(i, values[i], 2010 + i));
+        const auto reads = rssiReads;
+        movementStep(2020);
+        assert(rssiReads == reads + 2 && proximitySampleCount == 2 && rssiObservations.size() == 1);
+        assert(Serial.log.find("PROXIMITY CHECK | COMPLETE") == std::string::npos);
+        movementStep(2030); assertProximityReset();
+        assert(Serial.log.find("median=" + std::to_string(values[3]) + " dBm") != std::string::npos);
+    }
+    puts("PASS: SETTLED starts once, strict capture-time freshness, message-ID dedup/wrap, signed median and two-observation drain");
+}
+
+void testProximityTimeout()
+{
+    for (uint32_t start : {2000U, UINT32_MAX - 500U})
+    for (unsigned count = 0; count < 3; ++count)
+    {
+        freshApp(); settleForCheck(start);
+        rssiObservations.push_back(proximityObservation(99, -10, start - 1));
+        movementStep(uint32_t(start + 10)); assert(proximitySampleCount == 0);
+        if (count > 0)
+        {
+            rssiObservations.push_back(proximityObservation(1, -50, uint32_t(start + 100)));
+            movementStep(uint32_t(start + 100)); assert(proximitySampleCount == 1);
+        }
+        if (count > 1)
+            rssiObservations.push_back(proximityObservation(2, -60, uint32_t(start + CHECK_TIMEOUT_MS - 1)));
+        movementStep(uint32_t(start + CHECK_TIMEOUT_MS - 1));
+        assert(proximityUpdateState == ProximityUpdateState::CHECKING && proximitySampleCount == count);
+        assert(checkStartedAt == start && Serial.log.find("PROXIMITY CHECK | TIMEOUT") == std::string::npos);
+        // Even a third frame captured before deadline cannot complete if drained at expiry.
+        rssiObservations.push_back(proximityObservation(3, -55, uint32_t(start + CHECK_TIMEOUT_MS - 1)));
+        movementStep(uint32_t(start + CHECK_TIMEOUT_MS)); assertProximityReset();
+        assert(Serial.log.find("TIMEOUT | samples=" + std::to_string(count)) != std::string::npos);
+        for (unsigned i = 0; i < 10; ++i) loop();
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | TIMEOUT") == 1);
+        assert(Serial.log.find("PROXIMITY CHECK | COMPLETE") == std::string::npos);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+    }
+    // Successful capture and completion across millis rollover too.
+    freshApp(); const uint32_t start = UINT32_MAX - 10; settleForCheck(start);
+    for (unsigned i = 0; i < 3; ++i)
+        rssiObservations.push_back(proximityObservation(i, -50 - i, uint32_t(start + 20 + i)));
+    movementStep(uint32_t(start + 30)); movementStep(uint32_t(start + 40)); assertProximityReset();
+    assert(Serial.log.find("median=-51 dBm") != std::string::npos);
+    puts("PASS: absolute 12s timeout, partial progress cannot extend, boundary precedence and rollover freshness/completion");
+}
+
+void testProximityCancellation()
+{
+    for (uint32_t age : {100U, CHECK_TIMEOUT_MS})
+    {
+        freshApp(); settleForCheck(2000);
+        rssiObservations.push_back(proximityObservation(1, -50, 2020)); movementStep(2020);
+        rssiObservations.push_back(proximityObservation(2, -60, 2000 + age - 1));
+        rssiObservations.push_back(proximityObservation(3, -55, 2000 + age - 1));
+        movementStep(2000 + age, MotionEvent::Activity); assertProximityReset();
+        assert(movementState == MovementState::MOVING);
+        assert(occurrences(Serial.log, "CANCELLED | reason=MOVEMENT") == 1);
+        assert(Serial.log.find("PROXIMITY CHECK | TIMEOUT") == std::string::npos);
+        assert(Serial.log.find("PROXIMITY CHECK | COMPLETE") == std::string::npos);
+        const uint32_t restart = 2000 + age + SETTLE_MS + 20;
+        movementStep(restart - SETTLE_MS, MotionEvent::Inactivity); movementStep(restart);
+        assert(checkStartedAt == restart && proximitySampleCount == 0);
+        for (unsigned i = 1; i <= 3; ++i) // Same IDs are valid again in a new check.
+            rssiObservations.push_back(proximityObservation(i, -50 - i, restart + 10));
+        movementStep(restart + 20); movementStep(restart + 30); assertProximityReset();
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 2);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | COMPLETE") == 1);
+    }
+    freshApp(); settleForCheck(2000); notePeerUnreachable(); loop(); assertProximityReset();
+    assert(peerState() == PeerState::OFFLINE && localState() == LocalState::ACTIVE);
+    assert(occurrences(Serial.log, "CANCELLED | reason=PEER_OFFLINE") == 1);
+    for (auto state : {LocalState::IDLE, LocalState::SLEEP_NEGOTIATING, LocalState::SLEEPING, LocalState::WAKING})
+    {
+        freshApp();
+        if (state == LocalState::SLEEPING || state == LocalState::WAKING)
+        {
+            completedAwaitingCallbacks(false);
+            if (state == LocalState::WAKING) injectActivity(hostNow);
+        }
+        else { command('i'); if (state == LocalState::SLEEP_NEGOTIATING) command('s'); }
+        proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = hostNow;
+        proximitySampleCount = 1; proximitySamples[0] = {1, -60};
+        loop(); assertProximityReset(); assert(localState() == state);
+        assert(occurrences(Serial.log, "CANCELLED | reason=NOT_ACTIVE") == 1);
+    }
+    for (bool prepareFails : {false, true})
+    {
+        freshApp(); settleForCheck(2000);
+        motionPrepareOk = !prepareFails;
+        command('x'); assertProximityReset();
+        assert(motionPreparations == 1 && motionCancels == 1 && physicalSleeps == 0);
+        assert(benchSleepCalls == (prepareFails ? 0U : 1U)); // Bench mock returns without sleeping.
+        assert(localState() == LocalState::ACTIVE && Serial.log.find("CANCELLED | reason=SLEEP") != std::string::npos);
+    }
+    freshApp(); completedAwaitingCallbacks(false);
+    proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = hostNow;
+    proximitySampleCount = 1; proximitySamples[0] = {1, -60};
+    mockedTxInFlight = 0; loop(); assertProximityReset(); assert(physicalSleeps == 1);
+    freshApp(); settleForCheck(2000); protocolReady = false; loop(); assertProximityReset();
+    puts("PASS: Activity beats timeout/queued completion, fresh restart, offline/non-ACTIVE/sleep/runtime cancellations");
+}
+
+void testProximityIsolation()
+{
+    std::vector<Protocol::Message> baselineWire;
+    std::string baselineState;
+    for (bool measuring : {false, true})
+    {
+        freshApp(); ackWaitStart = 0; pendingMessage = {};
+        if (measuring) settleForCheck(2000);
+        hostNow = 2020; pauseAutomaticHeartbeats = false; nextEventTime = 2050;
+        std::string state;
+        for (uint32_t now : {2050U, 2070U, 2100U, 2110U, 2120U, 2200U, 6200U, 6500U, 6800U, 7100U})
+        {
+            hostNow = now;
+            if (now == 2070) receive(incoming(Type::Ack, pendingMessage.messageId));
+            if (now == 2100 || now == 2110)
+                receive(proximityObservation(42, -50, now).message); // New EVENT then duplicate.
+            if (measuring && (now == 2100 || now == 2110 || now == 2120))
+                rssiObservations.push_back(proximityObservation(now, -50 - (now % 3), now));
+            loop();
+            state += std::to_string(nextMessageId) + ":" + std::to_string(waitingForAck) + ":" +
+                std::to_string(retryCount) + ":" + std::to_string(nextEventTime) + ":" +
+                std::to_string(controlCount) + ":" + std::to_string(lastPeerEventId) + ":" +
+                std::to_string(static_cast<int>(peerState())) + ":" + std::to_string(static_cast<int>(localState())) + ";";
+            assert(!transaction().active && wakeEvents.empty() && physicalSleeps == 0);
+        }
+        if (!measuring) { baselineState = state; baselineWire = wire; }
+        else
+        {
+            assert(state == baselineState && wire.size() == baselineWire.size());
+            for (size_t i = 0; i < wire.size(); ++i)
+                assert(memcmp(&wire[i], &baselineWire[i], sizeof(Protocol::Message)) == 0);
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | COMPLETE") == 1);
+        }
+    }
+    puts("PASS: completed measurement preserves normal EVENT/ACK/dedup/retry, heartbeat schedule, message IDs and power/peer state");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -1611,6 +1822,7 @@ int main()
     testAwakeMotionDiagnostics();
     testMovementSettle(); testMovementBoundaries(); testMovementIsolation();
     testRssiDiagnostics();
+    testProximitySamples(); testProximityTimeout(); testProximityCancellation(); testProximityIsolation();
     testAwakeWakeService();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;

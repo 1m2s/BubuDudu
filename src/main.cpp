@@ -102,6 +102,89 @@ namespace
 
 #endif
 
+    enum class ProximityUpdateState : uint8_t { READY, CHECKING };
+    ProximityUpdateState proximityUpdateState = ProximityUpdateState::READY;
+    struct ProximitySample { uint16_t messageId; int8_t rssi; };
+    ProximitySample proximitySamples[3]{};
+    uint8_t proximitySampleCount = 0;
+    uint32_t checkStartedAt = 0;
+    // PROVISIONAL passive-sampling budget; physically evaluate traffic cadence.
+    constexpr uint32_t CHECK_TIMEOUT_MS = 12000;
+
+    void resetProximityCheck()
+    {
+        proximityUpdateState = ProximityUpdateState::READY;
+        checkStartedAt = 0;
+        proximitySampleCount = 0;
+        for (auto& sample : proximitySamples) sample = {};
+    }
+
+    void cancelProximityCheck(const char* reason)
+    {
+        if (proximityUpdateState == ProximityUpdateState::CHECKING)
+            Serial.printf("PROXIMITY CHECK | CANCELLED | reason=%s\n", reason);
+        resetProximityCheck();
+    }
+
+    void checkProximityEligibility()
+    {
+        if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
+            cancelProximityCheck("NOT_ACTIVE");
+        else if (PowerManager::peerState() == PowerManager::PeerState::OFFLINE)
+            cancelProximityCheck("PEER_OFFLINE");
+    }
+
+    void startProximityCheck(uint32_t now)
+    {
+        if (proximityUpdateState == ProximityUpdateState::CHECKING ||
+            PowerManager::localState() != PowerManager::LocalState::ACTIVE ||
+            PowerManager::peerState() == PowerManager::PeerState::OFFLINE)
+            return;
+        resetProximityCheck();
+        checkStartedAt = now;
+        proximityUpdateState = ProximityUpdateState::CHECKING;
+        Serial.println("PROXIMITY CHECK | START");
+    }
+
+    void serviceProximityCheck(uint32_t now)
+    {
+        checkProximityEligibility();
+        if (proximityUpdateState == ProximityUpdateState::CHECKING &&
+            uint32_t(now - checkStartedAt) >= CHECK_TIMEOUT_MS)
+        {
+            Serial.printf("PROXIMITY CHECK | TIMEOUT | samples=%u\n", proximitySampleCount);
+            resetProximityCheck();
+        }
+    }
+
+    void sampleProximity(const ESPNowRadio::RssiObservation& observation, uint32_t now)
+    {
+        serviceProximityCheck(now); // Hard timeout wins over a late-drained third sample.
+        if (proximityUpdateState != ProximityUpdateState::CHECKING ||
+            observation.message.sender != PEER_DEVICE)
+            return;
+        const uint32_t capturedAfterStart = uint32_t(observation.receivedAt - checkStartedAt);
+        // Strictly AFTER start. Equal millis() is ambiguous and conservatively ignored.
+        // Short window excludes older timestamps across rollover; reject future timestamps too.
+        if (capturedAfterStart == 0 || capturedAfterStart >= CHECK_TIMEOUT_MS ||
+            uint32_t(now - observation.receivedAt) >= 0x80000000UL)
+            return;
+        // One peer uses a shared message-ID allocator for every packet type.
+        // Retransmissions of that message remain one sample, even with changed RSSI.
+        for (uint8_t i = 0; i < proximitySampleCount; ++i)
+            if (proximitySamples[i].messageId == observation.message.messageId) return;
+        proximitySamples[proximitySampleCount++] = {observation.message.messageId, observation.rssi};
+        Serial.printf("PROXIMITY CHECK | SAMPLE | n=%u | rssi=%d dBm\n",
+                      proximitySampleCount, static_cast<int>(observation.rssi));
+        if (proximitySampleCount != 3) return;
+        int8_t a = proximitySamples[0].rssi, b = proximitySamples[1].rssi, c = proximitySamples[2].rssi;
+        if (a > b) { const int8_t temp = a; a = b; b = temp; }
+        if (b > c) { const int8_t temp = b; b = c; c = temp; }
+        if (a > b) { const int8_t temp = a; a = b; b = temp; }
+        Serial.printf("PROXIMITY CHECK | COMPLETE | samples=3 | median=%d dBm\n", static_cast<int>(b));
+        resetProximityCheck();
+    }
+
 
     // ======================================================
     // Reliability settings
@@ -973,6 +1056,7 @@ namespace
     void enterPhysicalSleep(bool coordinated)
     {
         resetMovement(); // An aborted attempt must not retain an old settle timer.
+        cancelProximityCheck("SLEEP");
         const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
         if (motion.prepareForSleep())
         {
@@ -1147,6 +1231,7 @@ void setup()
 {
     bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
     resetMovement(); // Startup sensor history is not a fresh awake movement.
+    resetProximityCheck();
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
     if (bootInfo.deep)
@@ -1233,6 +1318,7 @@ void setup()
 
 void loop()
 {
+    checkProximityEligibility(); // Observe boundaries even if power changes back to ACTIVE below.
     // Clear stale tracking even if a power transition returns to ACTIVE below.
     if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
         resetMovement();
@@ -1242,6 +1328,7 @@ void loop()
     if (!protocolReady)
     {
         resetMovement();
+        cancelProximityCheck("RUNTIME_NOT_READY");
         delay(10);
         return;
     }
@@ -1304,8 +1391,14 @@ void loop()
         case MotionEvent::Inactivity: Serial.println("MOTION AWAKE | INACTIVITY"); break;
         case MotionEvent::None: break;
     }
-    if (updateMovement(motionEvent, uint32_t(millis())))
+    if (motionEvent == MotionEvent::Activity) cancelProximityCheck("MOVEMENT");
+    const uint32_t motionNow = uint32_t(millis());
+    if (updateMovement(motionEvent, motionNow))
+    {
         Serial.println("MOVEMENT | SETTLED | state=READY");
+        startProximityCheck(motionNow);
+    }
+    serviceProximityCheck(uint32_t(millis()));
 
     // Best-effort diagnostics only, after all normal protocol/sleep/motion work.
     // Never drain indefinitely or include this backlog in sleep-entry guards.
@@ -1318,6 +1411,7 @@ void loop()
                       static_cast<unsigned>(observation.message.type), observation.message.ackForMessageId,
                       static_cast<int>(observation.rssi),
                       static_cast<unsigned long>(uint32_t(millis() - observation.receivedAt)));
+        sampleProximity(observation, uint32_t(millis()));
     }
 
     delay(
