@@ -112,6 +112,11 @@ namespace
 
     enum class ProximityUpdateState : uint8_t { READY, CHECKING };
     ProximityUpdateState proximityUpdateState = ProximityUpdateState::READY;
+    enum class ProximityClassification : uint8_t { UNKNOWN, CLOSE, FAR };
+    ProximityClassification proximityClassification = ProximityClassification::UNKNOWN;
+    // PROVISIONAL conservative RSSI boundaries; these do not represent meters.
+    constexpr int8_t ENTER_FAR_DBM = -80;
+    constexpr int8_t ENTER_CLOSE_DBM = -75;
     struct ProximitySample { uint16_t messageId; int8_t rssi; };
     ProximitySample proximitySamples[3]{};
     uint8_t proximitySampleCount = 0;
@@ -135,6 +140,7 @@ namespace
 
     void resetProximityCheck()
     {
+        // Clear this measurement only; retain the last completed classification.
         proximityUpdateState = ProximityUpdateState::READY;
         checkStartedAt = 0;
         proximitySampleCount = 0;
@@ -239,6 +245,14 @@ namespace
         if (b > c) { const int8_t temp = b; b = c; c = temp; }
         if (a > b) { const int8_t temp = a; a = b; b = temp; }
         Serial.printf("PROXIMITY CHECK | COMPLETE | samples=3 | median=%d dBm\n", static_cast<int>(b));
+        if (proximityClassification == ProximityClassification::FAR)
+        {
+            if (b >= ENTER_CLOSE_DBM) proximityClassification = ProximityClassification::CLOSE;
+        }
+        else // UNKNOWN uses the same conservative FAR boundary as CLOSE.
+            proximityClassification = b <= ENTER_FAR_DBM ? ProximityClassification::FAR : ProximityClassification::CLOSE;
+        Serial.printf("PROXIMITY | median=%d dBm | %s\n", static_cast<int>(b),
+                      proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE");
         resetProximityCheck();
     }
 
@@ -1340,6 +1354,7 @@ void setup()
     bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
     resetMovement(); // Startup sensor history is not a fresh awake movement.
     resetProximityCheck();
+    proximityClassification = ProximityClassification::UNKNOWN; // RAM-only; no retained distance.
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);

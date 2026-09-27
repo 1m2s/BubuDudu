@@ -350,6 +350,7 @@ void freshApp()
     selectedTransport = pendingTransport = Transport::ESP_NOW;
     ccWire.clear(); ccIncoming.clear(); ccAccepts = true; ccHoldTx = false;
     resetProximityCheck();
+    proximityClassification = ProximityClassification::UNKNOWN;
     rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
     if (receiveQueue) delete receiveQueue;
@@ -2061,6 +2062,103 @@ void testProximityProbes()
     puts("PASS: bounded ESP-NOW probes, rejection pacing, rollover, stale/malformed/duplicate correlation, cancellation and awake-only replies");
 }
 
+void classificationSample(uint16_t id, int8_t rssi)
+{
+    movementStep(hostNow + 10); // Allows the next bounded probe after an accepted sample.
+    const uint32_t captured = hostNow + 1;
+    auto observation = proximityObservation(id, rssi, captured);
+    if (selectedTransport == Transport::CC1101)
+    {
+        assert(probeOutstanding);
+        observation.message.type = Type::ProximityProbeReply;
+        observation.message.event = Protocol::EventType::None;
+        observation.message.ackForMessageId = probeMessageId;
+    }
+    rssiObservations.push_back(observation);
+    movementStep(captured);
+}
+
+void completeClassifiedMeasurement(int8_t median)
+{
+    const auto prior = proximityClassification;
+    const auto logs = occurrences(Serial.log, "PROXIMITY | median=");
+    const auto selected = selectedTransport, pendingRoute = pendingTransport;
+    const auto pending = pendingMessage;
+    const auto waiting = waitingForAck; const auto retries = retryCount;
+    const auto ackStart = ackWaitStart, nextEvent = nextEventTime;
+    const auto local = localState(); const auto peer = peerState();
+    settleForCheck(hostNow + 2000);
+    classificationSample(500, -100);
+    assert(proximitySampleCount == 1 && proximityClassification == prior);
+    classificationSample(501, median);
+    assert(proximitySampleCount == 2 && proximityClassification == prior);
+    assert(occurrences(Serial.log, "PROXIMITY | median=") == logs);
+    classificationSample(502, -40); // Classification must use the median, not this last raw sample.
+    assertProximityReset();
+    assert(occurrences(Serial.log, "PROXIMITY | median=") == logs + 1);
+    const std::string label = proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE";
+    assert(Serial.log.find("PROXIMITY | median=" + std::to_string(median) + " dBm | " + label) != std::string::npos);
+    assert(selectedTransport == selected && pendingTransport == pendingRoute);
+    assert(memcmp(&pendingMessage, &pending, sizeof(pending)) == 0 && waitingForAck == waiting && retryCount == retries);
+    assert(ackWaitStart == ackStart && nextEventTime == nextEvent && localState() == local && peerState() == peer);
+}
+
+void testProximityClassification()
+{
+    using Class = ProximityClassification;
+    struct Case { Class prior; int8_t median; Class expected; };
+    const Case cases[] = {
+        {Class::UNKNOWN, -79, Class::CLOSE}, {Class::UNKNOWN, -80, Class::FAR},
+        {Class::CLOSE, -79, Class::CLOSE}, {Class::CLOSE, -80, Class::FAR}, {Class::CLOSE, -81, Class::FAR},
+        {Class::FAR, -76, Class::FAR}, {Class::FAR, -75, Class::CLOSE}, {Class::FAR, -74, Class::CLOSE},
+        {Class::CLOSE, -78, Class::CLOSE}, {Class::CLOSE, -77, Class::CLOSE}, {Class::CLOSE, -76, Class::CLOSE},
+        {Class::FAR, -79, Class::FAR}, {Class::FAR, -78, Class::FAR}, {Class::FAR, -77, Class::FAR},
+        {Class::CLOSE, -67, Class::CLOSE}, {Class::CLOSE, -68, Class::CLOSE}
+    };
+    for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        for (const auto& test : cases)
+        {
+            freshApp(); selectedTransport = transport;
+            assert(proximityClassification == Class::UNKNOWN);
+            // Raw observations outside CHECKING do not invent an initial distance.
+            rssiObservations.push_back(proximityObservation(99, -100, hostNow));
+            loop(); assert(proximityClassification == Class::UNKNOWN);
+            if (test.prior != Class::UNKNOWN)
+                completeClassifiedMeasurement(test.prior == Class::FAR ? -85 : -50);
+            assert(proximityClassification == test.prior);
+            completeClassifiedMeasurement(test.median);
+            assert(proximityClassification == test.expected);
+        }
+        for (auto prior : {Class::UNKNOWN, Class::CLOSE, Class::FAR})
+        for (unsigned samples = 0; samples < 3; ++samples)
+        for (bool timeout : {false, true})
+        {
+            freshApp(); selectedTransport = transport;
+            if (prior != Class::UNKNOWN) completeClassifiedMeasurement(prior == Class::FAR ? -85 : -50);
+            const auto logs = occurrences(Serial.log, "PROXIMITY | median=");
+            if (timeout && samples == 0) radioAccepts = false; // Failed probes also retain the prior state.
+            settleForCheck(hostNow + 2000);
+            const uint32_t began = checkStartedAt;
+            for (unsigned i = 0; i < samples; ++i)
+            {
+                classificationSample(600 + i, prior == Class::FAR ? -40 : -100);
+                assert(proximitySampleCount == i + 1 && proximityClassification == prior);
+            }
+            if (timeout) movementStep(began + CHECK_TIMEOUT_MS);
+            else movementStep(hostNow + 10, MotionEvent::Activity);
+            assertProximityReset();
+            assert(proximityClassification == prior && occurrences(Serial.log, "PROXIMITY | median=") == logs);
+        }
+    }
+    // A reboot starts UNKNOWN even when RTC history is restored.
+    freshApp(); completeClassifiedMeasurement(-85); saveRtcHistory();
+    protocolReady = false; injectedBoot.deep = true; setup();
+    assert(rtcRestored && proximityClassification == Class::UNKNOWN);
+    puts("PASS: UNKNOWN initialization, conservative CLOSE/FAR boundaries, full hysteresis band and median-only updates on both transports");
+    puts("PASS: raw/partial/failed/cancelled/timeout checks retain classification, transport/reliability/power isolation, RAM-only reboot reset");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
@@ -2076,6 +2174,7 @@ int main()
     testProximitySamples(); testProximityTimeout(); testProximityCancellation(); testProximityIsolation();
     testAwakeWakeService();
     testApplicationTransports(); testProximityProbes();
+    testProximityClassification();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);
