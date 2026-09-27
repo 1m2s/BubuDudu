@@ -14,7 +14,9 @@ namespace Protocol
         SleepReady   = 4,
         SleepCommit  = 5,
         SleepAck     = 6,
-        SleepCancel  = 7
+        SleepCancel  = 7,
+        ProximityProbe = 8,
+        ProximityProbeReply = 9
     };
 
     enum class DeviceId : uint8_t

@@ -89,6 +89,25 @@ void testObserver()
         assert(memcmp(out.sourceMac, source, 6) == 0);
         assert(!ESPNowRadio::takeRssiObservation(out));
     }
+    // Probe metadata must survive independently of normal protocol receive delivery.
+    {
+        auto buffer = observedFrame(731, -54);
+        auto* f = reinterpret_cast<wifi_promiscuous_pkt_t*>(buffer.data())->payload;
+        Protocol::Message expected{};
+        memcpy(&expected, f + 39, sizeof(expected));
+        expected.type = Protocol::MessageType::ProximityProbeReply;
+        expected.ackForMessageId = 619;
+        memcpy(f + 39, &expected, sizeof(expected));
+        hostNow = 1234;
+        promiscuousCallback(buffer.data(), WIFI_PKT_MGMT);
+        memset(buffer.data(), 0, buffer.size());
+        assert(ESPNowRadio::takeRssiObservation(out));
+        assert(out.message.type == Protocol::MessageType::ProximityProbeReply);
+        assert(out.message.messageId == 731 && out.message.ackForMessageId == 619);
+        assert(out.rssi == -54 && out.receivedAt == 1234);
+        assert(memcmp(&out.message, &expected, sizeof(expected)) == 0);
+        assert(!ESPNowRadio::takeRssiObservation(out));
+    }
     for (unsigned length = 0; length < 51; ++length)
     {
         // Exact short allocation lets ASan catch reading beyond a truncated frame.
@@ -174,6 +193,9 @@ void testObserverFailure()
 }
 int main()
 {
+    static_assert(sizeof(Protocol::Message) == 8, "Wire format must remain eight bytes");
+    assert(!Protocol::isSleepControl(Protocol::MessageType::ProximityProbe));
+    assert(!Protocol::isSleepControl(Protocol::MessageType::ProximityProbeReply));
     failObservationQueue = true;
     assert(ESPNowRadio::begin(receive) && rssiQueue == nullptr && !rssiEnabled.load());
     assert(Serial.log.find("observation queue allocation failed") != std::string::npos);

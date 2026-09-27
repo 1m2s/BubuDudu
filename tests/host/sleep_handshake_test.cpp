@@ -1644,6 +1644,7 @@ void assertProximityReset()
 {
     assert(proximityUpdateState == ProximityUpdateState::READY && checkStartedAt == 0 && proximitySampleCount == 0);
     for (const auto& sample : proximitySamples) assert(sample.messageId == 0 && sample.rssi == 0);
+    assert(!probeOutstanding && !probeTimerActive && probeMessageId == 0 && probeStartedAt == 0);
 }
 
 void testProximitySamples()
@@ -1948,12 +1949,25 @@ void testApplicationTransports()
     assert(pendingMessage.type == Type::SleepAck && pendingTransport == Transport::ESP_NOW && ccWire.empty());
     receive(incoming(Type::Ack, pendingMessage.messageId)); assert(physicalSleeps == 1);
 
-    // Existing ESP-NOW receive/ACK and RSSI/Motion path remain alive in CC mode.
+    // CC mode keeps normal ESP-NOW RX/ACK alive, but samples only matched probe replies.
     freshApp(); command('c'); settleForCheck(2000);
-    receive(peerEvent); assert(wire.size() == 1 && wire[0].type == Type::Ack);
-    for (unsigned i = 0; i < 3; ++i) rssiObservations.push_back(proximityObservation(i, -50 - i, 2010 + i));
-    movementStep(2020); movementStep(2030);
+    assert(wire.size() == 1 && wire[0].type == Type::ProximityProbe);
+    receive(peerEvent); assert(wire.size() == 2 && wire.back().type == Type::Ack);
+    rssiObservations.push_back(proximityObservation(100, -20, 2010));
+    movementStep(2020); assert(proximitySampleCount == 0);
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        movementStep(2030 + 20 * i);
+        auto observation = proximityObservation(101 + i, -50 - i, 2031 + 20 * i);
+        observation.message.type = Type::ProximityProbeReply;
+        observation.message.event = Protocol::EventType::None;
+        observation.message.ackForMessageId = probeMessageId;
+        rssiObservations.push_back(observation);
+        rssiObservations.push_back(observation); // Same reply cannot count twice.
+        movementStep(2040 + 20 * i);
+    }
     assertProximityReset(); assert(Serial.log.find("median=-51 dBm") != std::string::npos);
+    assert(countWire(Type::ProximityProbe) == 3 && !waitingForAck);
     assert(selectedTransport == Transport::CC1101 && ccWire.empty());
     command('x'); assert(benchSleepCalls == 1 && motionCancels == 1);
     startHeartbeatEvent(); assert(ccWire.size() == 1); // Aborted bench entry resumes runtime.
@@ -1962,6 +1976,89 @@ void testApplicationTransports()
     assert(!waitingForAck && ccWire.empty() && peerState() == PeerState::OFFLINE);
     puts("PASS: manual transports, route-pinned retries, matching ACK before expiry, cross-radio dedup and receipt priority");
     puts("PASS: simultaneous independent EVENTs, lost ACK/retry/re-ACK, sleep guards/ESP-NOW controls, RSSI/Motion in CC mode");
+}
+
+void testProximityProbes()
+{
+    for (uint32_t start : {uint32_t(2000), UINT32_MAX - 100})
+    {
+        freshApp(); selectedTransport = Transport::CC1101; settleForCheck(start);
+        const auto first = wire.back();
+        assert(first.version == Protocol::VERSION && first.type == Type::ProximityProbe &&
+               first.sender == LOCAL_DEVICE && first.event == Protocol::EventType::None && first.ackForMessageId == 0);
+        movementStep(start + 499); assert(wire.size() == 1);
+        movementStep(start + 500); assert(wire.size() == 2 && probeMessageId != first.messageId);
+        auto reply = proximityObservation(100, -55, start + 501);
+        reply.message.type = Type::ProximityProbeReply; reply.message.event = Protocol::EventType::None;
+        reply.message.ackForMessageId = first.messageId;
+        sampleProximity(reply, start + 502); assert(proximitySampleCount == 0);
+        reply.message.ackForMessageId = probeMessageId;
+        for (unsigned fault = 0; fault < 6; ++fault)
+        {
+            auto bad = reply;
+            if (fault == 0) bad.message.sender = LOCAL_DEVICE;
+            if (fault == 1) bad.message.event = Protocol::EventType::Heartbeat;
+            if (fault == 2) bad.message.type = Type::Ack;
+            if (fault == 3) bad.receivedAt = start;
+            if (fault == 4) bad.receivedAt = start + 499;
+            if (fault == 5) bad.message.version = 0;
+            sampleProximity(bad, start + 502); assert(proximitySampleCount == 0 && probeOutstanding);
+        }
+        // Observer first, normal callback later: no callback-side correlation required.
+        sampleProximity(reply, start + 502); assert(proximitySampleCount == 1 && !probeOutstanding);
+        const auto sent = wire.size();
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&reply.message), sizeof(reply.message)); assert(wire.size() == sent);
+        assert(peerState() == PeerState::UNKNOWN && !haveLastPeerEvent && !waitingForAck);
+        movementStep(start + 510); assert(probeOutstanding);
+        movementStep(start + 511, MotionEvent::Activity); assertProximityReset();
+        sampleProximity(reply, start + 512); assertProximityReset();
+        settleForCheck(start + 2000);
+        reply.receivedAt = start + 2001;
+        sampleProximity(reply, start + 2002); assert(proximitySampleCount == 0);
+        movementStep(start + 2000 + CHECK_TIMEOUT_MS); assertProximityReset();
+    }
+    freshApp(); selectedTransport = Transport::CC1101; radioAccepts = false; settleForCheck(2000);
+    assert(!probeOutstanding && probeTimerActive && wire.size() == 1);
+    for (uint32_t now = 2010; now < 2500; now += 10) movementStep(now);
+    assert(wire.size() == 1);
+    movementStep(2500); assert(wire.size() == 2 && wire[0].messageId != wire[1].messageId);
+    protocolReady = false; loop(); assertProximityReset();
+
+    for (auto state : {LocalState::ACTIVE, LocalState::IDLE, LocalState::SLEEP_NEGOTIATING,
+                       LocalState::SLEEPING, LocalState::WAKING})
+    {
+        freshApp(); selectedTransport = Transport::CC1101;
+        if (state == LocalState::SLEEPING || state == LocalState::WAKING)
+        {
+            completedAwaitingCallbacks(false);
+            if (state == LocalState::WAKING) injectActivity(hostNow);
+        }
+        else if (state != LocalState::ACTIVE) { command('i'); if (state == LocalState::SLEEP_NEGOTIATING) command('s'); }
+        assert(localState() == state);
+        selectedTransport = Transport::CC1101;
+        const auto peer = peerState(); const auto sent = wire.size(); const auto id = nextMessageId;
+        const auto pending = pendingMessage; const auto waiting = waitingForAck; const auto retries = retryCount;
+        const auto route = pendingTransport;
+        auto probe = incoming(Type::ProximityProbe, 0, 432);
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe), Transport::CC1101);
+        auto reply = incoming(Type::ProximityProbeReply, 432, 433);
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&reply), sizeof(reply), Transport::CC1101);
+        assert(wire.size() == sent && nextMessageId == id);
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe));
+        const bool allowed = state == LocalState::ACTIVE || state == LocalState::IDLE;
+        assert(wire.size() == sent + unsigned(allowed) && nextMessageId == uint16_t(id + unsigned(allowed)));
+        if (allowed)
+        {
+            const auto& response = wire.back();
+            assert(response.type == Type::ProximityProbeReply && response.ackForMessageId == 432 &&
+                   response.messageId == id && response.sender == LOCAL_DEVICE &&
+                   response.event == Protocol::EventType::None && response.version == Protocol::VERSION);
+        }
+        assert(localState() == state && peerState() == peer && !haveLastPeerEvent);
+        assert(waitingForAck == waiting && retryCount == retries && memcmp(&pending, &pendingMessage, 8) == 0);
+        assert(selectedTransport == Transport::CC1101 && pendingTransport == route && ccWire.empty());
+    }
+    puts("PASS: bounded ESP-NOW probes, rejection pacing, rollover, stale/malformed/duplicate correlation, cancellation and awake-only replies");
 }
 
 int main()
@@ -1978,7 +2075,7 @@ int main()
     testRssiDiagnostics();
     testProximitySamples(); testProximityTimeout(); testProximityCancellation(); testProximityIsolation();
     testAwakeWakeService();
-    testApplicationTransports();
+    testApplicationTransports(); testProximityProbes();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

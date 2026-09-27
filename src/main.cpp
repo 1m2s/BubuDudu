@@ -102,20 +102,43 @@ namespace
 
 #endif
 
+    uint16_t nextMessageId =
+        1;
+
+
+    enum class Transport : uint8_t { ESP_NOW, CC1101 };
+    Transport selectedTransport = Transport::ESP_NOW;
+    Transport pendingTransport = Transport::ESP_NOW;
+
     enum class ProximityUpdateState : uint8_t { READY, CHECKING };
     ProximityUpdateState proximityUpdateState = ProximityUpdateState::READY;
     struct ProximitySample { uint16_t messageId; int8_t rssi; };
     ProximitySample proximitySamples[3]{};
     uint8_t proximitySampleCount = 0;
     uint32_t checkStartedAt = 0;
-    // PROVISIONAL passive-sampling budget; physically evaluate traffic cadence.
+    // PROVISIONAL overall sampling budget; physically evaluate traffic cadence.
     constexpr uint32_t CHECK_TIMEOUT_MS = 12000;
+
+    constexpr uint32_t PROBE_REPLY_WAIT_MS = 500;
+    bool probeOutstanding = false;
+    bool probeTimerActive = false; // Also spaces attempts after immediate TX rejection.
+    uint16_t probeMessageId = 0;
+    uint32_t probeStartedAt = 0;
+
+    void resetProximityProbe()
+    {
+        probeOutstanding = false;
+        probeTimerActive = false;
+        probeMessageId = 0;
+        probeStartedAt = 0;
+    }
 
     void resetProximityCheck()
     {
         proximityUpdateState = ProximityUpdateState::READY;
         checkStartedAt = 0;
         proximitySampleCount = 0;
+        resetProximityProbe();
         for (auto& sample : proximitySamples) sample = {};
     }
 
@@ -157,6 +180,28 @@ namespace
         }
     }
 
+    void serviceProximityProbe(uint32_t now)
+    {
+        serviceProximityCheck(now);
+        if (selectedTransport != Transport::CC1101 ||
+            proximityUpdateState != ProximityUpdateState::CHECKING)
+        {
+            resetProximityProbe();
+            return;
+        }
+        if (probeTimerActive && uint32_t(now - probeStartedAt) < PROBE_REPLY_WAIT_MS)
+            return;
+
+        // Expiry abandons the old ID. A rejected send still consumes this opportunity.
+        resetProximityProbe();
+        const Protocol::Message probe{Protocol::VERSION, Protocol::MessageType::ProximityProbe,
+            nextMessageId++, LOCAL_DEVICE, Protocol::EventType::None, 0};
+        probeMessageId = probe.messageId;
+        probeStartedAt = now;
+        probeTimerActive = true;
+        probeOutstanding = ESPNowRadio::send(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe));
+    }
+
     void sampleProximity(const ESPNowRadio::RssiObservation& observation, uint32_t now)
     {
         serviceProximityCheck(now); // Hard timeout wins over a late-drained third sample.
@@ -169,10 +214,22 @@ namespace
         if (capturedAfterStart == 0 || capturedAfterStart >= CHECK_TIMEOUT_MS ||
             uint32_t(now - observation.receivedAt) >= 0x80000000UL)
             return;
+        if (selectedTransport == Transport::CC1101)
+        {
+            const auto& message = observation.message;
+            if (!probeOutstanding || message.version != Protocol::VERSION ||
+                message.type != Protocol::MessageType::ProximityProbeReply ||
+                message.event != Protocol::EventType::None ||
+                message.ackForMessageId != probeMessageId ||
+                uint32_t(now - probeStartedAt) >= PROBE_REPLY_WAIT_MS ||
+                uint32_t(observation.receivedAt - probeStartedAt) >= PROBE_REPLY_WAIT_MS)
+                return;
+        }
         // One peer uses a shared message-ID allocator for every packet type.
         // Retransmissions of that message remain one sample, even with changed RSSI.
         for (uint8_t i = 0; i < proximitySampleCount; ++i)
             if (proximitySamples[i].messageId == observation.message.messageId) return;
+        if (selectedTransport == Transport::CC1101) resetProximityProbe();
         proximitySamples[proximitySampleCount++] = {observation.message.messageId, observation.rssi};
         Serial.printf("PROXIMITY CHECK | SAMPLE | n=%u | rssi=%d dBm\n",
                       proximitySampleCount, static_cast<int>(observation.rssi));
@@ -227,13 +284,6 @@ namespace
     // Protocol state
     // ======================================================
 
-    uint16_t nextMessageId =
-        1;
-
-
-    enum class Transport : uint8_t { ESP_NOW, CC1101 };
-    Transport selectedTransport = Transport::ESP_NOW;
-    Transport pendingTransport = Transport::ESP_NOW;
     const char* transportName(Transport transport)
     { return transport == Transport::ESP_NOW ? "ESP-NOW" : "CC1101"; }
 
@@ -878,6 +928,24 @@ namespace
         }
 
 
+        if (message.type == Protocol::MessageType::ProximityProbe ||
+            message.type == Protocol::MessageType::ProximityProbeReply)
+        {
+            // ESP-NOW-only best effort; never enter application or sleep reliability.
+            if (transport != Transport::ESP_NOW || message.event != Protocol::EventType::None)
+                return;
+            // Replies are correlated solely by the RSSI observation's complete message.
+            if (message.type == Protocol::MessageType::ProximityProbeReply) return;
+            if (message.ackForMessageId != 0) return;
+            const auto state = PowerManager::localState();
+            if (state != PowerManager::LocalState::ACTIVE && state != PowerManager::LocalState::IDLE)
+                return;
+            const Protocol::Message reply{Protocol::VERSION, Protocol::MessageType::ProximityProbeReply,
+                nextMessageId++, LOCAL_DEVICE, Protocol::EventType::None, message.messageId};
+            (void)ESPNowRadio::send(reinterpret_cast<const uint8_t*>(&reply), sizeof(reply));
+            return;
+        }
+
         if (Protocol::isSleepControl(message.type))
         {
             if (transport != Transport::ESP_NOW) return;
@@ -1440,7 +1508,7 @@ void loop()
         Serial.println("MOVEMENT | SETTLED | state=READY");
         startProximityCheck(motionNow);
     }
-    serviceProximityCheck(uint32_t(millis()));
+    serviceProximityProbe(uint32_t(millis()));
 
     // Best-effort diagnostics only, after all normal protocol/sleep/motion work.
     // Never drain indefinitely or include this backlog in sleep-entry guards.
