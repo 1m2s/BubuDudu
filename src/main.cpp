@@ -115,6 +115,7 @@ namespace
     enum class ProximityClassification : uint8_t { UNKNOWN, CLOSE, FAR };
     ProximityClassification proximityClassification = ProximityClassification::UNKNOWN;
     bool automaticSelectionPending = false;
+    bool espNowFallbackPending = false;
     // PROVISIONAL conservative RSSI boundaries; these do not represent meters.
     constexpr int8_t ENTER_FAR_DBM = -80;
     constexpr int8_t ENTER_CLOSE_DBM = -75;
@@ -253,6 +254,7 @@ namespace
         else // UNKNOWN uses the same conservative FAR boundary as CLOSE.
             proximityClassification = b <= ENTER_FAR_DBM ? ProximityClassification::FAR : ProximityClassification::CLOSE;
         automaticSelectionPending = true; // Every completed median is fresh policy evidence.
+        espNowFallbackPending = false; // Fresh proximity evidence supersedes an older delivery failure.
         Serial.printf("PROXIMITY | median=%d dBm | %s\n", static_cast<int>(b),
                       proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE");
         resetProximityCheck();
@@ -1123,7 +1125,14 @@ namespace
             }
         }
         else
+        {
             PowerManager::notePeerUnreachable();
+            if (pendingMessage.type == Protocol::MessageType::Event && pendingTransport == Transport::ESP_NOW)
+            {
+                espNowFallbackPending = true; // The exhausted EVENT stays finished on its original radio.
+                automaticSelectionPending = false;
+            }
+        }
 
 
         nextEventTime =
@@ -1239,8 +1248,24 @@ namespace
         handleReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message), Transport::CC1101);
     }
 
+    bool applicationTransportPolicyBlocked()
+    {
+        return sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed() ||
+            proximityUpdateState == ProximityUpdateState::CHECKING;
+    }
+
     void serviceAutomaticTransportSelection()
     {
+        if (espNowFallbackPending)
+        {
+            if (applicationTransportPolicyBlocked()) return;
+            espNowFallbackPending = false;
+            automaticSelectionPending = false; // Defensive precedence if both requests are present.
+            if (selectedTransport == Transport::CC1101) return;
+            selectedTransport = Transport::CC1101;
+            Serial.println("APP TRANSPORT FALLBACK | selected=CC1101 | reason=ESP_NOW_EVENT_GIVE_UP");
+            return;
+        }
         if (!automaticSelectionPending) return;
         if (proximityClassification == ProximityClassification::UNKNOWN)
         {
@@ -1256,9 +1281,7 @@ namespace
         }
         // Same awake/drained boundary as manual selection, without refusal logs.
         // Also keep each proximity measurement on one sampling mode.
-        if (sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed() ||
-            proximityUpdateState == ProximityUpdateState::CHECKING)
-            return;
+        if (applicationTransportPolicyBlocked()) return;
         selectedTransport = target;
         automaticSelectionPending = false;
         Serial.printf("APP TRANSPORT AUTO | selected=%s | proximity=%s\n", transportName(selectedTransport),
@@ -1276,6 +1299,7 @@ namespace
         }
         selectedTransport = transport;
         automaticSelectionPending = false; // Manual choice lasts until the next completed measurement.
+        espNowFallbackPending = false;
         Serial.printf("APP TRANSPORT | selected=%s\n", transportName(selectedTransport));
     }
 
@@ -1385,6 +1409,7 @@ void setup()
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN; // RAM-only; no retained distance.
     automaticSelectionPending = false;
+    espNowFallbackPending = false;
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);

@@ -352,6 +352,7 @@ void freshApp()
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN;
     automaticSelectionPending = false;
+    espNowFallbackPending = false;
     rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
     if (receiveQueue) delete receiveQueue;
@@ -2181,6 +2182,35 @@ void completePolicyMeasurement(int8_t median)
     assert(automaticSelectionPending && selectedTransport == route);
 }
 
+Protocol::Message requestFallbackFromEvent()
+{
+    assert(selectedTransport == Transport::ESP_NOW && !waitingForAck);
+    const auto classification = proximityClassification;
+    startHeartbeatEvent();
+    const auto failed = pendingMessage;
+    mockedTxInFlight = 1; // Keep semantic exhaustion separate from actual transport drain.
+    for (unsigned attempt = 0; attempt <= MAX_RETRIES; ++attempt)
+    {
+        const auto began = ackWaitStart;
+        hostNow = began + ACK_TIMEOUT_MS - 1; loop();
+        assert(waitingForAck && retryCount == attempt && ackWaitStart == began && !espNowFallbackPending);
+        hostNow = began + ACK_TIMEOUT_MS; loop();
+        assert(selectedTransport == Transport::ESP_NOW && pendingTransport == Transport::ESP_NOW);
+        assert(memcmp(&pendingMessage, &failed, sizeof(failed)) == 0);
+        if (attempt < MAX_RETRIES)
+            assert(waitingForAck && retryCount == attempt + 1 && ackWaitStart == began + ACK_TIMEOUT_MS && !espNowFallbackPending);
+    }
+    unsigned attempts = 0;
+    for (const auto& packet : wire)
+        if (packet.type == Type::Event && packet.messageId == failed.messageId)
+        { ++attempts; assert(memcmp(&packet, &failed, sizeof(failed)) == 0); }
+    assert(attempts == 3 && ccWire.empty());
+    assert(!waitingForAck && retryCount == 0 && espNowFallbackPending && !automaticSelectionPending);
+    assert(peerState() == PeerState::OFFLINE && proximityClassification == classification);
+    assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+    return failed;
+}
+
 void testAutomaticSelection()
 {
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
@@ -2266,23 +2296,28 @@ void testAutomaticSelectionRetries()
         mockedTxInFlight = 1; // Semantic completion alone is not the drained switch boundary.
         if (acknowledged) receiveVia(incoming(Type::Ack, original.messageId), initial);
         else { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
-        assert(!waitingForAck && retryCount == 0 && automaticSelectionPending && selectedTransport == initial);
+        const bool fallback = !acknowledged && initial == Transport::ESP_NOW;
+        assert(!waitingForAck && retryCount == 0 && automaticSelectionPending == !fallback && selectedTransport == initial);
+        assert(espNowFallbackPending == fallback);
         assert(pendingTransport == initial && memcmp(&pendingMessage, &original, sizeof(original)) == 0);
         assert(peerState() == (acknowledged ? PeerState::ONLINE : PeerState::OFFLINE));
         mockedTxInFlight = 0; pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
         loop();
         assert(selectedTransport == target && pendingTransport == target && waitingForAck);
         assert(pendingMessage.messageId != original.messageId && !automaticSelectionPending);
-        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == (fallback ? 0U : 1U));
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == (fallback ? 1U : 0U));
     }
-    // Radio/ACK failures alone must never manufacture FAR or a policy request.
+    // Failures never manufacture FAR/classifier requests; only ESP-NOW exhaustion falls back.
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
     {
         freshApp(); selectedTransport = initial; radioAccepts = ccAccepts = false;
         startHeartbeatEvent();
         for (unsigned i = 0; i <= MAX_RETRIES; ++i) { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
         assert(peerState() == PeerState::OFFLINE && !waitingForAck && !automaticSelectionPending);
-        assert(proximityClassification == ProximityClassification::UNKNOWN && selectedTransport == initial);
+        assert(proximityClassification == ProximityClassification::UNKNOWN && selectedTransport == Transport::CC1101);
+        assert(!espNowFallbackPending);
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == (initial == Transport::ESP_NOW ? 1U : 0U));
         assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
     }
     puts("PASS: both pending EVENT routes and exact retries/ACK deadlines survive policy changes; ACK/drain or exhaustion/drain precedes selection");
@@ -2290,9 +2325,18 @@ void testAutomaticSelectionRetries()
 
 void testAutomaticSelectionGuards()
 {
+    for (bool fallback : {false, true})
     for (unsigned guard = 0; guard < 11; ++guard)
     {
-        freshApp(); completePolicyMeasurement(-85);
+        freshApp();
+        if (fallback)
+        {
+            requestFallbackFromEvent();
+            // Real peer evidence restores check eligibility; pending TX still holds fallback.
+            receive(proximityObservation(900, -50, hostNow).message);
+            mockedTxInFlight = 0;
+        }
+        else completePolicyMeasurement(-85);
         const auto savedQueue = receiveQueue;
         const auto packet = incoming(Type::Ack, 999);
         switch (guard)
@@ -2311,7 +2355,8 @@ void testAutomaticSelectionGuards()
         }
         const auto log = Serial.log;
         for (unsigned i = 0; i < 100; ++i) serviceAutomaticTransportSelection();
-        assert(automaticSelectionPending && selectedTransport == Transport::ESP_NOW && Serial.log == log);
+        assert(automaticSelectionPending == !fallback && espNowFallbackPending == fallback);
+        assert(selectedTransport == Transport::ESP_NOW && Serial.log == log);
         switch (guard)
         {
             case 0: protocolReady = true; break;
@@ -2327,12 +2372,12 @@ void testAutomaticSelectionGuards()
             case 10: cancelProximityCheck("TEST"); break; // Keeps the earlier valid request; creates no new one.
         }
         serviceAutomaticTransportSelection();
-        assert(selectedTransport == Transport::CC1101 && !automaticSelectionPending);
+        assert(selectedTransport == Transport::CC1101 && !automaticSelectionPending && !espNowFallbackPending);
         for (unsigned i = 0; i < 100; ++i) serviceAutomaticTransportSelection();
-        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+        assert(occurrences(Serial.log, fallback ? "APP TRANSPORT FALLBACK" : "APP TRANSPORT AUTO") == 1);
         assert(Serial.log.find("APP TRANSPORT | REFUSED") == std::string::npos);
     }
-    puts("PASS: every automatic switch guard, including CHECKING, defers silently and applies once after draining");
+    puts("PASS: classifier and fallback share every awake/drained/CHECKING guard, wait silently and apply once");
 }
 
 void testAutomaticSelectionManual()
@@ -2365,19 +2410,24 @@ void testAutomaticSelectionManual()
 
 void testAutomaticSelectionSleep()
 {
-    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    // CLOSE/FAR requests from either radio, plus an exhausted ESP-NOW EVENT's fallback.
+    for (unsigned request = 0; request < 3; ++request)
     for (bool wakeInstead : {false, true})
     {
+        const bool fallback = request == 2;
+        const auto initial = request == 1 ? Transport::CC1101 : Transport::ESP_NOW;
         freshApp(); selectedTransport = initial;
-        completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
-        mockedTxInFlight = 1; // Hold the completed measurement's TX while requesting sleep.
+        if (fallback) requestFallbackFromEvent();
+        else completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
+        mockedTxInFlight = 1; // Hold the previous TX while requesting sleep.
         command('i'); command('s');
         const auto id = transaction().sleepId;
         const auto phaseDeadline = transaction().phaseDeadline, hardDeadline = transaction().hardDeadline;
         mockedTxInFlight = 0;
         for (unsigned i = 0; i < 10; ++i) loop();
         assert(transaction().phaseDeadline == phaseDeadline && transaction().hardDeadline == hardDeadline);
-        assert(localState() == LocalState::SLEEP_NEGOTIATING && selectedTransport == initial && automaticSelectionPending);
+        assert(localState() == LocalState::SLEEP_NEGOTIATING && selectedTransport == initial);
+        assert(automaticSelectionPending == !fallback && espNowFallbackPending == fallback);
         assert(pendingMessage.type == Type::SleepRequest && pendingTransport == Transport::ESP_NOW);
         receive(incoming(Type::Ack, pendingMessage.messageId));
         receive(incoming(Type::SleepReady, id));
@@ -2385,27 +2435,144 @@ void testAutomaticSelectionSleep()
         receive(incoming(Type::Ack, pendingMessage.messageId));
         mockedTxInFlight = 1;
         receive(incoming(Type::SleepAck, id));
-        assert(localState() == LocalState::SLEEPING && automaticSelectionPending && physicalSleeps == 0);
+        assert(localState() == LocalState::SLEEPING && physicalSleeps == 0);
+        assert(automaticSelectionPending == !fallback && espNowFallbackPending == fallback);
         assert(selectedTransport == initial && ccWire.empty());
         assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+        assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
         mockedTxInFlight = 0;
         if (wakeInstead)
         {
             PowerManager::injectActivity(hostNow);
-            loop(); assert(localState() == LocalState::WAKING && selectedTransport == initial && automaticSelectionPending);
+            loop(); assert(localState() == LocalState::WAKING && selectedTransport == initial);
+            assert(automaticSelectionPending == !fallback && espNowFallbackPending == fallback);
             hostNow += 250; loop();
             assert(localState() == LocalState::ACTIVE && selectedTransport != initial && !automaticSelectionPending);
+            assert(!espNowFallbackPending);
         }
         else
         {
             assert(sleepTransportBlockedReason() == nullptr); // Pending policy is not a sleep blocker.
-            loop(); assert(physicalSleeps == 1 && selectedTransport == initial && automaticSelectionPending);
+            loop(); assert(physicalSleeps == 1 && selectedTransport == initial);
+            assert(automaticSelectionPending == !fallback && espNowFallbackPending == fallback);
             protocolReady = false; injectedBoot.deep = true; setup();
             assert(rtcRestored && proximityClassification == ProximityClassification::UNKNOWN);
-            assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending);
+            assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending && !espNowFallbackPending);
         }
     }
-    puts("PASS: policy waits through negotiation/SLEEPING/WAKING, sleep routes/deadlines and physical entry preserved, reboot clears all policy state");
+    puts("PASS: classifier/fallback wait through negotiation/SLEEPING/WAKING without changing sleep routes/deadlines or blocking physical entry; reboot clears both");
+}
+
+void testEspNowFallback()
+{
+    using Class = ProximityClassification;
+    for (auto classification : {Class::UNKNOWN, Class::CLOSE, Class::FAR})
+    for (bool accepted : {false, true})
+    {
+        freshApp();
+        if (classification != Class::UNKNOWN)
+        {
+            completePolicyMeasurement(classification == Class::CLOSE ? -50 : -85);
+            command('e'); // Includes the FAR-but-manually-ESP-NOW case.
+        }
+        radioAccepts = accepted;
+        const auto failed = requestFallbackFromEvent();
+        const auto nextEvent = nextEventTime, ackStart = ackWaitStart;
+        for (unsigned i = 0; i < 100; ++i) loop();
+        assert(espNowFallbackPending && selectedTransport == Transport::ESP_NOW);
+        assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") == std::string::npos);
+        mockedTxInFlight = 0; loop();
+        assert(selectedTransport == Transport::CC1101 && !espNowFallbackPending && !automaticSelectionPending);
+        assert(peerState() == PeerState::OFFLINE && proximityClassification == classification);
+        assert(!waitingForAck && retryCount == 0 && pendingTransport == Transport::ESP_NOW);
+        assert(memcmp(&pendingMessage, &failed, sizeof(failed)) == 0 && ackWaitStart == ackStart && nextEventTime == nextEvent);
+        assert(ccWire.empty()); // Applying fallback did not replay the failed EVENT.
+        for (unsigned i = 0; i < 20; ++i) loop();
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK | selected=CC1101 | reason=ESP_NOW_EVENT_GIVE_UP") == 1);
+        startHeartbeatEvent();
+        assert(pendingTransport == Transport::CC1101 && pendingMessage.messageId != failed.messageId);
+        for (unsigned i = 0; i <= MAX_RETRIES; ++i) { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
+        assert(!waitingForAck && !espNowFallbackPending && selectedTransport == Transport::CC1101);
+        assert(proximityClassification == classification && peerState() == PeerState::OFFLINE);
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == 1); // No failure ping-pong.
+    }
+    // A reliable sleep control also uses ESP-NOW, but its exhaustion must not request fallback.
+    freshApp(); command('i'); command('s');
+    for (unsigned i = 0; i <= MAX_RETRIES; ++i) { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
+    assert(!espNowFallbackPending && selectedTransport == Transport::ESP_NOW);
+    assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+    puts("PASS: UNKNOWN/CLOSE/FAR preserved across ESP-NOW GIVE_UP, identical three attempts, callback drain, one fallback, new CC1101 EVENT only; no CC1101/sleep-control fallback");
+}
+
+void testFallbackPrecedenceAndManual()
+{
+    for (int8_t median : {int8_t(-50), int8_t(-85)})
+    {
+        freshApp(); requestFallbackFromEvent();
+        // OFFLINE otherwise prevents measurements. An actual incoming EVENT restores ONLINE.
+        receiveVia(proximityObservation(901, -50, hostNow).message, Transport::CC1101);
+        assert(peerState() == PeerState::ONLINE && espNowFallbackPending);
+        completePolicyMeasurement(median);
+        assert(!espNowFallbackPending && automaticSelectionPending);
+        mockedTxInFlight = 0; loop();
+        assert(selectedTransport == (median == -50 ? Transport::ESP_NOW : Transport::CC1101));
+        assert(!automaticSelectionPending && Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+    }
+    freshApp(); completePolicyMeasurement(-85); assert(automaticSelectionPending);
+    requestFallbackFromEvent();
+    assert(!automaticSelectionPending && espNowFallbackPending && proximityClassification == ProximityClassification::FAR);
+    mockedTxInFlight = 0; loop();
+    assert(selectedTransport == Transport::CC1101 && occurrences(Serial.log, "APP TRANSPORT FALLBACK") == 1);
+    assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+
+    for (bool alreadyCc1101 : {false, true})
+    {
+        freshApp(); completePolicyMeasurement(-50); command('e'); requestFallbackFromEvent();
+        automaticSelectionPending = true; // Defensive conflicting flags: fallback wins, without later bouncing to CLOSE's ESP-NOW.
+        if (alreadyCc1101) selectedTransport = Transport::CC1101;
+        serviceAutomaticTransportSelection(); assert(espNowFallbackPending && automaticSelectionPending);
+        mockedTxInFlight = 0; loop(); loop();
+        assert(selectedTransport == Transport::CC1101 && !espNowFallbackPending && !automaticSelectionPending);
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == (alreadyCc1101 ? 0U : 1U));
+        assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+    }
+    for (char manual : {'e', 'c'})
+    {
+        freshApp(); requestFallbackFromEvent(); automaticSelectionPending = true;
+        command(manual); // TX still outstanding: refusal must preserve both flags.
+        assert(espNowFallbackPending && automaticSelectionPending && selectedTransport == Transport::ESP_NOW);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
+        mockedTxInFlight = 0; command(manual);
+        assert(!espNowFallbackPending && !automaticSelectionPending);
+        assert(selectedTransport == (manual == 'e' ? Transport::ESP_NOW : Transport::CC1101));
+        assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+    }
+    puts("PASS: fresh valid median supersedes fallback, newer ESP-NOW exhaustion supersedes classifier intent, defensive fallback priority and manual success/refusal semantics");
+}
+
+void testFallbackRecovery()
+{
+    freshApp(); const auto failed = requestFallbackFromEvent();
+    mockedTxInFlight = 0; loop();
+    assert(selectedTransport == Transport::CC1101 && peerState() == PeerState::OFFLINE);
+    assert(proximityClassification == ProximityClassification::UNKNOWN);
+    pauseAutomaticHeartbeats = false; hostNow = nextEventTime; loop();
+    const auto recovery = pendingMessage;
+    assert(waitingForAck && pendingTransport == Transport::CC1101 && recovery.messageId != failed.messageId);
+    assert(ccWire.size() == 1 && memcmp(&ccWire.back(), &recovery, sizeof(recovery)) == 0);
+    receiveVia(incoming(Type::Ack, recovery.messageId), Transport::CC1101);
+    assert(!waitingForAck && peerState() == PeerState::ONLINE);
+    assert(proximityClassification == ProximityClassification::UNKNOWN);
+    pauseAutomaticHeartbeats = true;
+    completeClassifiedMeasurement(-50); // Real settle path and matched ESP-NOW probe observations in CC1101 mode.
+    assert(countWire(Type::ProximityProbe) == 3 && proximityClassification == ProximityClassification::CLOSE);
+    assert(automaticSelectionPending && !espNowFallbackPending);
+    loop(); assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending);
+    startHeartbeatEvent(); assert(pendingTransport == Transport::ESP_NOW);
+    receive(incoming(Type::Ack, pendingMessage.messageId)); assert(!waitingForAck && peerState() == PeerState::ONLINE);
+    assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == 1 && occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+    puts("PASS: ESP-NOW exhaustion -> CC1101 fallback -> real CC1101 ACK restores ONLINE -> settled CLOSE probe median -> ESP-NOW EVENT/ACK, without fake FAR");
 }
 
 int main()
@@ -2426,6 +2593,7 @@ int main()
     testProximityClassification();
     testAutomaticSelection(); testAutomaticSelectionRetries(); testAutomaticSelectionGuards();
     testAutomaticSelectionManual(); testAutomaticSelectionSleep();
+    testEspNowFallback(); testFallbackPrecedenceAndManual(); testFallbackRecovery();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);
