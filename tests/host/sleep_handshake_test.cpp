@@ -351,6 +351,7 @@ void freshApp()
     ccWire.clear(); ccIncoming.clear(); ccAccepts = true; ccHoldTx = false;
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN;
+    automaticSelectionPending = false;
     rssiObservations.clear(); rssiReads = 0; refillRssi = false;
     resetMovement();
     if (receiveQueue) delete receiveQueue;
@@ -1970,6 +1971,7 @@ void testApplicationTransports()
     assertProximityReset(); assert(Serial.log.find("median=-51 dBm") != std::string::npos);
     assert(countWire(Type::ProximityProbe) == 3 && !waitingForAck);
     assert(selectedTransport == Transport::CC1101 && ccWire.empty());
+    command('c'); // Preserve the bench route after the completed CLOSE measurement.
     command('x'); assert(benchSleepCalls == 1 && motionCancels == 1);
     startHeartbeatEvent(); assert(ccWire.size() == 1); // Aborted bench entry resumes runtime.
     freshApp(); command('c'); ccAccepts = false; startHeartbeatEvent();
@@ -2080,6 +2082,7 @@ void classificationSample(uint16_t id, int8_t rssi)
 
 void completeClassifiedMeasurement(int8_t median)
 {
+    serviceAutomaticTransportSelection(); // Apply any previous completed measurement before starting this one.
     const auto prior = proximityClassification;
     const auto logs = occurrences(Serial.log, "PROXIMITY | median=");
     const auto selected = selectedTransport, pendingRoute = pendingTransport;
@@ -2095,6 +2098,7 @@ void completeClassifiedMeasurement(int8_t median)
     assert(occurrences(Serial.log, "PROXIMITY | median=") == logs);
     classificationSample(502, -40); // Classification must use the median, not this last raw sample.
     assertProximityReset();
+    assert(automaticSelectionPending); // Application selection is deliberately deferred until the next loop.
     assert(occurrences(Serial.log, "PROXIMITY | median=") == logs + 1);
     const std::string label = proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE";
     assert(Serial.log.find("PROXIMITY | median=" + std::to_string(median) + " dBm | " + label) != std::string::npos);
@@ -2123,10 +2127,11 @@ void testProximityClassification()
             assert(proximityClassification == Class::UNKNOWN);
             // Raw observations outside CHECKING do not invent an initial distance.
             rssiObservations.push_back(proximityObservation(99, -100, hostNow));
-            loop(); assert(proximityClassification == Class::UNKNOWN);
+            loop(); assert(proximityClassification == Class::UNKNOWN && !automaticSelectionPending);
             if (test.prior != Class::UNKNOWN)
                 completeClassifiedMeasurement(test.prior == Class::FAR ? -85 : -50);
             assert(proximityClassification == test.prior);
+            selectApplicationTransport(transport); // Exercise each sampling mode independently of prior policy.
             completeClassifiedMeasurement(test.median);
             assert(proximityClassification == test.expected);
         }
@@ -2136,6 +2141,7 @@ void testProximityClassification()
         {
             freshApp(); selectedTransport = transport;
             if (prior != Class::UNKNOWN) completeClassifiedMeasurement(prior == Class::FAR ? -85 : -50);
+            selectApplicationTransport(transport); // Consume prior policy; failures must not request new policy.
             const auto logs = occurrences(Serial.log, "PROXIMITY | median=");
             if (timeout && samples == 0) radioAccepts = false; // Failed probes also retain the prior state.
             settleForCheck(hostNow + 2000);
@@ -2144,19 +2150,262 @@ void testProximityClassification()
             {
                 classificationSample(600 + i, prior == Class::FAR ? -40 : -100);
                 assert(proximitySampleCount == i + 1 && proximityClassification == prior);
+                assert(!automaticSelectionPending);
             }
             if (timeout) movementStep(began + CHECK_TIMEOUT_MS);
             else movementStep(hostNow + 10, MotionEvent::Activity);
             assertProximityReset();
             assert(proximityClassification == prior && occurrences(Serial.log, "PROXIMITY | median=") == logs);
+            assert(!automaticSelectionPending && selectedTransport == transport);
         }
     }
     // A reboot starts UNKNOWN even when RTC history is restored.
     freshApp(); completeClassifiedMeasurement(-85); saveRtcHistory();
     protocolReady = false; injectedBoot.deep = true; setup();
     assert(rtcRestored && proximityClassification == Class::UNKNOWN);
+    assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending);
     puts("PASS: UNKNOWN initialization, conservative CLOSE/FAR boundaries, full hysteresis band and median-only updates on both transports");
     puts("PASS: raw/partial/failed/cancelled/timeout checks retain classification, transport/reliability/power isolation, RAM-only reboot reset");
+}
+
+// Complete real accepted samples within one application ACK interval. Movement
+// settling is covered separately; keeping this short permits live retry tests.
+void completePolicyMeasurement(int8_t median)
+{
+    const auto route = selectedTransport;
+    startProximityCheck(hostNow);
+    classificationSample(700, -100);
+    classificationSample(701, median);
+    classificationSample(702, -40);
+    assertProximityReset();
+    assert(automaticSelectionPending && selectedTransport == route);
+}
+
+void testAutomaticSelection()
+{
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); command(initial == Transport::ESP_NOW ? 'e' : 'c');
+        for (unsigned i = 0; i < 20; ++i) loop();
+        assert(proximityClassification == ProximityClassification::UNKNOWN && selectedTransport == initial);
+        assert(!automaticSelectionPending && Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+        automaticSelectionPending = true; // Defensive UNKNOWN service path.
+        serviceAutomaticTransportSelection();
+        assert(!automaticSelectionPending && selectedTransport == initial);
+
+        const auto target = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
+        completePolicyMeasurement(target == Transport::CC1101 ? -85 : -50);
+        const auto pending = pendingMessage; const auto pendingRoute = pendingTransport;
+        const auto ackStart = ackWaitStart; const auto id = nextMessageId;
+        // IDLE is also a safe application state, without starting negotiation.
+        if (initial == Transport::CC1101) PowerManager::forceIdle(hostNow);
+        loop();
+        assert(selectedTransport == target && !automaticSelectionPending);
+        assert(pendingTransport == pendingRoute && memcmp(&pendingMessage, &pending, sizeof(pending)) == 0);
+        assert(!waitingForAck && retryCount == 0 && ackWaitStart == ackStart && nextMessageId == id);
+        const std::string expected = target == Transport::CC1101 ?
+            "APP TRANSPORT AUTO | selected=CC1101 | proximity=FAR" :
+            "APP TRANSPORT AUTO | selected=ESP-NOW | proximity=CLOSE";
+        assert(occurrences(Serial.log, expected) == 1);
+        for (unsigned i = 0; i < 20; ++i) loop();
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+        pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+        loop(); // Service runs before a due automatic EVENT, which snapshots the applied selection.
+        assert(waitingForAck && pendingTransport == target);
+        const auto& sent = target == Transport::ESP_NOW ? wire : ccWire;
+        assert(sent.back().type == Type::Event && sent.back().messageId == pendingMessage.messageId);
+    }
+    // Repeated valid measurements matching the applied route clear silently.
+    freshApp(); completePolicyMeasurement(-50); loop();
+    completePolicyMeasurement(-50); loop();
+    assert(!automaticSelectionPending && Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+
+    // The newer completed classification replaces the older intent while busy.
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); selectedTransport = initial; mockedTxInFlight = 1;
+        completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
+        completePolicyMeasurement(initial == Transport::ESP_NOW ? -50 : -85);
+        mockedTxInFlight = 0; loop();
+        assert(selectedTransport == initial && !automaticSelectionPending);
+        assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+    }
+    puts("PASS: UNKNOWN no-op, CLOSE/FAR future EVENT routes, one-loop application, latest completed classification and silent matching policy");
+}
+
+void testAutomaticSelectionRetries()
+{
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool acknowledged : {false, true})
+    {
+        freshApp(); selectedTransport = initial; startHeartbeatEvent();
+        const auto original = pendingMessage; const auto began = ackWaitStart;
+        const auto target = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
+        completePolicyMeasurement(target == Transport::CC1101 ? -85 : -50);
+        assert(waitingForAck && pendingTransport == initial && retryCount == 0 && ackWaitStart == began);
+        assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
+        receiveVia(incoming(Type::Ack, original.messageId), target); // Wrong radio cannot finish the EVENT.
+        assert(waitingForAck && automaticSelectionPending && selectedTransport == initial);
+        hostNow = began + ACK_TIMEOUT_MS - 1; loop(); assert(retryCount == 0 && ackWaitStart == began);
+        for (unsigned retry = 1; retry <= MAX_RETRIES; ++retry)
+        {
+            const auto due = ackWaitStart + ACK_TIMEOUT_MS;
+            hostNow = due; loop();
+            assert(retryCount == retry && ackWaitStart == due && pendingTransport == initial);
+            assert(selectedTransport == initial && automaticSelectionPending);
+            assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
+        }
+        const auto& sent = initial == Transport::ESP_NOW ? wire : ccWire;
+        unsigned events = 0;
+        for (const auto& packet : sent)
+            if (packet.type == Type::Event) { ++events; assert(memcmp(&packet, &original, sizeof(original)) == 0); }
+        assert(events == 3);
+        const auto& other = initial == Transport::ESP_NOW ? ccWire : wire;
+        for (const auto& packet : other) assert(packet.type != Type::Event);
+
+        mockedTxInFlight = 1; // Semantic completion alone is not the drained switch boundary.
+        if (acknowledged) receiveVia(incoming(Type::Ack, original.messageId), initial);
+        else { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
+        assert(!waitingForAck && retryCount == 0 && automaticSelectionPending && selectedTransport == initial);
+        assert(pendingTransport == initial && memcmp(&pendingMessage, &original, sizeof(original)) == 0);
+        assert(peerState() == (acknowledged ? PeerState::ONLINE : PeerState::OFFLINE));
+        mockedTxInFlight = 0; pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+        loop();
+        assert(selectedTransport == target && pendingTransport == target && waitingForAck);
+        assert(pendingMessage.messageId != original.messageId && !automaticSelectionPending);
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+    }
+    // Radio/ACK failures alone must never manufacture FAR or a policy request.
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); selectedTransport = initial; radioAccepts = ccAccepts = false;
+        startHeartbeatEvent();
+        for (unsigned i = 0; i <= MAX_RETRIES; ++i) { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
+        assert(peerState() == PeerState::OFFLINE && !waitingForAck && !automaticSelectionPending);
+        assert(proximityClassification == ProximityClassification::UNKNOWN && selectedTransport == initial);
+        assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+    }
+    puts("PASS: both pending EVENT routes and exact retries/ACK deadlines survive policy changes; ACK/drain or exhaustion/drain precedes selection");
+}
+
+void testAutomaticSelectionGuards()
+{
+    for (unsigned guard = 0; guard < 11; ++guard)
+    {
+        freshApp(); completePolicyMeasurement(-85);
+        const auto savedQueue = receiveQueue;
+        const auto packet = incoming(Type::Ack, 999);
+        switch (guard)
+        {
+            case 0: protocolReady = false; break;
+            case 1: startHeartbeatEvent(); break;
+            case 2: controlCount = 1; break;
+            case 3: PowerManager::forceIdle(hostNow); PowerManager::requestSleep(nextMessageId++, hostNow); break;
+            case 4: sleepDrainWaiting = true; break;
+            case 5: awakeAckBusy = true; break;
+            case 6: mockedTxInFlight = 1; break;
+            case 7: mockedRxActive = true; break;
+            case 8: receiveQueue = nullptr; break;
+            case 9: queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet)); break;
+            case 10: startProximityCheck(hostNow); break;
+        }
+        const auto log = Serial.log;
+        for (unsigned i = 0; i < 100; ++i) serviceAutomaticTransportSelection();
+        assert(automaticSelectionPending && selectedTransport == Transport::ESP_NOW && Serial.log == log);
+        switch (guard)
+        {
+            case 0: protocolReady = true; break;
+            case 1: handleAck(incoming(Type::Ack, pendingMessage.messageId), Transport::ESP_NOW); break;
+            case 2: controlCount = 0; break;
+            case 3: PowerManager::injectActivity(hostNow); discardObsoleteControls(); break;
+            case 4: sleepDrainWaiting = false; break;
+            case 5: awakeAckBusy = false; break;
+            case 6: mockedTxInFlight = 0; break;
+            case 7: mockedRxActive = false; break;
+            case 8: receiveQueue = savedQueue; break;
+            case 9: { Protocol::Message out{}; assert(xQueueReceive(receiveQueue, &out, 0) == pdPASS); break; }
+            case 10: cancelProximityCheck("TEST"); break; // Keeps the earlier valid request; creates no new one.
+        }
+        serviceAutomaticTransportSelection();
+        assert(selectedTransport == Transport::CC1101 && !automaticSelectionPending);
+        for (unsigned i = 0; i < 100; ++i) serviceAutomaticTransportSelection();
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") == std::string::npos);
+    }
+    puts("PASS: every automatic switch guard, including CHECKING, defers silently and applies once after draining");
+}
+
+void testAutomaticSelectionManual()
+{
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); selectedTransport = initial;
+        const int8_t median = initial == Transport::ESP_NOW ? -50 : -85;
+        completePolicyMeasurement(median);
+        const auto manual = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
+        command(manual == Transport::CC1101 ? 'c' : 'e');
+        assert(selectedTransport == manual && !automaticSelectionPending);
+        for (unsigned i = 0; i < 20; ++i) loop();
+        assert(selectedTransport == manual && Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+        completePolicyMeasurement(median); // Same label, but fresh evidence overrides the successful manual choice.
+        loop(); assert(selectedTransport == initial && !automaticSelectionPending);
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+
+        freshApp(); selectedTransport = initial;
+        completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
+        startHeartbeatEvent(); const auto event = pendingMessage;
+        command(manual == Transport::CC1101 ? 'c' : 'e');
+        assert(selectedTransport == initial && automaticSelectionPending && waitingForAck);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
+        receiveVia(incoming(Type::Ack, event.messageId), initial);
+        assert(selectedTransport == manual && !automaticSelectionPending);
+    }
+    puts("PASS: successful e/c consumes pending policy until the next completed median; refused e/c preserves it");
+}
+
+void testAutomaticSelectionSleep()
+{
+    for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool wakeInstead : {false, true})
+    {
+        freshApp(); selectedTransport = initial;
+        completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
+        mockedTxInFlight = 1; // Hold the completed measurement's TX while requesting sleep.
+        command('i'); command('s');
+        const auto id = transaction().sleepId;
+        const auto phaseDeadline = transaction().phaseDeadline, hardDeadline = transaction().hardDeadline;
+        mockedTxInFlight = 0;
+        for (unsigned i = 0; i < 10; ++i) loop();
+        assert(transaction().phaseDeadline == phaseDeadline && transaction().hardDeadline == hardDeadline);
+        assert(localState() == LocalState::SLEEP_NEGOTIATING && selectedTransport == initial && automaticSelectionPending);
+        assert(pendingMessage.type == Type::SleepRequest && pendingTransport == Transport::ESP_NOW);
+        receive(incoming(Type::Ack, pendingMessage.messageId));
+        receive(incoming(Type::SleepReady, id));
+        assert(pendingMessage.type == Type::SleepCommit && pendingTransport == Transport::ESP_NOW);
+        receive(incoming(Type::Ack, pendingMessage.messageId));
+        mockedTxInFlight = 1;
+        receive(incoming(Type::SleepAck, id));
+        assert(localState() == LocalState::SLEEPING && automaticSelectionPending && physicalSleeps == 0);
+        assert(selectedTransport == initial && ccWire.empty());
+        assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
+        mockedTxInFlight = 0;
+        if (wakeInstead)
+        {
+            PowerManager::injectActivity(hostNow);
+            loop(); assert(localState() == LocalState::WAKING && selectedTransport == initial && automaticSelectionPending);
+            hostNow += 250; loop();
+            assert(localState() == LocalState::ACTIVE && selectedTransport != initial && !automaticSelectionPending);
+        }
+        else
+        {
+            assert(sleepTransportBlockedReason() == nullptr); // Pending policy is not a sleep blocker.
+            loop(); assert(physicalSleeps == 1 && selectedTransport == initial && automaticSelectionPending);
+            protocolReady = false; injectedBoot.deep = true; setup();
+            assert(rtcRestored && proximityClassification == ProximityClassification::UNKNOWN);
+            assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending);
+        }
+    }
+    puts("PASS: policy waits through negotiation/SLEEPING/WAKING, sleep routes/deadlines and physical entry preserved, reboot clears all policy state");
 }
 
 int main()
@@ -2175,6 +2424,8 @@ int main()
     testAwakeWakeService();
     testApplicationTransports(); testProximityProbes();
     testProximityClassification();
+    testAutomaticSelection(); testAutomaticSelectionRetries(); testAutomaticSelectionGuards();
+    testAutomaticSelectionManual(); testAutomaticSelectionSleep();
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

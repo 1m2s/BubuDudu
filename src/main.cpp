@@ -114,6 +114,7 @@ namespace
     ProximityUpdateState proximityUpdateState = ProximityUpdateState::READY;
     enum class ProximityClassification : uint8_t { UNKNOWN, CLOSE, FAR };
     ProximityClassification proximityClassification = ProximityClassification::UNKNOWN;
+    bool automaticSelectionPending = false;
     // PROVISIONAL conservative RSSI boundaries; these do not represent meters.
     constexpr int8_t ENTER_FAR_DBM = -80;
     constexpr int8_t ENTER_CLOSE_DBM = -75;
@@ -251,6 +252,7 @@ namespace
         }
         else // UNKNOWN uses the same conservative FAR boundary as CLOSE.
             proximityClassification = b <= ENTER_FAR_DBM ? ProximityClassification::FAR : ProximityClassification::CLOSE;
+        automaticSelectionPending = true; // Every completed median is fresh policy evidence.
         Serial.printf("PROXIMITY | median=%d dBm | %s\n", static_cast<int>(b),
                       proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE");
         resetProximityCheck();
@@ -1237,6 +1239,32 @@ namespace
         handleReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message), Transport::CC1101);
     }
 
+    void serviceAutomaticTransportSelection()
+    {
+        if (!automaticSelectionPending) return;
+        if (proximityClassification == ProximityClassification::UNKNOWN)
+        {
+            automaticSelectionPending = false;
+            return;
+        }
+        const Transport target = proximityClassification == ProximityClassification::CLOSE ?
+            Transport::ESP_NOW : Transport::CC1101;
+        if (target == selectedTransport)
+        {
+            automaticSelectionPending = false;
+            return;
+        }
+        // Same awake/drained boundary as manual selection, without refusal logs.
+        // Also keep each proximity measurement on one sampling mode.
+        if (sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed() ||
+            proximityUpdateState == ProximityUpdateState::CHECKING)
+            return;
+        selectedTransport = target;
+        automaticSelectionPending = false;
+        Serial.printf("APP TRANSPORT AUTO | selected=%s | proximity=%s\n", transportName(selectedTransport),
+                      proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE");
+    }
+
     void selectApplicationTransport(Transport transport)
     {
         // Single loop owner: no command can run inside synchronous wake TX or
@@ -1247,6 +1275,7 @@ namespace
             return;
         }
         selectedTransport = transport;
+        automaticSelectionPending = false; // Manual choice lasts until the next completed measurement.
         Serial.printf("APP TRANSPORT | selected=%s\n", transportName(selectedTransport));
     }
 
@@ -1355,6 +1384,7 @@ void setup()
     resetMovement(); // Startup sensor history is not a fresh awake movement.
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN; // RAM-only; no retained distance.
+    automaticSelectionPending = false;
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
@@ -1485,6 +1515,7 @@ void loop()
 
     // Physical execution is separate from semantic agreement.
     serviceSleepExecution();
+    serviceAutomaticTransportSelection(); // Apply policy before the next EVENT snapshots its transport.
 
 
     // ------------------------------------------------------
