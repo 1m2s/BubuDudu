@@ -13,8 +13,10 @@ public:
 
     void showStatus(
         const char* deviceName,
-        bool active,
-        bool motionWake
+        const char* peer,
+        const char* distance,
+        const char* radio,
+        const char* state
     );
 
 

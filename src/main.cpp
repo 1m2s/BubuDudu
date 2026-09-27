@@ -13,6 +13,7 @@
 #include "CC1101WakeRecovery.h"
 #include "CC1101WakeTx.h"
 #include "Motion.h"
+#include "Display.h"
 
 void saveRtcHistory();
 bool restoreRtcHistory();
@@ -21,6 +22,17 @@ bool restoreRtcHistory();
 namespace
 {
     Motion motion;
+    Display display;
+    bool displayReady = false;
+    // Presentation strings only; update this snapshot AFTER a safe redraw.
+    struct DisplaySnapshot
+    {
+        const char* peer;
+        const char* distance;
+        const char* radio;
+        const char* state;
+    };
+    DisplaySnapshot displayedStatus{};
 
     enum class MovementState : uint8_t { READY, MOVING, WAITING };
     MovementState movementState = MovementState::READY;
@@ -870,6 +882,13 @@ namespace
     }
 
 
+    void startPeerReturnProximityCheck(PowerManager::PeerState previousPeer)
+    {
+        if (previousPeer == PowerManager::PeerState::OFFLINE &&
+            PowerManager::peerState() == PowerManager::PeerState::ONLINE && selectedTransport == Transport::CC1101)
+            startProximityCheck(uint32_t(millis())); // Existing guards and loop-owned probes remain authoritative.
+    }
+
     void handleReceivedData(
         const uint8_t* data,
         size_t length, Transport transport = Transport::ESP_NOW
@@ -986,6 +1005,8 @@ namespace
         }
 
         // Dispatch existing EVENT / receipt ACK without changing wire behavior.
+        // A new EVENT can mark ONLINE inside handleEvent(), before notePeerSeen().
+        const auto previousPeer = PowerManager::peerState();
 
         switch (
             message.type
@@ -993,16 +1014,19 @@ namespace
         {
             case Protocol::MessageType::Event:
 
+                if (message.event != Protocol::EventType::Heartbeat || message.ackForMessageId != 0) break;
                 handleEvent(
                     message, true, transport
                 );
                 PowerManager::notePeerSeen();
+                startPeerReturnProximityCheck(previousPeer);
 
                 break;
 
 
             case Protocol::MessageType::Ack:
             {
+                if (message.event != Protocol::EventType::None) break;
                 const bool heartbeatAcknowledged = waitingForAck && transport == pendingTransport &&
                     pendingMessage.type == Protocol::MessageType::Event &&
                     message.ackForMessageId == pendingMessage.messageId;
@@ -1012,7 +1036,10 @@ namespace
                 // A late receipt for COMMIT/CANCEL does not resolve uncertainty
                 // about the peer's semantic sleep state.
                 if (heartbeatAcknowledged)
+                {
                     PowerManager::notePeerSeen();
+                    startPeerReturnProximityCheck(previousPeer);
+                }
 
                 break;
             }
@@ -1303,6 +1330,48 @@ namespace
         Serial.printf("APP TRANSPORT | selected=%s\n", transportName(selectedTransport));
     }
 
+    const char* displayPeerName(PowerManager::PeerState peer)
+    {
+        if (peer == PowerManager::PeerState::SLEEP_PENDING || peer == PowerManager::PeerState::SLEEPING)
+            return "SLEEP";
+        return PowerManager::toString(peer);
+    }
+
+    const char* displayDistanceName()
+    {
+        if (proximityUpdateState == ProximityUpdateState::CHECKING) return "CHECKING";
+        switch (proximityClassification)
+        {
+            case ProximityClassification::CLOSE: return "CLOSE";
+            case ProximityClassification::FAR: return "FAR";
+            default: return "UNKNOWN";
+        }
+    }
+
+    const char* displayStateName(PowerManager::LocalState state)
+    {
+        if (state == PowerManager::LocalState::SLEEP_NEGOTIATING) return "SLEEP NEG";
+        if (state == PowerManager::LocalState::SLEEPING) return "SLEEP";
+        return PowerManager::toString(state);
+    }
+
+    void serviceDisplayStatus()
+    {
+        // No framebuffer transfer during protocol deadlines, sleep transitions
+        // or an outstanding probe reply. Passive CHECKING may be shown when idle.
+        if (!displayReady || sleepTransportBlockedReason() || sleepDrainWaiting ||
+            !PowerManager::automaticHeartbeatAllowed() || probeOutstanding)
+            return;
+        const DisplaySnapshot current{displayPeerName(PowerManager::peerState()), displayDistanceName(),
+                                      transportName(selectedTransport), displayStateName(PowerManager::localState())};
+        if (displayedStatus.peer && strcmp(current.peer, displayedStatus.peer) == 0 &&
+            strcmp(current.distance, displayedStatus.distance) == 0 &&
+            strcmp(current.radio, displayedStatus.radio) == 0 && strcmp(current.state, displayedStatus.state) == 0)
+            return;
+        display.showStatus(DEVICE_NAME, current.peer, current.distance, current.radio, current.state);
+        displayedStatus = current;
+    }
+
     void servicePowerTest()
     {
         const uint32_t now = millis();
@@ -1411,6 +1480,8 @@ void setup()
     automaticSelectionPending = false;
     espNowFallbackPending = false;
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
+    displayReady = false;
+    displayedStatus = {}; // Request one initial draw when runtime is awake and drained.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
     if (bootInfo.deep)
@@ -1442,6 +1513,9 @@ void setup()
     else
         Serial.printf("MOTION INIT | FAILED (DEVID/config check) | GPIO%u INT1=%d | startup=UNAVAILABLE | continuing\n",
                       motion.getInterruptPin(), motionLevel);
+
+    displayReady = display.begin();
+    if (!displayReady) Serial.println("DISPLAY INIT | FAILED | continuing");
 
     Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
@@ -1594,6 +1668,8 @@ void loop()
                       static_cast<unsigned long>(uint32_t(millis() - observation.receivedAt)));
         sampleProximity(observation, uint32_t(millis()));
     }
+
+    serviceDisplayStatus();
 
     delay(
         10
