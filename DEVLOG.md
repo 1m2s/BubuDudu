@@ -2972,3 +2972,255 @@ manual CC1101 application mode
 ```
 
 Normal application EVENTs must remain on CC1101 during that experiment. Probes serve proximity measurement/recovery only. CLOSE/FAR classification remains a later checkpoint; do not combine probe transport, threshold tuning and automatic radio switching into one change.
+
+### September 27 Session Continuation
+
+The sections above preserve the earlier stopping point at Checkpoint 7B. Work continued later on September 27 through bounded probing, proximity classification, automatic application transport selection, fallback/recovery, live OLED diagnostics and implementation of the non-blocking heartbeat LED layer. The end-of-session state and next step below supersede the earlier checkpoint summary without changing its history.
+
+This continuation was recorded on September 28, a travel day, for work completed on September 27. Checkpoints through 8B were committed after physical validation. Checkpoint 9B was implemented and software-validated before stopping, but remains uncommitted and has not yet been physically validated.
+
+### Bounded Probes and Provisional Classification — Checkpoints 7C and 7D
+
+Checkpoint 7C supplied the missing ESP-NOW evidence while CC1101 carries application traffic. After movement and settlement, an existing CHECKING measurement can send bounded ESP-NOW `ProximityProbe` / `ProximityProbeReply` exchanges, correlate three fresh RSSI samples and complete the median without changing application transport. Probe message types are 8 and 9; `Protocol::Message` remains exactly eight bytes.
+
+Physical testing passed in both directions while normal CC1101 EVENT/ACK traffic continued. An unavailable peer produced bounded failed transmissions at approximately 500 ms pacing and the existing 12-second hard timeout with zero samples. Probe failure did not mark the peer OFFLINE. Movement cancelled the old check, and later settlement could start a fresh measurement. Coordinated deep sleep, GPIO3 motion wake, CC1101/GPIO4 peer wake and retained wake-packet recovery were also physically revalidated.
+
+Checkpoint 7D added provisional RAM-only `UNKNOWN`, `CLOSE` and `FAR` classification from a completed median of three samples:
+
+* `ENTER_FAR_DBM = -80`: UNKNOWN or CLOSE becomes FAR at a median of -80 dBm or lower; otherwise UNKNOWN becomes CLOSE and CLOSE remains CLOSE.
+
+* `ENTER_CLOSE_DBM = -75`: FAR becomes CLOSE at a median of -75 dBm or higher; otherwise it remains FAR.
+
+Partial, failed, timed-out or cancelled measurements retain the previous classification. Reboot/deep sleep resets it to UNKNOWN; no RTC persistence or distance-in-meters claim was added. A nearby physical measurement completed and reported CLOSE with normal application operation. The FAR threshold remains deliberately provisional, and a dedicated physical FAR-distance campaign is deferred.
+
+These checkpoints were committed and pushed separately as `135e382519acb6e3cf17f4421c0363d446f48df0` — `feat: add bounded ESP-NOW proximity probing`, and `95f3f6d1e672551f3bd7c3d714ac44818e9b9f88` — `feat: add conservative proximity classification`.
+
+### Automatic Proximity-Based Application Transport — Checkpoint 7E
+
+Connected completed proximity evidence to application-radio selection. CLOSE requests ESP-NOW for future application EVENTs; FAR requests CC1101. UNKNOWN leaves the current selection unchanged. Classification remains RAM-only.
+
+Selection waits for the existing awake/drained safe boundary and cannot apply while proximity is CHECKING. An in-flight EVENT never changes radio: `pendingTransport` remains the transport captured when the transaction began, and retries retain the same message ID, bytes and radio. The policy changes `selectedTransport` only after that boundary is safe.
+
+Manual `e` / `c` controls remain available. A successful manual selection clears pending automatic policy and lasts until fresh completed proximity evidence requests another selection. A refused command preserves pending policy. Sleep controls remain on ESP-NOW, and pending automatic selection does not block physical sleep.
+
+Physical validation started with Dudu manually selected to CC1101. Movement settled, bounded ESP-NOW probing collected three samples around -52 dBm, and the median completed at -52 dBm with classification CLOSE:
+
+```text
+APP TRANSPORT AUTO | selected=ESP-NOW | proximity=CLOSE
+TX EVENT | sender=DUDU | id=30 | via=ESP-NOW | waiting for ACK
+ACK MATCHED | message=30 | via=ESP-NOW
+```
+
+This verified CC1101 application mode -> fresh ESP-NOW proximity sampling -> CLOSE -> automatic ESP-NOW selection -> a real ESP-NOW EVENT/ACK, without reboot or Wi-Fi reinitialization. Asymmetric transport operation remained functional. FAR-to-CC1101 policy, safe switch boundaries, live retries, wrong-radio ACK rejection, manual controls, sleep interaction, reboot reset and latest-classification behavior were covered by the host suite; the dedicated real-world -80 dBm FAR test remains deferred.
+
+Committed and pushed as `c57daf7f5ea9fe5116583775e68f9c028bde7bdf` — `feat: add automatic application transport selection`.
+
+### ESP-NOW Failure Fallback to CC1101 — Checkpoint 7F
+
+Added one RAM-only fallback-policy flag, `espNowFallbackPending`. Exhausting the existing reliability budget for a normal ESP-NOW application EVENT requests CC1101 for future application traffic. Sleep-control failures do not request fallback, and CC1101 EVENT failures do not cause reverse failover or transport ping-pong.
+
+Application reliability remains a 300 ms ACK timeout with two retries, using the same message ID, bytes and transport. The exhausted EVENT is never replayed on CC1101. Its pending message and pending transport are preserved through exhaustion; only a future EVENT uses the fallback radio.
+
+Transport failure never manufactures FAR or changes `proximityClassification`. Newer ESP-NOW failure clears older automatic-selection intent; a fresh completed proximity measurement can supersede older fallback intent. Successful manual selection clears both policy flags, while refused selection preserves them. Fallback waits through unsafe or sleep states and never blocks physical sleep. Reboot clears the flag and restores UNKNOWN proximity and ESP-NOW selection. Local ESP-NOW initialization-failure handling was not changed.
+
+Existing PowerManager logic still owns peer OFFLINE behavior. Selecting CC1101 does not itself mark the peer ONLINE; real subsequent application evidence restores reachability.
+
+Physical testing made Bubu unavailable while Dudu was using ESP-NOW. Dudu EVENT id=24 followed the existing bounded transaction:
+
+```text
+initial send via ESP-NOW
+    -> retry 1/2 via ESP-NOW
+    -> retry 2/2 via ESP-NOW
+    -> GIVE UP
+    -> POWER PEER: ONLINE -> OFFLINE
+    -> APP TRANSPORT FALLBACK | selected=CC1101 | reason=ESP_NOW_EVENT_GIVE_UP
+```
+
+The failed id=24 was not replayed. The next EVENT used a fresh message ID and CC1101. CC1101 failures neither reversed the fallback nor created a proximity classification.
+
+After Bubu returned, real communication restored peer ONLINE and Dudu completed successful CC1101 EVENT/ACK traffic. Selection stayed on CC1101 until new proximity evidence existed. Dudu was then moved and settled; three ESP-NOW probe replies were approximately -50, -51 and -50 dBm, producing median -50 dBm and CLOSE. Automatic selection returned to ESP-NOW, and the next real ESP-NOW EVENT received its matching ACK.
+
+The full physically verified recovery loop was:
+
+```text
+ESP-NOW loss
+    -> bounded same-radio retry exhaustion
+    -> CC1101 fallback
+    -> peer recovery and working CC1101 EVENT/ACK
+    -> fresh ESP-NOW proximity measurement
+    -> CLOSE
+    -> automatic return to ESP-NOW
+    -> working ESP-NOW EVENT/ACK
+```
+
+Committed and pushed as `5ca9beff4d7bbd1af74828d7ecc88824e6b4c5ce` — `feat: add ESP-NOW failure fallback to CC1101`.
+
+### Live OLED Status — Checkpoint 8B
+
+Re-integrated the SH1106 OLED into the practical runtime as a presentation-only diagnostic display. It reports the device identity and compact PEER, DIST, RADIO and STATE values, for example:
+
+```text
+BUBU
+PEER:  ONLINE
+DIST:  CLOSE
+RADIO: ESP-NOW
+STATE: ACTIVE
+```
+
+Distance supports UNKNOWN, CHECKING, CLOSE and FAR. RADIO shows the selected application transport, ESP-NOW or CC1101. Compact power-state labels include ACTIVE, IDLE, SLEEP NEG, SLEEP and WAKING. The display does not own PowerManager, proximity classification or transport policy.
+
+The OLED remains at I2C address `0x3C` and shares GPIO0/GPIO1 with the ADXL345 at `0x53`. Motion remains the owner of `Wire.begin(GPIO0, GPIO1)`. Display initialization occurs only after critical retained CC1101 wake recovery and Motion initialization.
+
+The framebuffer is not redrawn every loop. `main.cpp` owns a last-drawn snapshot; visible changes are coalesced while busy and drawn at a safe transport boundary. Display work never becomes a physical-sleep blocker. Both physical OLEDs displayed the live runtime status successfully.
+
+### Peer-Return Recovery Exposed by the OLED
+
+The live display exposed a pre-existing recovery gap during flashing. One board temporarily disappeared; the other exhausted ESP-NOW EVENT retries and correctly fell back to CC1101. After the peer returned, ESP-NOW reception was healthy and application evidence restored ONLINE, but selected application transport could remain CC1101 indefinitely.
+
+The previous return policy required a fresh completed proximity measurement. Without movement, no new measurement was started. The fix captures the previous peer state before application EVENT/ACK processing. When real application evidence produces OFFLINE -> ONLINE while `selectedTransport == CC1101`, it starts one existing bounded proximity check.
+
+No new persistent state, periodic polling or direct CLOSE inference was added. The returning packet establishes reachability, not distance. The existing check still needs three correlated fresh ESP-NOW samples, their median, the existing CLOSE/FAR classifier and the existing automatic selector.
+
+Physical testing reproduced the flashing scenario without moving the recovering device:
+
+```text
+ESP-NOW failure -> CC1101 fallback
+    -> peer returns -> OFFLINE -> ONLINE
+    -> one automatic PROXIMITY CHECK
+    -> three samples around -52 dBm -> median -52 dBm
+    -> CLOSE -> APP TRANSPORT AUTO selected ESP-NOW
+    -> next real ESP-NOW EVENT/ACK succeeds
+```
+
+This removed the sticky-CC1101 behavior after temporary outages without bypassing proximity evidence or changing application reliability.
+
+### OLED / Shared-I2C Sleep and Wake Regression
+
+One intermittent Dudu Motion initialization failure appeared during a flashing sequence, with a Wire `requestFrom` error and `MOTION INIT FAILED`. No speculative code change was made. It was not reproducible after reflashing; subsequent startup reported `MOTION INIT | OK (DEVID=0xE5)`, and normal communication remained healthy.
+
+Because OLED and ADXL345 share I2C, coordinated sleep and the complete motion-to-peer wake path were physically re-tested with OLED enabled. Both devices completed:
+
+```text
+SLEEP_REQUEST -> SLEEP_READY -> SLEEP_COMMIT -> SLEEP_ACK
+    -> HANDSHAKE_COMPLETE -> SLEEP TRANSPORT DRAINED
+    -> MOTION SLEEP ARM READY -> CC1101 SLEEP ARM READY
+    -> deep sleep
+```
+
+Bubu woke from Motion with GPIO mask `0x8` and `RTC RESTORE OK`. Dudu woke through CC1101 with GPIO mask `0x10` and `RTC RESTORE OK`; retained recovery reported `CC1101 WAKE PACKET recovered=1`, `WAKE EVENT processed=1`, `WAKE ACK sent=1` and `RX_READY=1`. ESP-NOW application communication resumed after wake.
+
+These physical results confirmed that the OLED/shared-I2C integration preserved coordinated sleep, GPIO3 motion wake, CC1101/GPIO4 peer wake and retained wake-packet handling.
+
+OLED status and peer-return recovery were committed and pushed together as `4a2d912970ebc21a978dee3a0fe810dfe9aedc3a` — `feat: add live OLED status and peer recovery`.
+
+### Non-Blocking WS2812B Heartbeat — Checkpoint 9B
+
+Checkpoint 9B is implemented and software-validated only. It has not been physically validated or committed. The September 27 session ended before hardware testing, and September 28 is a travel day. The uncommitted work remains on `feature/sleep-execution` above committed HEAD `4a2d912970ebc21a978dee3a0fe810dfe9aedc3a`.
+
+Changed files are:
+
+* `include/LED.h`
+* `src/LED.cpp`
+* `src/main.cpp`
+* `tests/host/sleep_handshake_test.cpp`
+* `tests/host/Adafruit_NeoPixel.h` — new minimal host-only pixel recorder
+
+Replaced the old prototype's blocking `heartbeat()` / fade loops and `delay()` calls with a small loop-owned state machine for the existing single WS2812B on GPIO21. No FreeRTOS task, animation queue, pending-heartbeat counter or battery behavior was added. The public API is:
+
+```cpp
+LED();
+void begin();
+void requestHeartbeat();
+void update(uint32_t now);
+void off();
+bool busy() const;
+```
+
+The phases are:
+
+```text
+Idle -> Requested -> Pulse1Up -> Pulse1Down
+    -> Gap -> Pulse2Up -> Pulse2Down -> Idle
+```
+
+The first red pulse rises from 0 to 180 over 144 ms and falls to 0 over another 144 ms. An 80 ms OFF gap precedes the stronger second pulse, which rises from 0 to 255 over 204 ms and falls to 0 over another 204 ms. Total duration is 776 ms from the first serviced update, ending OFF with no blocking tail or cooldown.
+
+Each main loop calls one bounded `update(now)`. Unsigned elapsed-time subtraction handles millis rollover, and late servicing skips directly to the current frame without catch-up loops. Requests perform no hardware work and restart the animation at the next update instead of queueing another animation. Repeated unchanged brightness does not resend the pixel.
+
+Only a genuinely new remote application Heartbeat EVENT requests the animation, in the validated new-EVENT path after duplicate rejection. Duplicate retries are ACKed again without replay. ACKs, proximity probes/replies, sleep controls and malformed packets do not trigger it. Received ESP-NOW and CC1101 EVENTs use the same LED reaction; callback/queue processing does not drive the pixel.
+
+Movement, settlement, proximity CHECKING, OLED updates and protocol processing do not pause or cancel the heartbeat. Sleep wins immediately: physical-sleep entry cancels animation and forces OFF without waiting for completion. LED busy state is not a transport-drain or sleep-blocking condition.
+
+LED initialization follows retained CC1101 wake recovery and Motion/Display initialization, leaving the pixel OFF. Cold boot and deep wake do not restore animation state from RTC. A genuinely newly delivered retained wake EVENT can schedule a fresh heartbeat after LED initialization; this is delivery of a new event, not continuation of an old animation.
+
+### Checkpoint 9B Host and Build Validation
+
+The host harness runs the real LED implementation with a minimal fake `Adafruit_NeoPixel` output recorder. It does not emulate graphics or replace the animation logic. Coverage includes:
+
+* full double-pulse progression, first peak 180, second peak 255, 776 ms completion and final OFF
+
+* millis rollover, restart during active phases, skipped frames, delayed servicing and bounded pixel writes
+
+* new EVENT triggers on both radios, duplicate re-ACK without replay, and exclusion of ACK/probe/sleep/malformed traffic
+
+* normal incoming EVENT/ACK traffic and unchanged pending message bytes, transport, 300 ms ACK deadlines and two-retry behavior during animation
+
+* continued animation through Activity/Inactivity, MOVING, WAITING, proximity checks and OLED work
+
+* immediate cancellation for manual/coordinated physical sleep, safe startup ordering, cold/deep boot reset and deferred presentation of a new retained wake EVENT
+
+Validation completed before the September 27 stopping point:
+
+* `bash tests/host/run.sh` — PASS for Bubu and Dudu
+* `platformio run -e bubu` — PASS
+* `platformio run -e dudu` — PASS
+* `git diff --check` — PASS
+* complete checkpoint diff review — PASS
+
+These are software results only. No physical 9B LED test is claimed by this entry.
+
+### End-of-Session Working State
+
+The communication and power architecture is essentially complete. Committed practical firmware on `feature/sleep-execution` includes reliable bidirectional ESP-NOW, application ACKs, same-ID bounded retries, duplicate handling, coordinated sleep, ADXL345 activity/inactivity, deep-sleep motion wake, CC1101 peer wake, retained CC1101 packet recovery and awake CC1101 application transport.
+
+It also includes RSSI observation, movement settlement, bounded ESP-NOW proximity probes, median-of-three sampling, provisional CLOSE/FAR hysteresis, automatic application transport selection, ESP-NOW failure fallback to CC1101, evidence-based recovery back to ESP-NOW, peer-return proximity recovery without movement and live OLED diagnostics. Coordinated sleep/wake was physically revalidated with OLED enabled. The wire message remains eight bytes, application retries remain 300 ms / two retries, and sleep controls remain ESP-NOW.
+
+Committed feature HEAD is `4a2d912970ebc21a978dee3a0fe810dfe9aedc3a`. The final intended heartbeat LED layer exists as uncommitted Checkpoint 9B work above that HEAD, awaiting physical validation. The five 9B files and unrelated `.vscode/extensions.json` change remain in the original feature worktree, unstaged and preserved.
+
+`main` still intentionally does not contain the practical firmware. This continuation is a DEVLOG-only update prepared in a separate temporary `main` worktree, without checking out main in the original worktree, moving firmware changes, merging branches or altering stashes. `chore/repository-polish` remains untouched.
+
+### Continuation Git Commits
+
+The additional committed practical checkpoints, all verified in `feature/sleep-execution` history:
+
+* `135e382519acb6e3cf17f4421c0363d446f48df0` — `feat: add bounded ESP-NOW proximity probing`
+* `95f3f6d1e672551f3bd7c3d714ac44818e9b9f88` — `feat: add conservative proximity classification`
+* `c57daf7f5ea9fe5116583775e68f9c028bde7bdf` — `feat: add automatic application transport selection`
+* `5ca9beff4d7bbd1af74828d7ecc88824e6b4c5ce` — `feat: add ESP-NOW failure fallback to CC1101`
+* `4a2d912970ebc21a978dee3a0fe810dfe9aedc3a` — `feat: add live OLED status and peer recovery`
+
+Checkpoint 9B has no commit yet.
+
+### Next Step After Travel
+
+Physically validate Checkpoint 9B before committing it or starting battery work or another major architecture checkpoint. Begin with the simplest test:
+
+```text
+both devices awake and close
+    -> normal ESP-NOW application traffic
+    -> receive one NEW remote Heartbeat EVENT
+    -> softer red pulse -> short gap -> stronger red pulse -> OFF
+    -> serial communication continues during animation
+```
+
+Then complete the remaining bounded physical checks:
+
+* verify the reaction in both Bubu-to-Dudu and Dudu-to-Bubu directions
+* verify received EVENT behavior on both ESP-NOW and CC1101
+* verify duplicate retry re-ACKs without replaying the animation
+* verify a fresh new EVENT restarts an active heartbeat
+* verify movement, proximity checks, OLED updates and communication continue during animation
+* verify sleep cancels an active heartbeat cleanly
+* verify cold/deep startup and the heartbeat for a newly recovered retained wake packet
+
+All physical 9B checks remain pending. Resume with those checks after travel; do not begin another implementation during this documentation checkpoint.
