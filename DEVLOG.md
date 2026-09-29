@@ -3224,3 +3224,354 @@ Then complete the remaining bounded physical checks:
 * verify cold/deep startup and the heartbeat for a newly recovered retained wake packet
 
 All physical 9B checks remain pending. Resume with those checks after travel; do not begin another implementation during this documentation checkpoint.
+
+## 2026-09-29
+
+### Completed
+
+Continued from the verified Checkpoint 9B firmware on `feature/sleep-execution`:
+
+`e5331e8659d1cec029691458a5dcb0eed47cc8c7` — `feat: finalize heartbeat motion and proximity behavior`
+
+The earlier September 27 entry stopped with uncommitted heartbeat work above `4a2d912970ebc21a978dee3a0fe810dfe9aedc3a`. Checkpoint 9B was subsequently physically tested, refined and committed. Its final behavior is summarized below before the new automatic-sleep milestone.
+
+The remaining product gap was autonomous sleep. The coordinated handshake, transport drain, physical entry and motion-to-peer wake already existed, but normal inactivity did not yet drive the complete product sequence. This checkpoint connected real local activity to that existing architecture, then completed the final sleep display and product wake-source policy.
+
+This entry records the September 29 engineering and physical testing. Final sequential software validation and Git closure completed after midnight on September 30. No firmware optimization, OLED-anomaly investigation or new hardware flashing was performed during closure.
+
+### Final Shared Heartbeat Behavior — Checkpoint 9B
+
+The WS2812B heartbeat remains a non-blocking, loop-owned double pulse. The physically accepted animation is now:
+
+```text
+first rise:   130 ms, red 0 -> 180
+first fall:   130 ms, red 180 -> 0
+OFF gap:       70 ms
+second rise:  185 ms, red 0 -> 255
+second fall:  185 ms, red 255 -> 0
+total:        700 ms, ending OFF
+```
+
+A newly created normal Heartbeat EVENT requests the sender's local animation once. A newly accepted remote Heartbeat EVENT requests the receiving peer's animation once. Bubu and Dudu remain independent EVENT sources. The synchronized presentation reuses the same EVENT exchange; it does not add a new synchronization protocol.
+
+Retries retain their message ID, payload and transport without creating another local heartbeat. Duplicate receives are acknowledged again without replaying the animation. Both ESP-NOW and CC1101 application receive paths share this behavior. Movement, settlement, proximity checks, OLED work and protocol processing continue while the LED animates. Physical sleep cancels the animation immediately and forces the LED OFF.
+
+The accepted CLOSE automatic heartbeat interval is 2500 ms. FAR uses 4000 ms, based on `proximityClassification == FAR`, not merely on selected CC1101 transport. ESP-NOW failure fallback while classification remains CLOSE does not falsely slow the emotional cadence. The interval applies when scheduling the next normal EVENT after the current transaction completes; a classification change does not rewrite an in-flight EVENT or its retry timing.
+
+UNKNOWN is now intentionally silent: it does not generate normal automatic Heartbeat EVENTs. A bounded startup UNKNOWN proximity check supplies its own ESP-NOW probe/reply traffic, so discovering proximity does not depend on a heartbeat that UNKNOWN suppresses. Three fresh distinct samples, median filtering and the existing 12-second absolute check timeout remain unchanged.
+
+The synchronized ESP-NOW animation, 700 ms timing and 2500 ms CLOSE cadence passed physical acceptance. The dedicated FAR/4000 ms visual cadence check was previously waived and was not specifically physically observed. Its scheduling policy is covered by host tests; this entry does not claim a physical four-second FAR cadence demonstration.
+
+### Bounded Motion Startup and Live OLED Status
+
+The intermittent ADXL345 startup I2C failure was reproduced during physical testing. The bounded initialization retry recovered the same failure that previously left Motion unavailable:
+
+```text
+[Wire.cpp] requestFrom(): i2cWriteReadNonStop returned Error -1
+MOTION INIT | retry 1/2
+MOTION INIT | OK (DEVID=0xE5)
+```
+
+Other boots succeeded on the first attempt. Initialization permits three total attempts with 20 ms between failed attempts, for at most 40 ms of added retry waiting. It does not introduce background retries or change awake/sleep configuration, thresholds or retained startup interrupt behavior.
+
+The new retry path also exposed an interrupt-lifecycle diagnostic: startup attempted to remove a GPIO ISR before that Motion instance had attached it. Attachment ownership is now tracked so a never-attached ISR is not removed, failed attempts remain unattached, and successful initialization attaches once. Normal pause/resume, repeated initialization and sleep restoration retain their existing ownership rules.
+
+Awake and sleep activity thresholds remain 12 and 48. Motion remains the owner of the shared GPIO0/GPIO1 I2C initialization. The OLED's normal awake screen uses the live STATUS and MOTION fields, with no sensor polling or competing Wire initialization in Display.
+
+These heartbeat, Motion and proximity refinements were already part of the verified `e5331e8` starting checkpoint. They were preserved while automatic sleep was added.
+
+### Automatic Product Inactivity Policy
+
+Normal coordinated sleep is now initiated after 35,000 ms since the last meaningful local physical activity.
+
+Motion Activity updates `lastMeaningfulActivity` and rearms one future automatic attempt. ADXL345 Inactivity does not start another 35-second timer. Sensor inactivity and the existing one-second settlement remain movement/proximity behavior, not a second product inactivity countdown.
+
+Automatic Heartbeats explicitly do not reset inactivity. Neither local nor received periodic Heartbeats, duplicate receipts, ACKs, retries, callbacks, probes, RSSI observations, OLED work nor transport housekeeping count as meaningful local activity.
+
+The clock uses unsigned elapsed-time subtraction and remains safe across millis rollover. Successful cold/deep-wake runtime starts a fresh inactivity episode rather than inheriting an old timestamp.
+
+At the local coordinator boundary:
+
+```text
+local inactivity < 35000 ms
+    -> remain awake; do not initiate
+
+local inactivity >= 35000 ms
+    -> wait for existing eligibility guards
+    -> automatic IDLE
+    -> one coordinated sleep attempt
+```
+
+Motion must be available and movement must be READY rather than MOVING or WAITING. No proximity check may be active. Runtime, transaction, cooldown and transport-drain guards must also pass.
+
+Temporary busy conditions defer the opportunity without consuming it or allocating another sleep request. Once an automatic attempt starts, that inactivity episode is consumed. Refusal, retry exhaustion, phase/hard timeout or physical-entry failure does not create loop-based automatic retries. Cooldown expiry alone does not rearm the policy; new genuine Motion Activity permits the next attempt.
+
+Movement is serviced before queued controls can admit or advance sleep and again after transport drain before physical execution. Activity can cancel negotiation or revoke a pending execution decision through the existing PowerManager behavior. Sleep does not override newly observed movement.
+
+### Participant Admission and the Staggered-Clock Race
+
+Fresh incoming SLEEP_REQUEST admission initially required the recipient's own full 35 seconds. Physical activity clocks can be slightly different on the two boards, which exposed a policy deadlock:
+
+```text
+Bubu last activity at t=0
+Dudu last activity at t=1 s
+
+t=35 s: Bubu requests; Dudu age=34 s refuses
+         Bubu's attempt is consumed; 3 s cooldown begins
+
+t=36 s: Dudu requests; Bubu is still in cooldown and refuses
+         Dudu's attempt is also consumed
+```
+
+Added `AUTOMATIC_SLEEP_PEER_GRACE_MS = 3000` for participant admission only. The threshold is derived from the 35,000 ms product timeout:
+
+```text
+local coordinator initiation: 35000 ms
+fresh peer admission:         35000 - 3000 = 32000 ms
+```
+
+Only a fresh peer request may use that earlier inactivity threshold. Motion availability, movement/settlement, proximity, runtime, transaction, cooldown and transport guards still apply. Accepted participation does not rewrite the local activity clock or rearm a consumed automatic opportunity.
+
+The grace matches the existing three-second cooldown. Slightly staggered clocks can now complete the first request rather than each consuming an attempt through reciprocal refusal. A peer that was active too recently still refuses; after it reaches its own coordinator threshold, the earlier peer can participate once its cooldown has expired.
+
+Focused host models cover offsets of 0, 500, 1000, 2999 and 3000 ms completing on the first request. A 4000 ms offset refuses the first request, then completes the reverse request after cooldown without a second automatic attempt by either endpoint. Local 34,999/35,000 ms boundaries, peer 31,999/32,000 ms boundaries, rollover, guard refusal and absence of automatic rearming remain explicit tests.
+
+The local coordinator threshold, retry count, ACK timeout, cooldown, deadlines and simultaneous-coordinator arbitration were not changed. No protocol message or state was added.
+
+### Existing Coordinated Protocol and Physical Entry
+
+The automatic policy reuses the already verified power flow:
+
+```text
+ACTIVE
+    -> 35 s local inactivity and safe eligibility
+    -> IDLE
+    -> SLEEP_REQUEST
+    -> SLEEP_READY
+    -> SLEEP_COMMIT
+    -> SLEEP_ACK
+    -> transport drain
+    -> final movement check
+    -> Motion sleep arm
+    -> CC1101 sleep/wake arm
+    -> physical ESP32 deep sleep
+```
+
+Sleep controls remain on ESP-NOW. The packed eight-byte `Protocol::Message`, 300 ms application ACK timeout, maximum two retries, duplicate handling, phase/hard deadlines and DeviceId collision arbitration remain unchanged.
+
+Semantic SLEEPING is still not sufficient for physical entry. Required application/control traffic, ESP-NOW TX callbacks, active RX callbacks, queued receives and CC1101 activity must drain. The one-shot execution decision and existing failure path remain responsible for bounded entry and returned/aborted sleep.
+
+### Final Deep-Sleep OLED Presentation
+
+The normal awake screen was previously retained after the CPU entered sleep, leaving stale ONLINE, CLOSE, ESP-NOW, ACTIVE and STILL values visible. Added a dedicated presentation-only `Display::showDeepSleep()` frame:
+
+```text
+BUBU
+
+STATUS:
+DEEP SLEEP
+
+WAKE:
+MOTION / PEER
+```
+
+Dudu displays DUDU in the identity row. The framebuffer is cleared first. The existing 6x10 font uses baselines at 10, 25, 35, 50 and 60 pixels, fitting the 128x64 SH1106 without stale awake fields.
+
+The final frame is not drawn for IDLE, negotiation, a sent REQUEST/COMMIT, or semantic SLEEPING while transport still drains. It is written once at the physical-entry boundary after Motion preparation, CC1101 arm, wake-source setup, RTC save and final entry checks have succeeded.
+
+Motion and transport/GDO guards are checked again after the framebuffer transfer, immediately before deep sleep. Preparation failures do not draw the frame. If activity arrives during the transfer or deep-sleep entry unexpectedly returns, normal awake rendering resumes at its next safe boundary; the old display snapshot cannot suppress that repaint.
+
+No display delay, new display FSM, sensor polling or additional Wire initialization was added. The framebuffer transfer itself completes the final presentation. Normal awake STATUS/MOTION rendering is unchanged.
+
+### Product Wake Sources and Bench Safety Timer
+
+Physical testing showed that the old integration safety timer was still waking both devices approximately 30 seconds after successful sleep. The diagnostic explicitly reported `timer=30s INTEGRATION SAFETY TIMER`.
+
+That safety mechanism has now been removed from coordinated product sleep only. The shared entry helper clears previous wake sources and enables:
+
+* GPIO3 / ADXL345 INT1: HIGH-level Motion wake
+
+* GPIO4 / CC1101 GDO0: HIGH-level peer wake
+
+* combined GPIO mask: `0x18`
+
+For coordinated product entry, timer wake is not enabled and the arm diagnostic reports `timer=OFF`. Product sleep therefore persists until a real Motion or peer GPIO wake occurs.
+
+Diagnostic bench `x` still uses the same shared physical-entry implementation with `coordinated == false` and retains the existing 30-second safety timer. Wake setup was not duplicated.
+
+GPIO3/GPIO4 behavior, ADXL configuration, retained CC1101 packet recovery and the existing one-shot Motion-to-peer wake mechanism were preserved. No new wake protocol was introduced.
+
+### Physical Automatic Sleep and Wake Validation
+
+The current firmware passed real two-board product testing:
+
+* normal awake communication continued to work
+
+* after approximately 35 seconds of inactivity, sleep negotiation began automatically without manual `i`, `s` or `x`
+
+* REQUEST / READY / COMMIT / ACK completed, required transport drained, and Motion and CC1101 arm checks succeeded
+
+* both devices entered actual ESP32 deep sleep and displayed the final DEEP SLEEP presentation
+
+* both remained asleep beyond the old 30-second timer point, with no spontaneous product timer wake
+
+* moving one sleeping device woke it through ADXL345 / GPIO3
+
+* the existing CC1101 peer-wake transaction woke the other sleeping device through GPIO4
+
+* both devices recovered and resumed normal runtime and communication
+
+The demonstrated product chain is now:
+
+```text
+AWAKE
+    -> 35 s inactivity
+    -> coordinated sleep
+    -> persistent deep sleep
+    -> move one device
+    -> local Motion wake
+    -> CC1101 peer wake
+    -> both awake
+```
+
+This physical evidence is separate from host fault-injection coverage. No additional firmware behavior was added after this validation to close the checkpoint.
+
+### Known Initialization / OLED Anomaly
+
+On one Bubu initialization, the OLED briefly showed inconsistent or stale-looking runtime values, including unexpected `RADIO: CC1101` and an odd ACTIVE/IDLE-looking presentation.
+
+Moving Bubu caused the display to correct itself, after which normal operation continued. The observation did not prevent communication, automatic sleep, persistent sleep, Motion wake or peer wake.
+
+This is a known unresolved issue. It has not yet been systematically reproduced, and no root cause or fix is claimed. It is non-blocking for the current verified sleep/wake milestone, but remains a candidate for later investigation before final firmware integration. No investigation or firmware change for this anomaly was attempted during checkpoint closure.
+
+### Host Tests and Build Verification
+
+The complete Bubu and Dudu host suites retain the existing transport, wake recovery, Motion, proximity, heartbeat and OLED regressions. Focused automatic-sleep coverage includes:
+
+* exact local 34,999/35,000 ms initiation and peer 31,999/32,000 ms admission boundaries
+
+* rollover-safe activity timing, background traffic exclusion and busy-state deferral
+
+* one attempt per inactivity episode, bounded failures, unchanged cooldown and genuine-activity rearming
+
+* participant-only grace, staggered-clock exchanges and unchanged simultaneous arbitration
+
+* movement priority before control processing and at the final physical-execution boundary
+
+* no premature DEEP SLEEP display, preparation-failure suppression, exactly-once rendering, post-transfer races and awake restoration
+
+* unchanged awake OLED layout, final-frame text/bounds, no new Wire initialization, polling or delay
+
+* coordinated GPIO3/GPIO4-only wake, no product timer wake, and retained bench timer behavior
+
+* existing retained CC1101 wake packets, local Motion wake, one-shot peer wake and normal recovery
+
+The first closure attempt stopped when the Bubu build reported:
+
+```text
+FileNotFoundError: .pio/build/bubu/.sconsign311.tmp
+```
+
+Bubu and Dudu PlatformIO builds had accidentally overlapped. Concurrent SCons temporary-state interference was a possible cause, not a confirmed firmware compile/link defect. No source change, staging, commit, push or DEVLOG update followed that failed validation.
+
+The isolated Bubu retry passed without any source modification. Complete final validation was then repeated strictly sequentially, with no overlapping PlatformIO builds:
+
+* isolated `platformio run -e bubu` retry — PASS
+
+* `bash tests/host/run.sh` — PASS for the full Bubu and Dudu suites
+
+* AddressSanitizer — PASS
+
+* UndefinedBehaviorSanitizer — PASS
+
+* `platformio run -e bubu` — PASS; completed before Dudu was started
+
+* `platformio run -e dudu` — PASS
+
+* `git diff --check` — PASS
+
+* complete cumulative diff review against `e5331e8659d1cec029691458a5dcb0eed47cc8c7` — PASS
+
+* `git diff --cached --check` and exact staged-content review — PASS
+
+The host runner enables both sanitizers and treats compiler warnings as errors. No sanitizer diagnostics were reported. The verified firmware files remained unchanged during closure; no source fix was made merely to address the transient SCons failure.
+
+### Current Working State
+
+Verified firmware is committed and pushed on `feature/sleep-execution` at:
+
+`549d3fef9ad79d340157dd60491b5d47e5b28ca3` — `feat: add automatic coordinated sleep and peer wake`
+
+Local and origin feature refs match. Automatic sleep, persistent deep sleep, local Motion wake, CC1101 peer wake and return to normal runtime have been physically validated.
+
+The firmware has NOT been merged or cherry-picked into `main`. Main still does not contain the new practical firmware and receives only this development record. Further optimization and debugging remain planned on the feature branch before another integration review.
+
+The 35,000 ms local threshold, 3,000 ms participant-only grace, one-shot policy, existing protocol/retries/deadlines, thresholds 12/48, 700 ms heartbeat, classification-based cadence, UNKNOWN silence, proximity, fallback/recovery and retained wake behavior remain in the verified feature tree. The Bubu startup OLED anomaly remains open.
+
+The original worktree remains on `feature/sleep-execution` with only the unrelated `.vscode/extensions.json` modification, unchanged and unstaged. Documentation was prepared in a separate clean `main` worktree. `chore/repository-polish` and existing stashes remain untouched.
+
+### Problems Solved
+
+* requiring manual commands to initiate otherwise verified coordinated sleep
+
+* periodic Heartbeats and other background work preventing product inactivity
+
+* repeated automatic attempts after a consumed inactivity episode
+
+* treating temporary movement/proximity/transport busy conditions as a consumed opportunity
+
+* slightly staggered inactivity clocks refusing each other during the existing cooldown
+
+* allowing sleep progress to outrank newly observed local movement
+
+* retaining misleading awake OLED values during actual deep sleep
+
+* applying the old 30-second integration timer to coordinated product sleep
+
+* closing the demonstrated automatic sleep -> persistent sleep -> Motion wake -> peer wake -> normal runtime chain
+
+The startup OLED anomaly is not included as solved.
+
+### Git Commits
+
+The starting verified Checkpoint 9B commit was:
+
+`e5331e8659d1cec029691458a5dcb0eed47cc8c7` — `feat: finalize heartbeat motion and proximity behavior`
+
+The new automatic-sleep/product-sleep checkpoint was committed and pushed as:
+
+`549d3fef9ad79d340157dd60491b5d47e5b28ca3` — `feat: add automatic coordinated sleep and peer wake`
+
+Only these firmware/test files were included:
+
+* `include/PowerManager.h`
+
+* `include/CC1101WakeRecovery.h`
+
+* `include/Display.h`
+
+* `src/PowerManager.cpp`
+
+* `src/CC1101WakeRecovery.cpp`
+
+* `src/Display.cpp`
+
+* `src/main.cpp`
+
+* `tests/host/sleep_handshake_test.cpp`
+
+* `tests/host/cc1101_wake_test.cpp`
+
+* `tests/host/display_status_test.cpp`
+
+* `tests/host/wake/esp_sleep.h`
+
+DEVLOG and the protected editor setting were excluded from the feature commit. The feature commit was verified on `origin/feature/sleep-execution` before this documentation update.
+
+The separate `main` documentation commit is `docs: record automatic sleep and peer wake milestone`. Its only changed file is `DEVLOG.md`; it does not merge, cherry-pick or copy firmware from the feature branch.
+
+### Next Step
+
+Continue optimization and testing on `feature/sleep-execution`, particularly reproduce and investigate the Bubu startup OLED anomaly if possible. Preserve the verified automatic sleep/wake chain while narrowing that observation to a reproducible case.
+
+Then perform another final integration review before deciding whether to merge firmware into `main`. The next step is not an immediate firmware merge, a new feature or repository-polish work.
