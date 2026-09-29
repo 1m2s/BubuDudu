@@ -3,44 +3,21 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 
-
-// ======================================================
-// LED
-//
-// Responsible for:
-// - WS2812B initialization
-// - LED output
-// - heartbeat animation
-//
-// NOT responsible for:
-// - deciding when the system sleeps
-// - motion detection
-// - communication
-// - system state
-// ======================================================
-
+// Loop-owned presentation only; never gates communication, motion or sleep.
 class LED
 {
 public:
-    // Create the WS2812B object.
     LED();
-
-    // Initialize the LED hardware.
     void begin();
-
-    // Turn the LED completely off.
-    void off();
-
-    // Play one complete blocking heartbeat.
-    void heartbeat();
-
+    void requestHeartbeat(); // Restart on the next update; no hardware work here.
+    void update(uint32_t now);
+    void off();              // Cancel immediately, including a requested heartbeat.
+    bool busy() const;
 
 private:
+    enum class Phase : uint8_t { Idle, Requested, Pulse1Up, Pulse1Down, Gap, Pulse2Up, Pulse2Down };
     Adafruit_NeoPixel pixel;
-
-
-    // Play one fade-in / fade-out pulse.
-    void heartbeatPulse(
-        uint8_t peakBrightness
-    );
+    Phase phase = Phase::Idle;
+    uint32_t startedAt = 0;
+    uint8_t shownRed = 0;
 };

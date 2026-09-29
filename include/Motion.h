@@ -68,8 +68,12 @@ public:
 
 
 private:
+    // One complete startup identification/configuration attempt; no runtime retries.
+    bool beginAttempt(bool& startupCaptured);
+
     uint8_t interruptPin = 255;
     bool initialized = false;
+    bool interruptAttached = false;
 
     MotionEvent startupEvent = MotionEvent::None;
 

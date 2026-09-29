@@ -30,6 +30,8 @@ namespace
     // Sleep keeps the independently verified deliberate-motion threshold (3 g).
     constexpr uint8_t AWAKE_ACTIVITY_THRESHOLD = 12;
     constexpr uint8_t SLEEP_ACTIVITY_THRESHOLD = 48;
+    constexpr uint8_t STARTUP_ATTEMPTS = 3;
+    constexpr uint32_t STARTUP_RETRY_DELAY_MS = 20;
 }
 
 
@@ -128,157 +130,58 @@ bool Motion::begin(
     uint8_t intPin
 )
 {
+    pauseInterrupt(); // Detach only an owned handler, before replacing its pin on reinitialization.
     initialized = false;
     interruptPin = intPin;
-
-
-    // --------------------------------------------------
-    // Start I2C
-    // --------------------------------------------------
-
-    Wire.begin(
-        sdaPin,
-        sclPin
-    );
-
-
-    pinMode(
-        interruptPin,
-        INPUT
-    );
-
-
-    // --------------------------------------------------
-    // Verify that the device really is an ADXL345.
-    //
-    // ADXL345 DEVID should be 0xE5.
-    // --------------------------------------------------
-
-    uint8_t deviceId =
-        readRegister(DEVID);
-
-
-    if (deviceId != EXPECTED_DEVID)
+    startupEvent = MotionEvent::None;
+    pinMode(interruptPin, INPUT);
+    bool busReady = false, startupCaptured = false;
+    for (uint8_t attempt = 0; attempt < STARTUP_ATTEMPTS; ++attempt)
     {
-        return false;
+        if (attempt != 0)
+        {
+            Serial.printf("MOTION INIT | retry %u/%u\n", attempt, STARTUP_ATTEMPTS - 1);
+            delay(STARTUP_RETRY_DELAY_MS);
+        }
+        // Motion remains the sole bus owner. Retry a failed Wire.begin(), but
+        // keep a successfully initialized shared bus in place for sensor retries.
+        if (!busReady) busReady = Wire.begin(sdaPin, sclPin);
+        if (busReady && beginAttempt(startupCaptured))
+        {
+            interruptOccurred = false;
+            initialized = true;
+            resumeInterrupt();
+            return true;
+        }
     }
+    return false; // setup() reports FAILED and continues; no background retry.
+}
 
-
-    // --------------------------------------------------
-    // There may already be an event stored because
-    // ADXL345 remained powered while ESP32 deep-slept.
-    //
-    // Capture it BEFORE reconfiguring the sensor.
-    // --------------------------------------------------
-
-    startupEvent =
-        decodeEvent(
-            readRegister(INT_SOURCE)
-        );
-
-
-    // --------------------------------------------------
-    // Disable interrupts during configuration
-    // --------------------------------------------------
-
-    writeRegister(
-        INT_ENABLE,
-        0x00
-    );
-
-
-    // --------------------------------------------------
-    // FULL_RES + +/-4 g
-    //
-    // 0x09 = 0000 1001
-    // --------------------------------------------------
-
-    writeRegister(
-        DATA_FORMAT,
-        0x09
-    );
-
-
+bool Motion::beginAttempt(bool& startupCaptured)
+{
+    uint8_t deviceId, source;
+    if (!readRegister(DEVID, deviceId) || deviceId != EXPECTED_DEVID) return false;
+    // INT_SOURCE clears on read. Preserve the original deep-wake event if a
+    // later configuration operation fails and requires another full attempt.
+    if (!startupCaptured)
+    {
+        if (!readRegister(INT_SOURCE, source)) return false;
+        startupEvent = decodeEvent(source);
+        startupCaptured = true;
+    }
     uint8_t activityThreshold;
-    if (!writeRegister(THRESH_ACT, AWAKE_ACTIVITY_THRESHOLD) ||
+    if (!writeRegister(INT_ENABLE, 0x00) ||
+        !writeRegister(DATA_FORMAT, 0x09) || // FULL_RES, +/-4 g.
+        !writeRegister(THRESH_ACT, AWAKE_ACTIVITY_THRESHOLD) ||
         !readRegister(THRESH_ACT, activityThreshold) ||
-        activityThreshold != AWAKE_ACTIVITY_THRESHOLD)
+        activityThreshold != AWAKE_ACTIVITY_THRESHOLD ||
+        !writeRegister(THRESH_INACT, 4) || // 0.25 g.
+        !writeRegister(TIME_INACT, 3) ||
+        !writeRegister(ACT_INACT_CTL, 0xFF) || // AC-coupled activity/inactivity on X/Y/Z.
+        !writeRegister(INT_MAP, 0x00) || // Both interrupts on INT1.
+        !writeRegister(POWER_CTL, 0x28) || // LINK + MEASURE.
+        !writeRegister(INT_ENABLE, 0x18)) // Activity + inactivity.
         return false;
-
-    // Inactivity threshold
-    //
-    // 4 * 0.0625 g = 0.25 g
-    //
-    writeRegister(
-        THRESH_INACT,
-        4
-    );
-
-
-    // Must remain inactive for 3 seconds
-    writeRegister(
-        TIME_INACT,
-        3
-    );
-
-    
-    // --------------------------------------------------
-    // AC-coupled activity/inactivity
-    // X/Y/Z enabled
-    // --------------------------------------------------
-
-    writeRegister(
-        ACT_INACT_CTL,
-        0xFF
-    );
-
-
-    // --------------------------------------------------
-    // Activity + inactivity -> INT1
-    // --------------------------------------------------
-
-    writeRegister(
-        INT_MAP,
-        0x00
-    );
-
-
-    // --------------------------------------------------
-    // LINK + MEASURE
-    //
-    // Activity and inactivity now alternate cleanly.
-    // --------------------------------------------------
-
-    writeRegister(
-        POWER_CTL,
-        0x28
-    );
-
-
-    interruptOccurred = false;
-
-
-    // --------------------------------------------------
-    // Attach ESP32 awake interrupt
-    // --------------------------------------------------
-
-    resumeInterrupt();
-
-
-    // --------------------------------------------------
-    // Enable activity + inactivity
-    //
-    // Bit 4 = activity
-    // Bit 3 = inactivity
-    // --------------------------------------------------
-
-    writeRegister(
-        INT_ENABLE,
-        0x18
-    );
-
-
-    initialized = true;
     return true;
 }
 
@@ -345,9 +248,13 @@ uint8_t Motion::getInterruptPin() const
 
 void Motion::pauseInterrupt()
 {
-    detachInterrupt(
-        digitalPinToInterrupt(interruptPin)
-    );
+    if (interruptAttached)
+    {
+        detachInterrupt(
+            digitalPinToInterrupt(interruptPin)
+        );
+        interruptAttached = false;
+    }
 
     interruptOccurred = false;
 }
@@ -359,11 +266,13 @@ void Motion::pauseInterrupt()
 
 void Motion::resumeInterrupt()
 {
+    if (!initialized || interruptAttached) return;
     attachInterrupt(
         digitalPinToInterrupt(interruptPin),
         handleInterrupt,
         RISING
     );
+    interruptAttached = true;
 }
 
 bool Motion::prepareForSleep()

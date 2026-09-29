@@ -42,4 +42,9 @@ done
     -I"$test_dir/motion" -I"$test_dir" -I"$repo_dir/include" \
     "$test_dir/motion_sleep_test.cpp" -o "$build_dir/test_motion_sleep"
 "$build_dir/test_motion_sleep"
+"${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I"$test_dir/motion" -I"$test_dir" -I"$repo_dir/include" \
+    "$test_dir/display_status_test.cpp" -o "$build_dir/test_display_status"
+"$build_dir/test_display_status"
 echo "Host binaries: $build_dir"

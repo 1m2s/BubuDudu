@@ -30,18 +30,21 @@ bool Display::begin()
 }
 
 void Display::showStatus(const char* deviceName, const char* peer,
-                         const char* distance, const char* radio, const char* state)
+                         const char* distance, const char* radio, const char* state,
+                         const char* motion)
 {
     oled.clearBuffer();
-    oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(0, 12, deviceName);
-    oled.drawStr(0, 24, "PEER:");
-    oled.drawStr(42, 24, peer);
-    oled.drawStr(0, 36, "DIST:");
-    oled.drawStr(42, 36, distance);
-    oled.drawStr(0, 48, "RADIO:");
-    oled.drawStr(42, 48, radio);
-    oled.drawStr(0, 60, "STATE:");
-    oled.drawStr(42, 60, state);
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 10, deviceName);
+    oled.drawStr(0, 20, "PEER:");
+    oled.drawStr(48, 20, peer);
+    oled.drawStr(0, 30, "DIST:");
+    oled.drawStr(48, 30, distance);
+    oled.drawStr(0, 40, "RADIO:");
+    oled.drawStr(48, 40, radio);
+    oled.drawStr(0, 50, "STATUS:");
+    oled.drawStr(48, 50, state);
+    oled.drawStr(0, 60, "MOTION:");
+    oled.drawStr(48, 60, motion);
     oled.sendBuffer();
 }

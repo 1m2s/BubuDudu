@@ -6,9 +6,19 @@
 // MCU attributes/GPIO and the existing Motion driver are substituted on host.
 #define IRAM_ATTR
 int digitalRead(int pin);
+#include "LED.h"
+// Count application requests while executing the unchanged production LED state machine.
+struct ObservedLED : LED
+{
+    unsigned requests = 0;
+    void requestHeartbeat() { ++requests; LED::requestHeartbeat(); }
+};
+#define LED ObservedLED
 #define loop firmwareLoop
 #include "../../src/main.cpp"
 #undef loop
+#undef LED
+#include "../../src/LED.cpp"
 struct PhysicalSleepEntered {};
 void loop() { try { firmwareLoop(); } catch (const PhysicalSleepEntered&) {} }
 
@@ -51,14 +61,16 @@ MotionEvent motionPendingEvent = MotionEvent::None;
 unsigned motionEventPolls = 0;
 unsigned displayInitializations = 0;
 bool displayInitOk = true;
-struct DisplayFrame { std::string device, peer, distance, radio, state; };
+struct DisplayFrame { std::string device, peer, distance, radio, state, motion; };
 std::vector<DisplayFrame> displayFrames;
+unsigned ledBeginsAtBoot = 0, ledShowsAtBoot = 0;
 bool Motion::begin(uint8_t sda, uint8_t scl, uint8_t intPin)
 {
     assert(sda == 0 && scl == 1 && intPin == 3);
     assert(!protocolReady);
     assert(bootInfo.deep ? wakeRecoveries == 1 : armInitializations == 1);
     assert(displayInitializations == 0);
+    assert(hostPixel().begins == ledBeginsAtBoot);
     ++motionInitializations;
     interruptPin = intPin;
     startupEvent = motionStartup;
@@ -104,17 +116,24 @@ bool injectWakePacket = false;
 bool awakeAckBusy = false;
 unsigned awakeServices = 0;
 std::vector<Protocol::Message> ccWire;
+std::vector<Protocol::Message> ccSubmitAttempts;
 std::deque<Protocol::Message> ccIncoming;
 bool ccAccepts = true, ccHoldTx = false;
 Protocol::Message injectedPacket{};
 namespace CC1101WakeRecovery
 {
-    BootInfo captureBoot() { assert(!protocolReady); return injectedBoot; }
+    BootInfo captureBoot()
+    {
+        assert(!protocolReady);
+        ledBeginsAtBoot = hostPixel().begins; ledShowsAtBoot = hostPixel().shows;
+        return injectedBoot;
+    }
     Report recover(bool restored, Protocol::DeviceId peer, EventHandler handler)
     {
         ++wakeRecoveries;
         assert(armInitializations == 0 && !protocolReady);
         assert(motionInitializations == 0 && displayInitializations == 0);
+        assert(hostPixel().begins == ledBeginsAtBoot && hostPixel().shows == ledShowsAtBoot);
         assert(!PowerManager::transaction().active);
         Report report;
         if (injectWakePacket && restored)
@@ -140,6 +159,7 @@ namespace CC1101WakeRecovery
     bool awakeBusy() { return awakeAckBusy || !ccIncoming.empty(); }
     SubmitResult submitAwake(const Protocol::Message& packet)
     {
+        ccSubmitAttempts.push_back(packet);
         if (awakeBusy()) return SubmitResult::Busy;
         if (!ccAccepts) return SubmitResult::Failed;
         ccWire.push_back(packet);
@@ -149,6 +169,7 @@ namespace CC1101WakeRecovery
     void printReport(const BootInfo&, bool, const Report&) {}
     void enterDeepSleep(void (*save)(), const char* (*guard)(), bool coordinated)
     {
+        assert(!led.busy() && hostPixel().shown == 0);
         if (!coordinated) { ++benchSleepCalls; return; }
         ++coordinatedAttempts;
         const auto arm = CC1101SleepArm::prepareForSleep();
@@ -196,19 +217,20 @@ bool Display::begin()
 {
     (void)oled;
     assert(!protocolReady && motionInitializations == 1 && displayInitializations == 0);
+    assert(hostPixel().begins == ledBeginsAtBoot);
     assert(bootInfo.deep ? wakeRecoveries == 1 : armInitializations == 1);
     ++displayInitializations;
     return displayInitOk;
 }
 void Display::showStatus(const char* device, const char* peer, const char* distance,
-                         const char* radio, const char* state)
+                         const char* radio, const char* state, const char* motion)
 {
     assert(displayReady && protocolReady && !waitingForAck && controlCount == 0);
     assert(!PowerManager::transaction().active && !sleepDrainWaiting);
     assert(!CC1101WakeRecovery::awakeBusy() && mockedTxInFlight == 0 && !mockedRxActive);
     assert(receiveQueue && receiveQueue->items.empty() && !probeOutstanding);
     assert(PowerManager::automaticHeartbeatAllowed());
-    displayFrames.push_back({device, peer, distance, radio, state});
+    displayFrames.push_back({device, peer, distance, radio, state, motion});
 }
 
 using Type = Protocol::MessageType;
@@ -374,10 +396,10 @@ void testFsm()
 
 void freshApp()
 {
-    displayReady = true; displayedStatus = {}; // Model an initialized awake runtime.
+    motionReady = displayReady = true; displayedStatus = {}; // Model an initialized awake runtime.
     displayInitializations = 0; displayInitOk = true; displayFrames.clear();
     selectedTransport = pendingTransport = Transport::ESP_NOW;
-    ccWire.clear(); ccIncoming.clear(); ccAccepts = true; ccHoldTx = false;
+    ccWire.clear(); ccSubmitAttempts.clear(); ccIncoming.clear(); ccAccepts = true; ccHoldTx = false;
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN;
     automaticSelectionPending = false;
@@ -404,6 +426,17 @@ void freshApp()
     motionIntLevel = 0; motionStartup = MotionEvent::None;
     motionPendingEvent = MotionEvent::None; motionEventPolls = 0;
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
+    hostPixel() = {}; led.begin(); hostPixel() = {}; // Fresh awake LED, with startup instrumentation reset.
+    led.requests = 0;
+    ledBeginsAtBoot = ledShowsAtBoot = 0;
+    hostPixel().onBegin = [] {
+        assert(!protocolReady && motionInitializations == 1 && displayInitializations == 1);
+        assert(bootInfo.deep ? wakeRecoveries == 1 : armInitializations == 1);
+    };
+}
+void freshKnownApp(ProximityClassification classification = ProximityClassification::CLOSE)
+{
+    freshApp(); proximityClassification = classification;
 }
 void command(char c) { Serial.input.push_back(c); loop(); }
 void receive(const Protocol::Message& message)
@@ -903,6 +936,7 @@ void testRtcHistoryRestart()
     haveLastPeerEvent = true; lastPeerEventId = 0xFFFF;
     saveRtcHistory(); simulateHistoryRestart();
     assert(nextMessageId == 0xFFFF && haveLastPeerEvent && lastPeerEventId == 0xFFFF);
+    proximityClassification = ProximityClassification::CLOSE; // Isolate ID wrap from initial UNKNOWN probes.
     startHeartbeatEvent(); assert(pendingMessage.messageId == 0xFFFF && nextMessageId == 0);
     receive(incoming(Type::Ack, 0xFFFF));
     startHeartbeatEvent(); assert(pendingMessage.messageId == 0 && nextMessageId == 1);
@@ -975,6 +1009,7 @@ void testBootRouting()
     setup();
     RtcState::History history{};
     assert(armInitializations == 1 && wakeRecoveries == 0 && !RtcState::load(history));
+    assert(hostPixel().begins == 1 && hostPixel().shown == 0 && !led.busy());
     assert(Serial.log.find("BOOT | COLD") != std::string::npos);
 
     for (bool duplicate : {false, true}) for (bool validRtc : {false, true})
@@ -999,6 +1034,8 @@ void testBootRouting()
         assert(localState() == LocalState::ACTIVE && cooldownLeftMs(hostNow) == 0);
         assert(wakeReport.processed == (validRtc && !duplicate));
         assert(wakeReport.duplicate == (validRtc && duplicate));
+        assert(hostPixel().begins == 1 && hostPixel().shown == 0);
+        assert(!led.busy() && led.requests == 0); // Retained delivery is ACKed while local distance is UNKNOWN.
         assert(nextMessageId == (validRtc ? 124 : 1));
         if (validRtc) assert(PowerManager::exportHistory().newestPeerRequest == 40);
         for (int i = 0; i < 20; ++i) loop();
@@ -1157,7 +1194,7 @@ void testCoordinatedExecution()
     mockedTxInFlight = 0; command('x'); assert(benchSleepCalls == 1);
 
     // Timer wake restores history only, with the actual setup routing and new
-    // runtime defaults. Normal ESP-NOW heartbeats can rediscover the peer.
+    // runtime defaults. UNKNOWN stays silent while one bootstrap check starts.
     freshApp();
     RtcState::save({123, true, 70, {true, 40}});
     protocolReady = false; pendingMessage = {}; ackWaitStart = 0;
@@ -1172,9 +1209,13 @@ void testCoordinatedExecution()
     assert(transaction().phaseDeadline == 0 && transaction().hardDeadline == 0);
     assert(!waitingForAck && controlCount == 0 && retryCount == 0 && !sleepDrainWaiting);
     assert(mockedTxInFlight == 0 && receiveQueue->items.empty() && physicalSleeps == 0);
-    hostNow = nextEventTime; loop(); assert(waitingForAck && pendingMessage.type == Type::Event);
-    receive(incoming(Type::Ack, pendingMessage.messageId));
+    const auto bootstrapStartedAt = checkStartedAt;
+    hostNow = nextEventTime; loop();
+    assert(!waitingForAck && wire.size() == 1 && countWire(Type::ProximityProbe) == 1 && led.requests == 0);
+    receive({Protocol::VERSION, Type::Event, 71, PEER_DEVICE, Protocol::EventType::Heartbeat, 0});
     assert(!waitingForAck && peerState() == PeerState::ONLINE);
+    assert(proximityUpdateState == ProximityUpdateState::CHECKING && led.requests == 0);
+    assert(checkStartedAt == bootstrapStartedAt && occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
     puts("PASS: coordinator/participant callback drain, receipt gate, one physical attempt, RX batch/callback gates");
     puts("PASS: bounded drain timeout, busy-after-arm abort, failed-entry IDLE/cooldown/peer preservation, no retry");
     puts("PASS: timer reboot restores history only, fresh drain/retry/queue/deadline state, ESP-NOW peer rediscovery");
@@ -1226,7 +1267,9 @@ void testMotionInitialization()
         setup();
         assert(selectedTransport == Transport::ESP_NOW && pendingTransport == Transport::ESP_NOW);
         assert(movementState == MovementState::READY && settleStartedAt == 0);
-        assert(proximityUpdateState == ProximityUpdateState::READY && proximitySampleCount == 0 && checkStartedAt == 0);
+        assert(proximityUpdateState == ProximityUpdateState::CHECKING); // Cold and deep startup both bootstrap once.
+        assert(proximitySampleCount == 0 && checkStartedAt == hostNow);
+        for (const auto& sample : proximitySamples) assert(sample.messageId == 0 && sample.rssi == 0);
         assert(motionInitializations == 1 && protocolReady);
         assert(localState() == LocalState::ACTIVE && !transaction().active);
         assert(peerState() == (deep ? PeerState::ONLINE : PeerState::UNKNOWN));
@@ -1320,9 +1363,12 @@ void testMotionPeerWake()
         else if (injectWakePacket)
             assert(wakeReport.processed && wakeReport.ackSent && lastPeerEventId == 70);
         const auto idAfterBoot = nextMessageId;
+        const bool initialCheck = proximityUpdateState == ProximityUpdateState::CHECKING;
         for (unsigned i = 0; i < 500; ++i) loop();
-        assert(wakeEvents.size() == (automaticWake ? 1U : 0U) && nextMessageId == idAfterBoot);
-        assert(localState() == LocalState::ACTIVE && !waitingForAck && wire.empty());
+        const unsigned probes = initialCheck ? 10 : 0; // One bounded probe every 500ms during the 5s window.
+        assert(wakeEvents.size() == (automaticWake ? 1U : 0U) && nextMessageId == uint16_t(idAfterBoot + probes));
+        assert(localState() == LocalState::ACTIVE && !waitingForAck && wire.size() == probes);
+        assert(countWire(Type::ProximityProbe) == probes && led.requests == 0);
     }
     // Incomplete runtime setup cannot send; a guard refusal is also one-shot,
     // never converted into an unbounded deferred request after the queue drains.
@@ -1342,7 +1388,9 @@ void testMotionPeerWake()
         assert(wakeEvents.empty() && nextMessageId == 123);
         if (!startupFailure) assert(Serial.log.find("CC1101 WAKE TX | REFUSED") != std::string::npos);
         for (unsigned i = 0; i < 100; ++i) loop();
-        assert(wakeEvents.empty() && nextMessageId == 123 && localState() == LocalState::ACTIVE);
+        const unsigned probes = startupFailure ? 0 : 2;
+        assert(wakeEvents.empty() && nextMessageId == 123 + probes && localState() == LocalState::ACTIVE);
+        assert(wire.size() == probes && countWire(Type::ProximityProbe) == probes && led.requests == 0);
     }
     puts("PASS: pure-motion one-shot after safe startup; radio/both/timer/cold suppressed; ACK/timeout/unavailable outcomes");
     puts("PASS: one allocator increment/rollover, no local delivery, no loop retrigger, startup failure/guard refusal bounded");
@@ -1391,7 +1439,7 @@ void testAwakeMotionDiagnostics()
     // A normally scheduled heartbeat still runs, identically with or without motion.
     for (auto event : {MotionEvent::None, MotionEvent::Activity, MotionEvent::Inactivity})
     {
-        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = 10;
+        freshKnownApp(); pauseAutomaticHeartbeats = false; nextEventTime = 10;
         motionPendingEvent = event;
         loop(); // Not due yet: movement must not pull the schedule forward.
         assert(wire.empty() && nextEventTime == 10 && nextMessageId == 1);
@@ -1542,7 +1590,7 @@ void testMovementIsolation()
         std::string baselineState;
         for (bool moving : {false, true})
         {
-            freshApp(); pauseAutomaticHeartbeats = !heartbeats; nextEventTime = 50;
+            freshKnownApp(); pauseAutomaticHeartbeats = !heartbeats; nextEventTime = 50;
             ackWaitStart = 0; pendingMessage = {}; // Identical initial transport history for both runs.
             std::string states;
             for (uint32_t time : {0U, 10U, 50U, 350U, 650U, 950U, SETTLE_MS + 10U, SETTLE_MS + 20U})
@@ -1832,7 +1880,7 @@ void testProximityIsolation()
     std::string baselineState;
     for (bool measuring : {false, true})
     {
-        freshApp(); ackWaitStart = 0; pendingMessage = {};
+        freshKnownApp(); ackWaitStart = 0; pendingMessage = {};
         if (measuring) settleForCheck(2000);
         hostNow = 2020; pauseAutomaticHeartbeats = false; nextEventTime = 2050;
         std::string state;
@@ -1872,13 +1920,13 @@ void receiveVia(const Protocol::Message& packet, Transport transport)
 
 void testApplicationTransports()
 {
-    freshApp(); assert(selectedTransport == Transport::ESP_NOW);
+    freshKnownApp(); assert(selectedTransport == Transport::ESP_NOW);
     command('c'); assert(selectedTransport == Transport::CC1101);
     command('e'); assert(selectedTransport == Transport::ESP_NOW);
     command('p'); assert(Serial.log.find("selected=ESP-NOW pending=NONE") != std::string::npos);
     for (unsigned guard = 0; guard < 6; ++guard)
     {
-        freshApp();
+        freshKnownApp();
         if (guard == 0) startHeartbeatEvent();
         if (guard == 1) { command('i'); command('s'); }
         if (guard == 2) awakeAckBusy = true;
@@ -1890,7 +1938,7 @@ void testApplicationTransports()
     }
     for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
     {
-        freshApp(); selectedTransport = transport;
+        freshKnownApp(); selectedTransport = transport;
         startHeartbeatEvent(); const auto original = pendingMessage;
         assert(waitingForAck && pendingTransport == transport);
         auto& sent = transport == Transport::ESP_NOW ? wire : ccWire;
@@ -1912,7 +1960,7 @@ void testApplicationTransports()
 
         // One shared retry machine; even a forced selector change cannot reroute
         // an in-flight packet (the public command already refuses that change).
-        freshApp(); selectedTransport = transport; startHeartbeatEvent();
+        freshKnownApp(); selectedTransport = transport; startHeartbeatEvent();
         const auto retryPacket = pendingMessage;
         selectedTransport = other;
         for (unsigned retry = 1; retry <= 2; ++retry)
@@ -1927,7 +1975,7 @@ void testApplicationTransports()
     }
     for (auto first : {Transport::ESP_NOW, Transport::CC1101})
     {
-        freshApp();
+        freshKnownApp(); notePeerSeen(); // Isolate cross-radio duplicate receipts from first-contact probes.
         const auto other = first == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
         selectedTransport = other;
         const auto event = proximityObservation(77, -50, 0).message;
@@ -1939,7 +1987,7 @@ void testApplicationTransports()
     }
     // Bidirectional independent EVENTs: receiving/re-ACKing the peer's EVENT
     // cannot replace our own pending packet. First peer receipt is lost.
-    freshApp(); command('c'); startHeartbeatEvent(); const auto ours = pendingMessage;
+    freshKnownApp(); command('c'); startHeartbeatEvent(); const auto ours = pendingMessage;
     const auto peerEvent = proximityObservation(99, -50, 0).message;
     receiveVia(peerEvent, Transport::CC1101);
     receiveVia(peerEvent, Transport::CC1101);
@@ -1952,7 +2000,7 @@ void testApplicationTransports()
     assert(!waitingForAck && retryCount == 0);
 
     // Receipt TX blocks a due heartbeat, mode change, synchronous w, and sleep.
-    freshApp(); command('c'); ccHoldTx = true;
+    freshKnownApp(); command('c'); ccHoldTx = true;
     pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
     receiveVia(peerEvent, Transport::CC1101);
     assert(awakeAckBusy && ccWire.size() == 1 && ccWire[0].type == Type::Ack && !waitingForAck);
@@ -1962,7 +2010,7 @@ void testApplicationTransports()
     assert(waitingForAck && ccWire.size() == 2 && ccWire.back().type == Type::Event);
 
     // Every sleep control stays on ESP-NOW, independent of the app selector.
-    freshApp(); command('c'); command('i'); command('s');
+    freshKnownApp(); command('c'); command('i'); command('s');
     const auto request = pendingMessage;
     assert(request.type == Type::SleepRequest && pendingTransport == Transport::ESP_NOW && ccWire.empty());
     receiveVia(incoming(Type::Ack, request.messageId), Transport::CC1101); assert(waitingForAck);
@@ -1973,16 +2021,16 @@ void testApplicationTransports()
     receive(incoming(Type::Ack, commit.messageId));
     receive(incoming(Type::SleepAck, request.messageId));
     assert(physicalSleeps == 1 && ccWire.empty());
-    freshApp(); command('c'); command('i'); command('s'); command('a');
+    freshKnownApp(); command('c'); command('i'); command('s'); command('a');
     assert(countWire(Type::SleepCancel) == 1 && ccWire.empty());
-    freshApp(); command('c'); command('i'); receive(incoming(Type::SleepRequest, 40, 40));
+    freshKnownApp(); command('c'); command('i'); receive(incoming(Type::SleepRequest, 40, 40));
     assert(pendingMessage.type == Type::SleepReady && pendingTransport == Transport::ESP_NOW);
     receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepCommit, 40));
     assert(pendingMessage.type == Type::SleepAck && pendingTransport == Transport::ESP_NOW && ccWire.empty());
     receive(incoming(Type::Ack, pendingMessage.messageId)); assert(physicalSleeps == 1);
 
     // CC mode keeps normal ESP-NOW RX/ACK alive, but samples only matched probe replies.
-    freshApp(); command('c'); settleForCheck(2000);
+    freshKnownApp(); command('c'); settleForCheck(2000);
     assert(wire.size() == 1 && wire[0].type == Type::ProximityProbe);
     receive(peerEvent); assert(wire.size() == 2 && wire.back().type == Type::Ack);
     rssiObservations.push_back(proximityObservation(100, -20, 2010));
@@ -2004,7 +2052,7 @@ void testApplicationTransports()
     command('c'); // Preserve the bench route after the completed CLOSE measurement.
     command('x'); assert(benchSleepCalls == 1 && motionCancels == 1);
     startHeartbeatEvent(); assert(ccWire.size() == 1); // Aborted bench entry resumes runtime.
-    freshApp(); command('c'); ccAccepts = false; startHeartbeatEvent();
+    freshKnownApp(); command('c'); ccAccepts = false; startHeartbeatEvent();
     for (unsigned i = 0; i < 3; ++i) { hostNow = ackWaitStart + 300; loop(); }
     assert(!waitingForAck && ccWire.empty() && peerState() == PeerState::OFFLINE);
     puts("PASS: manual transports, route-pinned retries, matching ACK before expiry, cross-radio dedup and receipt priority");
@@ -2013,9 +2061,10 @@ void testApplicationTransports()
 
 void testProximityProbes()
 {
+    for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
     for (uint32_t start : {uint32_t(2000), UINT32_MAX - 100})
     {
-        freshApp(); selectedTransport = Transport::CC1101; settleForCheck(start);
+        freshApp(); selectedTransport = transport; settleForCheck(start);
         const auto first = wire.back();
         assert(first.version == Protocol::VERSION && first.type == Type::ProximityProbe &&
                first.sender == LOCAL_DEVICE && first.event == Protocol::EventType::None && first.ackForMessageId == 0);
@@ -2031,7 +2080,11 @@ void testProximityProbes()
             auto bad = reply;
             if (fault == 0) bad.message.sender = LOCAL_DEVICE;
             if (fault == 1) bad.message.event = Protocol::EventType::Heartbeat;
-            if (fault == 2) bad.message.type = Type::Ack;
+            if (fault == 2)
+            {
+                if (transport == Transport::CC1101) bad.message.type = Type::Ack;
+                else ++bad.message.ackForMessageId; // ESP-NOW may use ordinary traffic, but replies must correlate.
+            }
             if (fault == 3) bad.receivedAt = start;
             if (fault == 4) bad.receivedAt = start + 499;
             if (fault == 5) bad.message.version = 0;
@@ -2099,7 +2152,7 @@ void classificationSample(uint16_t id, int8_t rssi)
     movementStep(hostNow + 10); // Allows the next bounded probe after an accepted sample.
     const uint32_t captured = hostNow + 1;
     auto observation = proximityObservation(id, rssi, captured);
-    if (selectedTransport == Transport::CC1101)
+    if (selectedTransport == Transport::CC1101 || proximityClassification == ProximityClassification::UNKNOWN)
     {
         assert(probeOutstanding);
         observation.message.type = Type::ProximityProbeReply;
@@ -2134,7 +2187,9 @@ void completeClassifiedMeasurement(int8_t median)
     assert(Serial.log.find("PROXIMITY | median=" + std::to_string(median) + " dBm | " + label) != std::string::npos);
     assert(selectedTransport == selected && pendingTransport == pendingRoute);
     assert(memcmp(&pendingMessage, &pending, sizeof(pending)) == 0 && waitingForAck == waiting && retryCount == retries);
-    assert(ackWaitStart == ackStart && nextEventTime == nextEvent && localState() == local && peerState() == peer);
+    const auto expectedNext = prior == ProximityClassification::UNKNOWN && !waiting ?
+        hostNow - 10 + automaticHeartbeatIntervalMs() : nextEvent;
+    assert(ackWaitStart == ackStart && nextEventTime == expectedNext && localState() == local && peerState() == peer);
 }
 
 void testProximityClassification()
@@ -2240,6 +2295,58 @@ Protocol::Message requestFallbackFromEvent()
     return failed;
 }
 
+void testAutomaticHeartbeatCadence()
+{
+    static_assert(FIRST_EVENT_DELAY_MS == 1000, "startup heartbeat delay changed");
+    using Class = ProximityClassification;
+    struct Case { Class classification; uint32_t interval; };
+    const Case cases[]{{Class::CLOSE, 2500}, {Class::FAR, 4000}};
+    for (const auto& test : cases)
+    for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool acknowledged : {false, true})
+    {
+        freshApp(); notePeerSeen(); selectedTransport = transport;
+        proximityClassification = test.classification;
+        pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        hostNow = 999; loop();
+        assert(!waitingForAck && wire.empty() && ccWire.empty() && led.requests == 0);
+        hostNow = 1000; loop();
+        const auto original = pendingMessage;
+        assert(waitingForAck && pendingTransport == transport && ackWaitStart == 1000 && led.requests == 1);
+        const uint32_t completedAt = acknowledged ? 1100 : 1900;
+        if (acknowledged)
+        {
+            hostNow = completedAt; receiveVia(incoming(Type::Ack, original.messageId), transport);
+        }
+        else
+        {
+            for (unsigned retry = 1; retry <= 2; ++retry)
+            {
+                const uint32_t retryAt = 1000 + retry * 300;
+                hostNow = retryAt - 1; loop();
+                assert(waitingForAck && retryCount == retry - 1);
+                hostNow = retryAt; loop();
+                assert(waitingForAck && retryCount == retry && ackWaitStart == retryAt);
+                assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0 && led.requests == 1);
+            }
+            hostNow = completedAt; loop();
+            assert(selectedTransport == Transport::CC1101); // Includes real ESP-NOW failure fallback.
+        }
+        assert(!waitingForAck && retryCount == 0 && led.requests == 1);
+        assert(proximityClassification == test.classification && nextEventTime == completedAt + test.interval);
+        assert(Serial.log.find("PROXIMITY CHECK | START") == std::string::npos);
+        const auto due = nextEventTime;
+        hostNow = due - 1; loop();
+        assert(!waitingForAck && led.requests == 1 && nextEventTime == due);
+        assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
+        hostNow = due; loop();
+        assert(waitingForAck && ackWaitStart == due && led.requests == 2);
+        assert(pendingMessage.type == Type::Event && pendingMessage.messageId != original.messageId);
+        assert(pendingTransport == selectedTransport);
+    }
+    puts("PASS: known automatic heartbeat CLOSE=2500ms, FAR=4000ms on either radio after ACK/exhaustion; exact next-EVENT boundary, first delay=1000ms, CLOSE fallback keeps 2500ms, no cadence-driven probes");
+}
+
 void testAutomaticSelection()
 {
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
@@ -2296,11 +2403,20 @@ void testAutomaticSelectionRetries()
 {
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
     for (bool acknowledged : {false, true})
+    for (bool classified : {false, true})
     {
-        freshApp(); selectedTransport = initial; startHeartbeatEvent();
+        freshApp(); selectedTransport = initial;
+        if (classified)
+            proximityClassification = initial == Transport::ESP_NOW ?
+                ProximityClassification::CLOSE : ProximityClassification::FAR;
+        startHeartbeatEvent();
         const auto original = pendingMessage; const auto began = ackWaitStart;
+        const auto scheduled = nextEventTime;
         const auto target = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
         completePolicyMeasurement(target == Transport::CC1101 ? -85 : -50);
+        assert(proximityClassification == (target == Transport::CC1101 ?
+            ProximityClassification::FAR : ProximityClassification::CLOSE));
+        assert(nextEventTime == scheduled && led.requests == unsigned(classified));
         assert(waitingForAck && pendingTransport == initial && retryCount == 0 && ackWaitStart == began);
         assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
         receiveVia(incoming(Type::Ack, original.messageId), target); // Wrong radio cannot finish the EVENT.
@@ -2313,6 +2429,7 @@ void testAutomaticSelectionRetries()
             assert(retryCount == retry && ackWaitStart == due && pendingTransport == initial);
             assert(selectedTransport == initial && automaticSelectionPending);
             assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
+            assert(nextEventTime == scheduled && led.requests == unsigned(classified));
         }
         const auto& sent = initial == Transport::ESP_NOW ? wire : ccWire;
         unsigned events = 0;
@@ -2323,8 +2440,11 @@ void testAutomaticSelectionRetries()
         for (const auto& packet : other) assert(packet.type != Type::Event);
 
         mockedTxInFlight = 1; // Semantic completion alone is not the drained switch boundary.
+        const auto completedAt = acknowledged ? hostNow : ackWaitStart + ACK_TIMEOUT_MS;
         if (acknowledged) receiveVia(incoming(Type::Ack, original.messageId), initial);
         else { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
+        assert(nextEventTime == completedAt + (target == Transport::CC1101 ? 4000U : 2500U));
+        assert(led.requests == unsigned(classified));
         const bool fallback = !acknowledged && initial == Transport::ESP_NOW;
         assert(!waitingForAck && retryCount == 0 && automaticSelectionPending == !fallback && selectedTransport == initial);
         assert(espNowFallbackPending == fallback);
@@ -2350,6 +2470,7 @@ void testAutomaticSelectionRetries()
         assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
     }
     puts("PASS: both pending EVENT routes and exact retries/ACK deadlines survive policy changes; ACK/drain or exhaustion/drain precedes selection");
+    puts("PASS: FAR -> CLOSE and CLOSE -> FAR use 2500/4000ms at the next ACK/exhaustion without rescheduling the in-flight EVENT or replaying its LED");
 }
 
 void testAutomaticSelectionGuards()
@@ -2604,19 +2725,19 @@ void completePeerReturnMeasurement(int8_t median)
 
 void testFallbackRecovery()
 {
-    freshApp(); const auto failed = requestFallbackFromEvent();
+    freshKnownApp(); const auto failed = requestFallbackFromEvent();
     mockedTxInFlight = 0; loop();
     assert(selectedTransport == Transport::CC1101 && peerState() == PeerState::OFFLINE);
-    assert(proximityClassification == ProximityClassification::UNKNOWN);
+    assert(proximityClassification == ProximityClassification::CLOSE);
     assert(displayFrames.back().radio == "CC1101" && displayFrames.back().peer == "OFFLINE");
-    assert(displayFrames.back().distance == "UNKNOWN" && pendingTransport == Transport::ESP_NOW);
+    assert(displayFrames.back().distance == "CLOSE" && pendingTransport == Transport::ESP_NOW);
     pauseAutomaticHeartbeats = false; hostNow = nextEventTime; loop();
     const auto recovery = pendingMessage;
     assert(waitingForAck && pendingTransport == Transport::CC1101 && recovery.messageId != failed.messageId);
     assert(ccWire.size() == 1 && memcmp(&ccWire.back(), &recovery, sizeof(recovery)) == 0);
     receiveVia(incoming(Type::Ack, recovery.messageId), Transport::CC1101);
     assert(!waitingForAck && peerState() == PeerState::ONLINE);
-    assert(proximityClassification == ProximityClassification::UNKNOWN);
+    assert(proximityClassification == ProximityClassification::CLOSE);
     assert(proximityUpdateState == ProximityUpdateState::CHECKING && countWire(Type::ProximityProbe) == 1);
     // The outstanding probe defers OLED updates until a normal safe boundary.
     assert(displayFrames.back().radio == "CC1101" && displayFrames.back().peer == "OFFLINE");
@@ -2714,14 +2835,14 @@ void testPeerReturnIsolation()
         assert(peerState() == PeerState::OFFLINE && proximityUpdateState == ProximityUpdateState::READY);
         assert(countWire(Type::ProximityProbe) == 0 && occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
     }
-    // UNKNOWN->ONLINE and recovery while ESP-NOW is selected do not start checks.
+    // First contact starts an initial check; OFFLINE recovery still requires CC1101.
     for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
     for (bool offline : {false, true})
     {
         freshApp(); selectedTransport = radio;
         if (offline) notePeerUnreachable();
         startHeartbeatEvent(); receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
-        assert((proximityUpdateState == ProximityUpdateState::CHECKING) == (offline && radio == Transport::CC1101));
+        assert((proximityUpdateState == ProximityUpdateState::CHECKING) == (!offline || radio == Transport::CC1101));
     }
     freshApp(); selectedTransport = Transport::CC1101; notePeerUnreachable(); command('i');
     receiveVia(proximityObservation(24, -47, hostNow).message, Transport::CC1101);
@@ -2765,6 +2886,382 @@ void testPeerReturnTimeout()
     puts("PASS: peer-return probe failure/partial timeout stays bounded to 12s, preserves UNKNOWN/CLOSE/FAR and CC1101, never repeats while ONLINE");
 }
 
+void testInitialProximityContact()
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool acknowledged : {false, true})
+    {
+        freshApp(); selectedTransport = radio; loop();
+        assert(peerState() == PeerState::UNKNOWN && proximityClassification == ProximityClassification::UNKNOWN);
+        assertProximityReset();
+        assert(displayFrames.back().distance == "UNKNOWN");
+        auto evidence = proximityObservation(90, -50, hostNow).message;
+        if (acknowledged)
+        {
+            startHeartbeatEvent();
+            evidence = incoming(Type::Ack, pendingMessage.messageId);
+        }
+        hostNow = 10;
+        handleReceivedData(reinterpret_cast<const uint8_t*>(&evidence), sizeof(evidence), radio);
+        assert(peerState() == PeerState::ONLINE && proximityUpdateState == ProximityUpdateState::CHECKING);
+        assert(checkStartedAt == 10 && proximitySampleCount == 0 && countWire(Type::ProximityProbe) == 0);
+        loop(); // UNKNOWN obtains evidence through loop-owned ESP-NOW probes on either application route.
+        assert(countWire(Type::ProximityProbe) == 1);
+        assert(displayFrames.back().distance == "UNKNOWN"); // Existing probe-busy OLED guard still applies.
+        for (uint16_t id : {91, 92})
+        {
+            hostNow += 10;
+            const auto event = proximityObservation(id, -50, hostNow).message;
+            receiveVia(event, radio); receiveVia(event, radio);
+            startHeartbeatEvent(); receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
+            assert(checkStartedAt == 10 && proximitySampleCount == 0);
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+        }
+        assert(Serial.log.find("MOVEMENT |") == std::string::npos);
+    }
+    puts("PASS: UNKNOWN peer/UNKNOWN distance first EVENT or matched ACK starts one check on either radio; no receive-handler probes, movement or ONLINE/duplicate restarts");
+}
+
+void testInitialProximityCadence()
+{
+    // Exercise real outgoing probes and queued replies/RSSI; no heartbeat traffic
+    // supplies the samples. Both device identities execute this test.
+    for (unsigned trigger = 0; trigger < 3; ++trigger) // Movement, peer contact, cold startup.
+    for (int8_t rssi : {int8_t(-50), int8_t(-85)})
+    {
+        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        uint32_t start = 20000; // The old first-EVENT deadline is already stale.
+        if (trigger == 2)
+        {
+            protocolReady = false; delete receiveQueue; receiveQueue = nullptr;
+            setup();
+            assert(protocolReady && peerState() == PeerState::UNKNOWN);
+            assert(proximityClassification == ProximityClassification::UNKNOWN);
+            assert(proximityUpdateState == ProximityUpdateState::CHECKING && wire.empty());
+            start = checkStartedAt + 2000; // Service after the original 1000ms EVENT deadline.
+            assert(nextEventTime < start && led.requests == 0);
+        }
+        else if (trigger == 1)
+        {
+            hostNow = start; notePeerSeen();
+            startPeerAvailabilityProximityCheck(PeerState::UNKNOWN);
+        }
+        else settleForCheck(start); // Existing movement trigger also works before peer ONLINE.
+        const auto peer = peerState();
+        struct Delivery { uint32_t at; Protocol::Message packet; };
+        std::vector<Delivery> deliveries;
+        size_t sent = 0;
+        uint16_t peerId = 100;
+        uint16_t peerProbeId = 0;
+        std::vector<uint16_t> peerSamples;
+        bool completed = false, sawChecking = false;
+        uint32_t completedAt = 0;
+        for (uint32_t now = start; now < start + CHECK_TIMEOUT_MS; now += 10)
+        {
+            hostNow = now;
+            if (trigger == 2 && peerSamples.size() < 3)
+            {
+                // The other UNKNOWN endpoint independently probes too. Run our
+                // real responder; each endpoint collects RSSI from replies.
+                peerProbeId = peerId++;
+                const auto probe = incoming(Type::ProximityProbe, 0, peerProbeId);
+                queueReceivedData(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe));
+            }
+            for (auto it = deliveries.begin(); it != deliveries.end();)
+            {
+                if (it->at != now) { ++it; continue; }
+                ESPNowRadio::RssiObservation observation{};
+                observation.message = it->packet; observation.rssi = rssi; observation.receivedAt = now;
+                rssiObservations.push_back(observation);
+                queueReceivedData(reinterpret_cast<const uint8_t*>(&it->packet), sizeof(it->packet));
+                it = deliveries.erase(it);
+            }
+            loop();
+            for (; sent < wire.size(); ++sent)
+            {
+                const auto& packet = wire[sent];
+                assert(packet.event == Protocol::EventType::None);
+                if (packet.type == Type::ProximityProbe)
+                    deliveries.push_back({now + 10, incoming(Type::ProximityProbeReply, packet.messageId, peerId++)});
+                else
+                {
+                    assert(trigger == 2 && packet.type == Type::ProximityProbeReply);
+                    assert(packet.ackForMessageId == peerProbeId);
+                    for (const auto id : peerSamples) assert(id != packet.messageId);
+                    peerSamples.push_back(packet.messageId);
+                }
+            }
+            assert(!waitingForAck && retryCount == 0 && controlCount == 0 && peerState() == peer);
+            assert(led.requests == 0 && !led.busy() && hostPixel().shown == 0 && !haveLastPeerEvent);
+            if (!displayFrames.empty() && displayFrames.back().distance == "CHECKING") sawChecking = true;
+            if (proximityClassification != ProximityClassification::UNKNOWN)
+            {
+                completedAt = now;
+                assert(uint32_t(now - start) < CHECK_TIMEOUT_MS && sawChecking);
+                assertProximityReset();
+                assert(occurrences(Serial.log, "PROXIMITY CHECK | SAMPLE") == 3);
+                assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+                assert(countWire(Type::ProximityProbe) == 3 && countWire(Type::Event) == 0 && countWire(Type::Ack) == 0);
+                completed = true;
+                break;
+            }
+        }
+        assert(completed);
+        if (trigger == 2)
+        {
+            assert(peerSamples.size() == 3 && countWire(Type::ProximityProbeReply) == 3);
+            assert(peerState() == PeerState::UNKNOWN && Serial.log.find("MOVEMENT |") == std::string::npos);
+        }
+        const bool far = rssi <= ENTER_FAR_DBM;
+        const uint32_t interval = far ? 4000 : 2500;
+        assert(proximityClassification == (far ? ProximityClassification::FAR : ProximityClassification::CLOSE));
+        assert(nextEventTime == completedAt + interval);
+        hostNow = nextEventTime - 1; loop();
+        assert(!waitingForAck && led.requests == 0);
+        assert(selectedTransport == (far ? Transport::CC1101 : Transport::ESP_NOW));
+        assert(displayFrames.back().distance == (far ? "FAR" : "CLOSE"));
+        assert(displayFrames.back().radio == (far ? "CC1101" : "ESP-NOW"));
+        hostNow = nextEventTime; loop();
+        assert(waitingForAck && pendingMessage.type == Type::Event && led.requests == 1);
+        assert(ackWaitStart == completedAt + interval && pendingTransport == selectedTransport);
+        assert(countWire(Type::ProximityProbe) == 3); // Completion does not start background probing.
+    }
+    puts("PASS: UNKNOWN obtains three fresh correlated probe/reply RSSI samples within 12s without heartbeat EVENTs, LED, ACK transactions or peer mutation; first CLOSE/FAR EVENT waits 2500/4000ms after classification");
+    puts("PASS: cold startup with peer UNKNOWN starts one check; both conceptually simultaneous UNKNOWN endpoints exchange three distinct probe replies without movement or heartbeat traffic");
+}
+
+void testUnknownHeartbeatSilence()
+{
+    freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+    for (uint32_t now : {0U, 999U, 1000U, 4000U, 12000U, 24000U})
+    {
+        hostNow = now; loop();
+        assert(proximityClassification == ProximityClassification::UNKNOWN && automaticHeartbeatIntervalMs() == 0);
+        assert(!waitingForAck && wire.empty() && ccWire.empty() && led.requests == 0 && !led.busy());
+        assert(hostPixel().shown == 0 && nextMessageId == 1);
+        assertProximityReset(); // Silence does not create a recurring check.
+    }
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshApp(); selectedTransport = radio;
+        const auto event = proximityObservation(90, -50, 0).message;
+        receiveVia(event, radio);
+        assert(haveLastPeerEvent && lastPeerEventId == 90 && peerState() == PeerState::ONLINE);
+        receiveVia(event, radio);
+        const auto& receipts = radio == Transport::ESP_NOW ? wire : ccWire;
+        unsigned acks = 0;
+        for (const auto& packet : receipts)
+            if (packet.type == Type::Ack) { ++acks; assert(packet.ackForMessageId == 90); }
+        assert(acks == 2 && led.requests == 0 && !led.busy() && hostPixel().shown == 0);
+        assert(proximityClassification == ProximityClassification::UNKNOWN && !waitingForAck);
+        assert(occurrences(Serial.log, "RX NEW EVENT") == 1 && occurrences(Serial.log, "RX DUPLICATE") == 1);
+        startHeartbeatEvent(); // Even an explicitly created transaction cannot light an UNKNOWN device.
+        assert(led.requests == 0 && !led.busy());
+        for (unsigned attempt = 0; attempt < 3; ++attempt)
+        {
+            hostNow = ackWaitStart + 300; loop();
+            assert(led.requests == 0 && !led.busy());
+        }
+        loop(); // Apply fallback after the expired transaction cancels its UNKNOWN check.
+        assert(!waitingForAck && selectedTransport == Transport::CC1101);
+        const auto sent = wire.size(), ccSent = ccWire.size();
+        pauseAutomaticHeartbeats = false;
+        hostNow += 20000; loop();
+        assert(!waitingForAck && wire.size() == sent && ccWire.size() == ccSent && led.requests == 0);
+    }
+    puts("PASS: UNKNOWN has no automatic EVENT/local LED; new remote EVENT ACKs normally and duplicate re-ACKs without flashing on either radio");
+}
+
+void testKnownHeartbeatRechecks()
+{
+    for (auto prior : {ProximityClassification::CLOSE, ProximityClassification::FAR})
+    for (bool cancel : {false, true})
+    for (unsigned samples : {0U, 2U})
+    {
+        freshApp(); notePeerSeen(); proximityClassification = prior;
+        selectedTransport = prior == ProximityClassification::FAR ? Transport::CC1101 : Transport::ESP_NOW;
+        const uint32_t interval = prior == ProximityClassification::FAR ? 4000 : 2500;
+        pauseAutomaticHeartbeats = false; nextEventTime = 100;
+        startProximityCheck(0);
+        hostNow = 100; loop();
+        assert(proximityUpdateState == ProximityUpdateState::CHECKING && proximityClassification == prior);
+        assert(waitingForAck && led.requests == 1);
+        hostNow = 150; receiveVia(incoming(Type::Ack, pendingMessage.messageId), pendingTransport);
+        assert(nextEventTime == 150 + interval && !waitingForAck && led.requests == 1);
+        pauseAutomaticHeartbeats = true; // Isolate a failed measurement from unrelated ACK exhaustion.
+        for (unsigned i = 0; i < samples; ++i) classificationSample(800 + i, -60);
+        if (cancel) movementStep(hostNow + 10, MotionEvent::Activity);
+        else { hostNow = CHECK_TIMEOUT_MS; loop(); }
+        assertProximityReset();
+        assert(proximityClassification == prior && automaticHeartbeatIntervalMs() == interval);
+        assert(nextEventTime == 150 + interval && led.requests == 1);
+    }
+    puts("PASS: CLOSE/FAR keep their heartbeat and cadence while CHECKING; zero/partial timeout or movement cancellation preserves known classification and scheduling");
+}
+
+void testInitialProximityTimeout()
+{
+    for (unsigned samples : {0U, 2U})
+    {
+        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        const auto event = proximityObservation(90, -50, hostNow).message;
+        receive(event);
+        const auto began = checkStartedAt;
+        for (unsigned i = 0; i < samples; ++i) classificationSample(100 + i, -50);
+        hostNow = began + CHECK_TIMEOUT_MS - 1; loop();
+        assert(checkStartedAt == began && proximitySampleCount == samples);
+        hostNow = began + CHECK_TIMEOUT_MS; loop();
+        assertProximityReset();
+        assert(proximityClassification == ProximityClassification::UNKNOWN && peerState() == PeerState::ONLINE);
+        assert(displayFrames.back().distance == "UNKNOWN" && selectedTransport == Transport::ESP_NOW);
+        const auto probes = countWire(Type::ProximityProbe);
+        receive(event); // Retry of the original first-contact EVENT after timeout.
+        receive(proximityObservation(91, -50, hostNow).message);
+        receive(incoming(Type::Ack, 999)); // Unrelated receipt cannot restart the expired UNKNOWN check.
+        for (unsigned i = 0; i < 100; ++i) { hostNow += 1000; loop(); }
+        assertProximityReset();
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | TIMEOUT") == 1);
+        assert(countWire(Type::Event) == 0 && led.requests == 0 && !led.busy());
+        assert(countWire(Type::ProximityProbe) == probes);
+        settleForCheck(hostNow + 2000); // A legitimate future movement may try again.
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 2);
+    }
+    puts("PASS: initial check with zero/two samples times out at 12s, OLED returns UNKNOWN, ONLINE traffic/duplicates/loops never retry; future movement can start another check");
+}
+
+void testInitialProximityStartup()
+{
+    for (bool deep : {false, true})
+    for (bool recovered : {false, true})
+    for (bool runtimeOk : {false, true})
+    {
+        freshApp(); protocolReady = false; pauseAutomaticHeartbeats = false;
+        delete receiveQueue; receiveQueue = nullptr;
+        injectedBoot.deep = deep;
+        RtcState::save({123, false, 0, {false, 0}});
+        injectWakePacket = recovered;
+        injectedPacket = proximityObservation(90, -50, hostNow).message;
+        radioStarts = runtimeOk;
+        atRadioStart = [] {
+            assert(!protocolReady && motionInitializations == 1 && displayInitializations == 1);
+            assert(hostPixel().begins == 1 && proximityClassification == ProximityClassification::UNKNOWN);
+            assertProximityReset(); // Bootstrap waits for successful ESP-NOW/runtime initialization.
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
+            assert((peerState() == PeerState::ONLINE) == (injectedBoot.deep && injectWakePacket));
+        };
+        setup();
+        assert(protocolReady == runtimeOk);
+        assert((proximityUpdateState == ProximityUpdateState::CHECKING) == runtimeOk);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == (runtimeOk ? 1U : 0U));
+        assert(wire.empty() && led.requests == 0);
+        if (!runtimeOk)
+        {
+            for (unsigned i = 0; i < 100; ++i) loop();
+            assertProximityReset();
+            assert(wire.empty() && occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
+            continue;
+        }
+        const auto peer = peerState();
+        assert(peer == (deep && recovered ? PeerState::ONLINE : PeerState::UNKNOWN));
+        if (deep && recovered) assert(rtcRestored && wakeReport.processed && wakeReport.ackSent);
+        const auto began = checkStartedAt;
+        // An ONLINE startup/peer-contact path cannot overlap the bootstrap check.
+        startPeerAvailabilityProximityCheck(PeerState::UNKNOWN);
+        assert(checkStartedAt == began && occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+        for (uint32_t elapsed = 0; elapsed < CHECK_TIMEOUT_MS; elapsed += PROBE_REPLY_WAIT_MS)
+        {
+            hostNow = began + elapsed; loop();
+            assert(checkStartedAt == began && proximityUpdateState == ProximityUpdateState::CHECKING);
+            assert(proximityClassification == ProximityClassification::UNKNOWN && peerState() == peer);
+            assert(!waitingForAck && led.requests == 0 && !led.busy());
+        }
+        hostNow = began + CHECK_TIMEOUT_MS; loop();
+        assertProximityReset();
+        assert(countWire(Type::ProximityProbe) == 24 && wire.size() == 24 && ccWire.empty());
+        assert(proximityClassification == ProximityClassification::UNKNOWN && hostPixel().shown == 0);
+        for (unsigned i = 0; i < 100; ++i) { hostNow += 1000; loop(); }
+        assertProximityReset();
+        assert(wire.size() == 24 && countWire(Type::Event) == 0 && led.requests == 0);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | TIMEOUT") == 1);
+        settleForCheck(hostNow + 2000); // A later real movement remains an eligible one-shot trigger.
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 2);
+        hostNow = checkStartedAt + CHECK_TIMEOUT_MS; loop();
+        assertProximityReset();
+        assert(occurrences(Serial.log, "PROXIMITY CHECK | TIMEOUT") == 2 && led.requests == 0);
+    }
+    // Model another startup path having already started a valid check, or an
+    // initialization callback leaving the system IDLE. Use the existing guards.
+    for (bool checking : {false, true})
+    {
+        freshApp(); protocolReady = false;
+        delete receiveQueue; receiveQueue = nullptr;
+        if (checking) atRadioStart = [] {
+            startProximityCheck(1);
+            proximitySampleCount = 1; proximitySamples[0] = {900, -50};
+        };
+        else atRadioStart = [] { PowerManager::forceIdle(hostNow); };
+        setup();
+        assert(protocolReady && led.requests == 0 && wire.empty());
+        if (checking)
+        {
+            assert(checkStartedAt == 1 && proximitySampleCount == 1 && proximitySamples[0].messageId == 900);
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+        }
+        else
+        {
+            assert(localState() == LocalState::IDLE);
+            assertProximityReset();
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
+        }
+    }
+    puts("PASS: cold/deep runtime starts one UNKNOWN check without ONLINE; isolated startup times out at 12s after 24 bounded probes, stays silent without restart, permits later movement; retained wake, ACTIVE/overlap and failed-runtime guards preserved");
+}
+
+void testInitialProximityIsolation()
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        for (auto type : {Type::ProximityProbe, Type::ProximityProbeReply, Type::SleepRequest,
+                          Type::SleepReady, Type::SleepCommit, Type::SleepAck, Type::SleepCancel, Type::Ack})
+        {
+            freshApp(); selectedTransport = radio;
+            receiveVia(incoming(type, type == Type::ProximityProbe ? 0 : 23, 23), radio);
+            assertProximityReset();
+            assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
+        }
+        for (unsigned invalid = 0; invalid < 6; ++invalid)
+        {
+            freshApp(); auto packet = proximityObservation(90, -50, hostNow).message;
+            if (invalid == 0) ++packet.version;
+            if (invalid == 1) packet.sender = LOCAL_DEVICE;
+            if (invalid == 2) packet.event = Protocol::EventType::None;
+            if (invalid == 3) packet.ackForMessageId = 1;
+            if (invalid == 4) packet.type = static_cast<Type>(99);
+            handleReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - (invalid == 5), radio);
+            assert(peerState() == PeerState::UNKNOWN); assertProximityReset();
+        }
+        freshApp(); selectedTransport = radio; startHeartbeatEvent();
+        const auto id = pendingMessage.messageId;
+        receiveVia(incoming(Type::Ack, id), radio == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW);
+        receiveVia(incoming(Type::Ack, id + 1), radio);
+        auto malformed = incoming(Type::Ack, id); malformed.event = Protocol::EventType::Heartbeat;
+        receiveVia(malformed, radio);
+        assert(waitingForAck && peerState() == PeerState::UNKNOWN); assertProximityReset();
+        for (auto prior : {ProximityClassification::CLOSE, ProximityClassification::FAR})
+        {
+            freshApp(); proximityClassification = prior;
+            receiveVia(proximityObservation(90, -50, hostNow).message, radio);
+            assert(peerState() == PeerState::ONLINE && proximityClassification == prior); assertProximityReset();
+        }
+        freshApp(); command('i');
+        receiveVia(proximityObservation(90, -50, hostNow).message, radio);
+        assert(peerState() == PeerState::ONLINE && localState() == LocalState::IDLE); assertProximityReset();
+    }
+    puts("PASS: initial checks reject probes, sleep traffic, unrelated/wrong-radio/malformed ACKs and malformed EVENTs; known classification and ACTIVE guards retained");
+}
+
 void testDisplayStartup()
 {
     for (bool deep : {false, true}) for (bool displayOk : {false, true})
@@ -2777,19 +3274,22 @@ void testDisplayStartup()
         injectWakePacket = deep;
         injectedPacket = {1, Type::Event, 70, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
         motionInitOk = motionOk; displayInitOk = displayOk;
-        displayedStatus = {"OFFLINE", "FAR", "CC1101", "IDLE"}; // Prior boot must not suppress the first draw.
+        displayedStatus = {"OFFLINE", "FAR", "CC1101", "IDLE", "MOVING"}; // Prior boot must not suppress the first draw.
         atRadioStart = [] { assert(motionInitializations == 1 && displayInitializations == 1); };
         setup();
         assert(protocolReady && motionInitializations == 1 && displayInitializations == 1);
         assert(displayReady == displayOk && displayedStatus.peer == nullptr && displayFrames.empty());
         if (deep) assert(wakeReport.processed && wakeReport.ackSent);
         loop();
+        assert(displayFrames.empty()); // Startup probes preserve the existing probe-busy OLED guard.
+        classificationSample(800, -50); // A correlated reply provides an idle boundary, still CHECKING.
         assert(displayFrames.size() == (displayOk ? 1U : 0U));
         if (displayOk)
         {
             const auto& frame = displayFrames.back();
             assert(frame.device == DEVICE_NAME && frame.peer == (deep ? "ONLINE" : "UNKNOWN"));
-            assert(frame.distance == "UNKNOWN" && frame.radio == "ESP-NOW" && frame.state == "ACTIVE");
+            assert(frame.distance == "CHECKING" && frame.radio == "ESP-NOW" && frame.state == "ACTIVE");
+            assert(frame.motion == (motionOk ? "STILL" : "N/A") && motionReady == motionOk);
         }
         for (unsigned i = 0; i < 100; ++i) loop();
         assert(displayInitializations == 1 && displayFrames.size() == (displayOk ? 1U : 0U));
@@ -2808,9 +3308,11 @@ void testDisplayTransitions()
     notePeerUnreachable(); loop();
     assert(displayFrames.size() == 3 && displayFrames.back().peer == "OFFLINE");
     notePeerSeen(); startProximityCheck(hostNow); loop();
-    assert(displayFrames.size() == 4 && displayFrames.back().distance == "CHECKING");
+    assert(displayFrames.size() == 3); // UNKNOWN now has an outstanding dedicated probe.
     assert(proximityClassification == ProximityClassification::UNKNOWN);
-    classificationSample(800, -100); classificationSample(801, -50);
+    classificationSample(800, -100);
+    assert(displayFrames.size() == 4 && displayFrames.back().distance == "CHECKING");
+    classificationSample(801, -50);
     assert(displayFrames.size() == 4 && proximitySampleCount == 2);
     classificationSample(802, -40);
     assert(displayFrames.size() == 5 && displayFrames.back().distance == "CLOSE");
@@ -2860,6 +3362,50 @@ void isolatedDisplayService()
     assert(displayObservedRuntime() == before);
 }
 
+void testDisplayMotion()
+{
+    freshKnownApp(); loop(); // Isolate motion redraws from UNKNOWN's dedicated probe wait.
+    assert(displayFrames.size() == 1 && displayFrames.back().motion == "STILL");
+    const auto unchanged = displayFrames.back();
+    movementStep(100, MotionEvent::Activity);
+    assert(displayFrames.size() == 2 && displayFrames.back().motion == "MOVING");
+    for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
+    movementStep(200, MotionEvent::Activity);
+    assert(displayFrames.size() == 2);
+    movementStep(300, MotionEvent::Inactivity);
+    assert(displayFrames.size() == 3 && displayFrames.back().motion == "SETTLING");
+    assert(displayFrames.back().peer == unchanged.peer && displayFrames.back().distance == unchanged.distance);
+    assert(displayFrames.back().radio == unchanged.radio && displayFrames.back().state == unchanged.state);
+    assert(occurrences(Serial.log, "PROXIMITY CHECK | START") == 0);
+    movementStep(400, MotionEvent::Inactivity);
+    movementStep(1299);
+    for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
+    assert(displayFrames.size() == 3 && settleStartedAt == 300);
+    movementStep(1300); // Existing 1000ms settlement, including its one proximity trigger.
+    assert(movementState == MovementState::READY && proximityUpdateState == ProximityUpdateState::CHECKING);
+    assert(displayFrames.size() == 4 && displayFrames.back().motion == "STILL");
+    assert(displayFrames.back().distance == "CHECKING" && occurrences(Serial.log, "PROXIMITY CHECK | START") == 1);
+    for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
+    assert(displayFrames.size() == 4);
+
+    // READY must also redraw when motion is the ONLY visible field that changes.
+    cancelProximityCheck("TEST");
+    movementState = MovementState::WAITING; isolatedDisplayService();
+    const auto beforeReady = displayFrames.size();
+    movementState = MovementState::READY; isolatedDisplayService();
+    assert(displayFrames.size() == beforeReady + 1 && displayFrames.back().motion == "STILL");
+    motionReady = false; isolatedDisplayService();
+    const auto unavailableFrames = displayFrames.size();
+    assert(displayFrames.back().motion == "N/A");
+    for (auto state : {MovementState::READY, MovementState::MOVING, MovementState::WAITING})
+    {
+        movementState = state;
+        for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
+        assert(displayFrames.size() == unavailableFrames && displayFrames.back().motion == "N/A");
+    }
+    puts("PASS: OLED motion STILL -> MOVING -> SETTLING -> STILL follows existing movement/1000ms proximity settlement; motion-only changes redraw once, unchanged/N/A text does not redraw or mutate runtime");
+}
+
 void testDisplayGuards()
 {
     for (unsigned guard = 0; guard < 12; ++guard)
@@ -2885,14 +3431,17 @@ void testDisplayGuards()
             case 11: displayReady = false; break;
         }
         notePeerUnreachable(); proximityClassification = ProximityClassification::FAR;
+        movementState = MovementState::MOVING;
         isolatedDisplayService();
         // Several visible changes while busy must coalesce, without acknowledging a draw.
         proximityClassification = ProximityClassification::CLOSE;
+        movementState = MovementState::WAITING;
         const auto log = Serial.log;
         for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
         assert(displayFrames.size() == 1 && Serial.log == log);
         assert(displayedStatus.peer == oldSnapshot.peer && displayedStatus.distance == oldSnapshot.distance);
         assert(displayedStatus.radio == oldSnapshot.radio && displayedStatus.state == oldSnapshot.state);
+        assert(displayedStatus.motion == oldSnapshot.motion);
         switch (guard)
         {
             case 0: protocolReady = true; break;
@@ -2911,6 +3460,7 @@ void testDisplayGuards()
         isolatedDisplayService();
         assert(displayFrames.size() == 2 && displayFrames.back().distance == "CLOSE");
         assert(displayFrames.back().peer == displayPeerName(peerState()));
+        assert(displayFrames.back().motion == "SETTLING");
         for (unsigned i = 0; i < 100; ++i) isolatedDisplayService();
         assert(displayFrames.size() == 2);
     }
@@ -2956,9 +3506,282 @@ void testDisplaySleep()
     puts("PASS: no OLED redraw during negotiation/SLEEPING/WAKING; undrawn status cannot block physical sleep; live updates resume when ACTIVE");
 }
 
+void ledStep(uint32_t now, uint8_t red, bool busy = true)
+{
+    hostNow = now;
+    const auto before = displayObservedRuntime();
+    const auto shows = hostPixel().shows;
+    led.update(now);
+    assert(displayObservedRuntime() == before); // Includes fake millis: a hidden delay would fail this.
+    assert(hostPixel().shows <= shows + 1);
+    assert(hostPixel().shown == uint32_t(red) << 16 && led.busy() == busy);
+    const auto after = hostPixel().shows;
+    led.update(now); // Same brightness/idle must not resend the pixel.
+    assert(hostPixel().shows == after);
+}
+
+void testLedAnimation()
+{
+    struct Frame { uint32_t offset; uint8_t red; };
+    const Frame frames[]{{0, 0}, {4, 5}, {65, 90}, {130, 180}, {134, 175}, {195, 90},
+                         {260, 0}, {295, 0}, {330, 0}, {334, 5}, {422, 126},
+                         {515, 255}, {519, 250}, {608, 127}, {699, 2}};
+    for (uint32_t start : {0U, UINT32_MAX - 300U})
+    {
+        freshApp(); assert(!led.busy() && hostPixel().shown == 0);
+        const auto shows = hostPixel().shows;
+        led.requestHeartbeat();
+        assert(led.busy() && hostPixel().shows == shows); // Request never touches hardware or waits.
+        for (const auto& frame : frames) ledStep(start + frame.offset, frame.red);
+        ledStep(start + 700, 0, false);
+        ledStep(start + 2000, 0, false); // No blocking tail, cooldown or recurring animation.
+    }
+    for (uint32_t restartAt : {65U, 195U, 295U, 422U, 608U})
+    {
+        freshApp(); led.requestHeartbeat(); led.update(0); hostNow = restartAt; led.update(hostNow);
+        const auto shows = hostPixel().shows;
+        led.requestHeartbeat(); assert(hostPixel().shows == shows);
+        ledStep(restartAt, 0); ledStep(restartAt + 65, 90); ledStep(restartAt + 130, 180);
+        ledStep(restartAt + 515, 255); ledStep(restartAt + 700, 0, false);
+    }
+    freshApp(); led.requestHeartbeat(); ledStep(0, 0);
+    ledStep(450, 165); ledStep(10000, 0, false); // Late service jumps directly to the current frame.
+    freshApp(); hostPixel().ready = false; led.requestHeartbeat(); hostNow = 100;
+    const auto shows = hostPixel().shows; led.update(hostNow);
+    assert(led.busy() && hostPixel().shows == shows && hostNow == 100);
+    hostPixel().ready = true; ledStep(100, 0); ledStep(230, 180);
+    hostPixel().ready = false; hostNow = 300; led.update(hostNow);
+    assert(hostPixel().shown == uint32_t(180) << 16 && hostNow == 300);
+    hostPixel().ready = true; ledStep(360, 0); ledStep(800, 0, false);
+    freshApp(); led.requestHeartbeat(); ledStep(0, 0); ledStep(130, 180);
+    led.off(); assert(!led.busy() && hostPixel().shown == 0); ledStep(515, 0, false);
+    puts("PASS: real LED 180/255 red double pulse, 130/70/185 ms fades/gap, 700 ms finish, rollover, restart, skipped frames, latch deferral and no delay/state side effects");
+}
+
+void testLedEvents(ProximityClassification classification)
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(classification);
+        auto event = proximityObservation(70, -50, hostNow).message;
+        if (radio == Transport::ESP_NOW)
+        {
+            queueReceivedData(reinterpret_cast<const uint8_t*>(&event), sizeof(event));
+            assert(!led.busy() && hostPixel().shows == 0); // Callback only queues; no LED work.
+            loop();
+        }
+        else receiveVia(event, radio);
+        assert(led.busy() && hostPixel().shows == 0); // Exactly the new EVENT requested an animation.
+        auto receipts = [&]() { return radio == Transport::ESP_NOW ? wire.size() : ccWire.size(); };
+        const auto& receipt = radio == Transport::ESP_NOW ? wire.back() : ccWire.back();
+        assert(receipt.type == Type::Ack && receipt.ackForMessageId == 70 && receipts() == 1);
+        const auto start = hostNow; ledStep(start, 0);
+        hostNow = start + 65; receiveVia(event, radio);
+        assert(receipts() == 2 && hostPixel().shown == uint32_t(90) << 16);
+        ledStep(start + 130, 180); // Duplicate did not restart the clock.
+        receiveVia(event, radio == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW);
+        ledStep(start + 195, 90); // Cross-radio duplicate uses the same dedup path.
+        event.messageId = 71; receiveVia(event, radio);
+        const auto restarted = hostNow;
+        ledStep(restarted, 0); ledStep(restarted + 65, 90); ledStep(restarted + 515, 255);
+        ledStep(restarted + 700, 0, false);
+        const auto ackCount = receipts(); receiveVia(event, radio);
+        assert(!led.busy() && receipts() == ackCount + 1); // A late retry is still re-ACKed, never replayed.
+    }
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    for (auto type : {Type::Ack, Type::ProximityProbe, Type::ProximityProbeReply,
+                      Type::SleepRequest, Type::SleepReady, Type::SleepCommit, Type::SleepAck, Type::SleepCancel})
+    {
+        freshKnownApp(classification); const auto packet = incoming(type, type == Type::ProximityProbe ? 0 : 23, 23);
+        receiveVia(packet, radio); assert(!led.busy() && hostPixel().shown == 0);
+    }
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(classification); selectedTransport = radio; startHeartbeatEvent();
+        ledStep(0, 0); ledStep(65, 90);
+        receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
+        assert(!waitingForAck && led.busy());
+        ledStep(130, 180); // Local creation starts a pulse; its matching ACK does not restart it.
+        for (unsigned invalid = 0; invalid < 6; ++invalid)
+        {
+            freshKnownApp(classification); auto packet = proximityObservation(70, -50, hostNow).message;
+            if (invalid == 0) ++packet.version;
+            if (invalid == 1) packet.sender = LOCAL_DEVICE;
+            if (invalid == 2) packet.event = Protocol::EventType::None;
+            if (invalid == 3) packet.ackForMessageId = 1;
+            if (invalid == 4) packet.type = static_cast<Type>(99);
+            handleReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - (invalid == 5), radio);
+            assert(!led.busy() && hostPixel().shows == 0);
+        }
+    }
+    puts("PASS: new remote EVENT on either radio requests identical LED pulses; queued callbacks, duplicates, ACK/probe/sleep traffic and malformed packets cannot replay/request them");
+}
+
+void testLedLocalHeartbeat(ProximityClassification classification)
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool accepted : {false, true})
+    {
+        freshKnownApp(classification); notePeerSeen(); selectedTransport = radio;
+        radioAccepts = ccAccepts = accepted; nextMessageId = 0xFFFF;
+        const Protocol::Message expected{Protocol::VERSION, Type::Event, 0xFFFF,
+            LOCAL_DEVICE, Protocol::EventType::Heartbeat, 0};
+        startHeartbeatEvent();
+        assert(led.busy() && led.requests == 1 && hostPixel().shows == 0 && hostNow == 0);
+        assert(waitingForAck && retryCount == 0 && ackWaitStart == 0 && nextMessageId == 0);
+        assert(pendingTransport == radio && memcmp(&pendingMessage, &expected, sizeof(expected)) == 0);
+        ledStep(0, 0); ledStep(65, 90); ledStep(130, 180);
+        hostNow = 300; loop();
+        assert(waitingForAck && retryCount == 1 && ackWaitStart == 300 && led.requests == 1);
+        ledStep(300, 0); ledStep(334, 5); ledStep(515, 255);
+        hostNow = 600; loop();
+        assert(waitingForAck && retryCount == 2 && ackWaitStart == 600 && led.requests == 1);
+        ledStep(600, 138); ledStep(608, 127); ledStep(700, 0, false);
+        hostNow = 900; loop();
+        assert(!waitingForAck && retryCount == 0 && peerState() == PeerState::OFFLINE);
+        assert(!led.busy() && led.requests == 1 && hostPixel().shown == 0 && nextMessageId == 0);
+        assert(pendingTransport == radio && memcmp(&pendingMessage, &expected, sizeof(expected)) == 0);
+        const auto& packets = radio == Transport::ESP_NOW ? wire : ccSubmitAttempts;
+        assert(packets.size() == 3);
+        for (const auto& packet : packets) assert(memcmp(&packet, &expected, sizeof(expected)) == 0);
+        assert(selectedTransport == Transport::CC1101); // Existing fallback, without replaying the exhausted EVENT.
+        assert(radio == Transport::CC1101 ? wire.empty() : ccWire.empty());
+        ledStep(1000, 0, false);
+        startHeartbeatEvent(); // Only a fresh transaction on the selected route starts another pulse.
+        assert(pendingMessage.messageId == 0 && pendingTransport == Transport::CC1101 && led.busy() && led.requests == 2);
+        ledStep(1000, 0); ledStep(1065, 90);
+    }
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(classification); notePeerSeen(); selectedTransport = radio; startHeartbeatEvent();
+        auto sharedEvent = pendingMessage;
+        ledStep(0, 0); ledStep(65, 90);
+        receiveVia(incoming(Type::Ack, sharedEvent.messageId), radio);
+        assert(led.requests == 1);
+        ledStep(130, 180); ledStep(195, 90); // ACK cannot restart the sender's pulse.
+        startHeartbeatEvent();
+        assert(pendingMessage.messageId != sharedEvent.messageId && led.requests == 2);
+        ledStep(195, 0); ledStep(260, 90); ledStep(325, 180); // Fresh local EVENT restarts an active pulse.
+
+        // Model the opposite endpoint's identity; the same EVENT ID/payload is
+        // delivered through its real receive path (both identities run this suite).
+        freshKnownApp(classification); sharedEvent.sender = PEER_DEVICE;
+        hostNow = 2; receiveVia(sharedEvent, radio);
+        assert(led.busy() && led.requests == 1 && hostPixel().shows == 0 && lastPeerEventId == sharedEvent.messageId);
+        ledStep(2, 0); ledStep(67, 90);
+        receiveVia(sharedEvent, radio); // Re-ACK without restarting the peer's pulse.
+        assert(led.requests == 1);
+        ledStep(132, 180); ledStep(517, 255); ledStep(702, 0, false);
+        const auto& receipts = radio == Transport::ESP_NOW ? wire : ccWire;
+        assert(receipts.size() == 2);
+        for (const auto& receipt : receipts)
+            assert(receipt.type == Type::Ack && receipt.ackForMessageId == sharedEvent.messageId);
+    }
+    puts("PASS: new local EVENT starts one pulse even on rejected TX; identical 300/600ms retries and 900ms exhaustion/fallback never restart it; only fresh EVENT restarts; peer mirrors same ID/payload and re-ACKs duplicates");
+}
+
+void testLedProtocolIsolation(ProximityClassification classification)
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool acknowledged : {false, true})
+    {
+        std::string baseline;
+        for (bool animate : {false, true})
+        {
+            freshKnownApp(classification); selectedTransport = radio; pendingMessage = {}; ackWaitStart = 0;
+            receiveVia(proximityObservation(70, -50, hostNow).message, radio);
+            if (!animate) led.off();
+            led.update(hostNow);
+            startHeartbeatEvent();
+            if (!animate) led.off();
+            const auto message = pendingMessage;
+            const auto start = ackWaitStart;
+            std::string trace;
+            for (uint32_t elapsed : {100U, 299U, 300U, 599U, 600U, 700U, 900U})
+            {
+                hostNow = start + elapsed;
+                if (elapsed == 100) receiveVia(proximityObservation(71, -50, hostNow).message, radio);
+                else if (elapsed == 700 && acknowledged) receiveVia(incoming(Type::Ack, message.messageId), radio);
+                else loop();
+                if (!animate) led.off();
+                if (elapsed == 299) assert(waitingForAck && retryCount == 0 && ackWaitStart == start);
+                if (elapsed == 300) assert(waitingForAck && retryCount == 1 && ackWaitStart == start + 300);
+                if (elapsed == 600) assert(waitingForAck && retryCount == 2 && ackWaitStart == start + 600);
+                if (animate && elapsed <= 700) assert(led.busy());
+                assert(memcmp(&pendingMessage, &message, sizeof(message)) == 0 && pendingTransport == radio);
+                trace += displayObservedRuntime();
+            }
+            assert(!waitingForAck && retryCount == 0);
+            assert(peerState() == (acknowledged ? PeerState::ONLINE : PeerState::OFFLINE));
+            for (const auto& packet : wire) trace.append(reinterpret_cast<const char*>(&packet), sizeof(packet));
+            for (const auto& packet : ccWire) trace.append(reinterpret_cast<const char*>(&packet), sizeof(packet));
+            if (!animate) baseline = trace;
+            else assert(trace == baseline);
+        }
+    }
+    puts("PASS: identical EVENT/ACK traffic, pending bytes/radio, 300 ms/two-retry deadlines, exhaustion/fallback and power state with LED enabled or cancelled");
+}
+
+void testLedMovementAndSleep(ProximityClassification classification)
+{
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(classification); selectedTransport = radio;
+        receiveVia(proximityObservation(70, -50, hostNow).message, radio);
+        const auto start = hostNow; ledStep(start, 0);
+        movementStep(start + 65, MotionEvent::Activity);
+        assert(movementState == MovementState::MOVING && led.busy() && hostPixel().shown == uint32_t(90) << 16);
+        movementStep(start + 130, MotionEvent::Inactivity);
+        assert(movementState == MovementState::WAITING && led.busy() && hostPixel().shown == uint32_t(180) << 16);
+        const auto settled = settleStartedAt + SETTLE_MS;
+        hostNow = settled - 100; receiveVia(proximityObservation(71, -50, hostNow).message, radio);
+        const auto nextStart = hostNow; ledStep(nextStart, 0);
+        movementStep(settled);
+        assert(proximityUpdateState == ProximityUpdateState::CHECKING && led.busy() && hostPixel().shown != 0);
+        if (radio == Transport::ESP_NOW) assert(displayFrames.back().distance == "CHECKING");
+        else assert(probeOutstanding);
+        movementStep(nextStart + 130, MotionEvent::Activity);
+        assert(proximityUpdateState == ProximityUpdateState::READY && led.busy() && hostPixel().shown == uint32_t(180) << 16);
+        movementStep(nextStart + 515);
+        assert(led.busy() && hostPixel().shown == uint32_t(255) << 16);
+        movementStep(nextStart + 700); assert(!led.busy() && hostPixel().shown == 0);
+    }
+    for (bool coordinated : {false, true})
+    {
+        freshKnownApp(classification); receive(proximityObservation(70, -50, hostNow).message);
+        const auto start = hostNow; ledStep(start, 0); ledStep(start + 65, 90);
+        if (coordinated)
+        {
+            command('i'); command('s'); const auto id = transaction().sleepId;
+            receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepReady, id));
+            receive(incoming(Type::Ack, pendingMessage.messageId));
+            mockedTxInFlight = 1; receive(incoming(Type::SleepAck, id));
+            assert(localState() == LocalState::SLEEPING && led.busy() && physicalSleeps == 0);
+            mockedTxInFlight = 0; assert(sleepTransportBlockedReason() == nullptr);
+            loop(); assert(physicalSleeps == 1);
+        }
+        else { command('x'); assert(benchSleepCalls == 1); }
+        assert(!led.busy() && hostPixel().shown == 0);
+        ledStep(start + 515, 0, false);
+    }
+    // Initialization resets a running animation on either cold boot or deep wake.
+    for (bool deep : {false, true})
+    {
+        freshKnownApp(classification); receive(proximityObservation(70, -50, hostNow).message);
+        const auto start = hostNow; ledStep(start, 0); ledStep(start + 65, 90);
+        saveRtcHistory(); protocolReady = false; injectedBoot.deep = deep;
+        delete receiveQueue; receiveQueue = nullptr;
+        setup();
+        assert(protocolReady && hostPixel().begins == ledBeginsAtBoot + 1 && !led.busy() && hostPixel().shown == 0);
+    }
+    puts("PASS: MOVING/WAITING/CHECKING and OLED/probe work do not pause/cancel LED; manual/coordinated sleep forces OFF immediately; cold/deep startup resets animation");
+}
+
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
+    testInitialProximityCadence(); // UNKNOWN must classify without application heartbeat traffic.
+    testUnknownHeartbeatSilence(); testKnownHeartbeatRechecks();
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
     testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
@@ -2972,11 +3795,19 @@ int main()
     testAwakeWakeService();
     testApplicationTransports(); testProximityProbes();
     testProximityClassification();
+    testAutomaticHeartbeatCadence();
     testAutomaticSelection(); testAutomaticSelectionRetries(); testAutomaticSelectionGuards();
     testAutomaticSelectionManual(); testAutomaticSelectionSleep();
     testEspNowFallback(); testFallbackPrecedenceAndManual(); testFallbackRecovery();
     testPeerReturnEvents(); testPeerReturnIsolation(); testPeerReturnTimeout();
-    testDisplayStartup(); testDisplayTransitions(); testDisplayGuards(); testDisplaySleep();
+    testInitialProximityContact(); testInitialProximityTimeout(); testInitialProximityStartup(); testInitialProximityIsolation();
+    testDisplayStartup(); testDisplayTransitions(); testDisplayMotion(); testDisplayGuards(); testDisplaySleep();
+    testLedAnimation();
+    for (auto classification : {ProximityClassification::CLOSE, ProximityClassification::FAR})
+    {
+        testLedEvents(classification); testLedLocalHeartbeat(classification);
+        testLedProtocolIsolation(classification); testLedMovementAndSleep(classification);
+    }
     puts("PASS: one arm attempt per decision, failure isolation, no rearming, ESP-NOW remains usable");
     delete receiveQueue;
     printf("PASS %s: coordinator/participant, collisions, stale/duplicates, hard/phase deadlines, activity, rollover\n", DEVICE_NAME);

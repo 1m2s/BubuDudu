@@ -14,6 +14,7 @@
 #include "CC1101WakeTx.h"
 #include "Motion.h"
 #include "Display.h"
+#include "LED.h"
 
 void saveRtcHistory();
 bool restoreRtcHistory();
@@ -23,6 +24,8 @@ namespace
 {
     Motion motion;
     Display display;
+    LED led;
+    bool motionReady = false;
     bool displayReady = false;
     // Presentation strings only; update this snapshot AFTER a safe redraw.
     struct DisplaySnapshot
@@ -31,6 +34,7 @@ namespace
         const char* distance;
         const char* radio;
         const char* state;
+        const char* motion;
     };
     DisplaySnapshot displayedStatus{};
 
@@ -126,6 +130,7 @@ namespace
     ProximityUpdateState proximityUpdateState = ProximityUpdateState::READY;
     enum class ProximityClassification : uint8_t { UNKNOWN, CLOSE, FAR };
     ProximityClassification proximityClassification = ProximityClassification::UNKNOWN;
+    void startKnownHeartbeatCadence(uint32_t now);
     bool automaticSelectionPending = false;
     bool espNowFallbackPending = false;
     // PROVISIONAL conservative RSSI boundaries; these do not represent meters.
@@ -203,7 +208,8 @@ namespace
     void serviceProximityProbe(uint32_t now)
     {
         serviceProximityCheck(now);
-        if (selectedTransport != Transport::CC1101 ||
+        if ((selectedTransport != Transport::CC1101 &&
+             proximityClassification != ProximityClassification::UNKNOWN) ||
             proximityUpdateState != ProximityUpdateState::CHECKING)
         {
             resetProximityProbe();
@@ -234,7 +240,10 @@ namespace
         if (capturedAfterStart == 0 || capturedAfterStart >= CHECK_TIMEOUT_MS ||
             uint32_t(now - observation.receivedAt) >= 0x80000000UL)
             return;
-        if (selectedTransport == Transport::CC1101)
+        const bool probeReply = selectedTransport == Transport::CC1101 ||
+            (proximityClassification == ProximityClassification::UNKNOWN &&
+             observation.message.type == Protocol::MessageType::ProximityProbeReply);
+        if (probeReply)
         {
             const auto& message = observation.message;
             if (!probeOutstanding || message.version != Protocol::VERSION ||
@@ -249,7 +258,7 @@ namespace
         // Retransmissions of that message remain one sample, even with changed RSSI.
         for (uint8_t i = 0; i < proximitySampleCount; ++i)
             if (proximitySamples[i].messageId == observation.message.messageId) return;
-        if (selectedTransport == Transport::CC1101) resetProximityProbe();
+        if (probeReply) resetProximityProbe();
         proximitySamples[proximitySampleCount++] = {observation.message.messageId, observation.rssi};
         Serial.printf("PROXIMITY CHECK | SAMPLE | n=%u | rssi=%d dBm\n",
                       proximitySampleCount, static_cast<int>(observation.rssi));
@@ -259,12 +268,14 @@ namespace
         if (b > c) { const int8_t temp = b; b = c; c = temp; }
         if (a > b) { const int8_t temp = a; a = b; b = temp; }
         Serial.printf("PROXIMITY CHECK | COMPLETE | samples=3 | median=%d dBm\n", static_cast<int>(b));
+        const bool firstClassification = proximityClassification == ProximityClassification::UNKNOWN;
         if (proximityClassification == ProximityClassification::FAR)
         {
             if (b >= ENTER_CLOSE_DBM) proximityClassification = ProximityClassification::CLOSE;
         }
         else // UNKNOWN uses the same conservative FAR boundary as CLOSE.
             proximityClassification = b <= ENTER_FAR_DBM ? ProximityClassification::FAR : ProximityClassification::CLOSE;
+        if (firstClassification) startKnownHeartbeatCadence(now);
         automaticSelectionPending = true; // Every completed median is fresh policy evidence.
         espNowFallbackPending = false; // Fresh proximity evidence supersedes an older delivery failure.
         Serial.printf("PROXIMITY | median=%d dBm | %s\n", static_cast<int>(b),
@@ -281,7 +292,19 @@ namespace
         1000;
 
     constexpr unsigned long EVENT_INTERVAL_MS =
-        4000;
+        2500;
+
+    constexpr unsigned long FAR_EVENT_INTERVAL_MS = 4000;
+
+    unsigned long automaticHeartbeatIntervalMs()
+    {
+        switch (proximityClassification)
+        {
+            case ProximityClassification::CLOSE: return EVENT_INTERVAL_MS;
+            case ProximityClassification::FAR: return FAR_EVENT_INTERVAL_MS;
+            default: return 0; // UNKNOWN has no automatic heartbeat cadence.
+        }
+    }
 
     constexpr unsigned long ACK_TIMEOUT_MS =
         300;
@@ -334,6 +357,12 @@ namespace
 
     unsigned long nextEventTime =
         0;
+
+    void startKnownHeartbeatCadence(uint32_t now)
+    {
+        // A pending transaction keeps its clock and schedules normally on completion.
+        if (!waitingForAck) nextEventTime = now + automaticHeartbeatIntervalMs();
+    }
 
     // Bounded transport outbox, owned by loop(), just like pendingMessage.
     // One packet at a time uses the existing 300 ms / two-retry machinery.
@@ -666,6 +695,10 @@ namespace
         waitingForAck =
             true;
 
+        // One shared visual beat per new application EVENT, independent of delivery.
+        // Retries only call transmitPendingMessage(), so cannot replay this request.
+        if (proximityClassification != ProximityClassification::UNKNOWN)
+            led.requestHeartbeat();
 
         transmitPendingMessage(
             false
@@ -721,7 +754,7 @@ namespace
 
             nextEventTime =
                 millis() +
-                EVENT_INTERVAL_MS;
+                automaticHeartbeatIntervalMs();
 
 
             return;
@@ -817,12 +850,12 @@ namespace
         );
 
 
-        /*
-         * Eventually this is where the heartbeat event
-         * will be forwarded to the application / LED side.
-         *
-         * For now the serial print represents processing.
-         */
+        // Runtime requests happen only after validation and duplicate rejection.
+        // UNKNOWN, including retained wake delivery, has no visual heartbeat.
+        if (sendReceipt && message.type == Protocol::MessageType::Event &&
+            message.event == Protocol::EventType::Heartbeat &&
+            proximityClassification != ProximityClassification::UNKNOWN)
+            led.requestHeartbeat();
 
 
         // --------------------------------------------------
@@ -882,10 +915,14 @@ namespace
     }
 
 
-    void startPeerReturnProximityCheck(PowerManager::PeerState previousPeer)
+    void startPeerAvailabilityProximityCheck(PowerManager::PeerState previousPeer)
     {
-        if (previousPeer == PowerManager::PeerState::OFFLINE &&
-            PowerManager::peerState() == PowerManager::PeerState::ONLINE && selectedTransport == Transport::CC1101)
+        const bool returningOnCc1101 = previousPeer == PowerManager::PeerState::OFFLINE &&
+            selectedTransport == Transport::CC1101;
+        const bool firstContact = previousPeer == PowerManager::PeerState::UNKNOWN &&
+            proximityClassification == ProximityClassification::UNKNOWN;
+        if (PowerManager::peerState() == PowerManager::PeerState::ONLINE &&
+            (returningOnCc1101 || firstContact))
             startProximityCheck(uint32_t(millis())); // Existing guards and loop-owned probes remain authoritative.
     }
 
@@ -1019,7 +1056,7 @@ namespace
                     message, true, transport
                 );
                 PowerManager::notePeerSeen();
-                startPeerReturnProximityCheck(previousPeer);
+                startPeerAvailabilityProximityCheck(previousPeer);
 
                 break;
 
@@ -1038,7 +1075,7 @@ namespace
                 if (heartbeatAcknowledged)
                 {
                     PowerManager::notePeerSeen();
-                    startPeerReturnProximityCheck(previousPeer);
+                    startPeerAvailabilityProximityCheck(previousPeer);
                 }
 
                 break;
@@ -1164,7 +1201,7 @@ namespace
 
         nextEventTime =
             millis() +
-            EVENT_INTERVAL_MS;
+            automaticHeartbeatIntervalMs();
     }
 
 
@@ -1192,6 +1229,7 @@ namespace
 
     void enterPhysicalSleep(bool coordinated)
     {
+        led.off(); // Sleep wins immediately; animation is never a drain condition.
         resetMovement(); // An aborted attempt must not retain an old settle timer.
         cancelProximityCheck("SLEEP");
         const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
@@ -1355,6 +1393,17 @@ namespace
         return PowerManager::toString(state);
     }
 
+    const char* displayMotionName()
+    {
+        if (!motionReady) return "N/A";
+        switch (movementState)
+        {
+            case MovementState::MOVING: return "MOVING";
+            case MovementState::WAITING: return "SETTLING";
+            default: return "STILL";
+        }
+    }
+
     void serviceDisplayStatus()
     {
         // No framebuffer transfer during protocol deadlines, sleep transitions
@@ -1363,12 +1412,14 @@ namespace
             !PowerManager::automaticHeartbeatAllowed() || probeOutstanding)
             return;
         const DisplaySnapshot current{displayPeerName(PowerManager::peerState()), displayDistanceName(),
-                                      transportName(selectedTransport), displayStateName(PowerManager::localState())};
+                                      transportName(selectedTransport), displayStateName(PowerManager::localState()),
+                                      displayMotionName()};
         if (displayedStatus.peer && strcmp(current.peer, displayedStatus.peer) == 0 &&
             strcmp(current.distance, displayedStatus.distance) == 0 &&
-            strcmp(current.radio, displayedStatus.radio) == 0 && strcmp(current.state, displayedStatus.state) == 0)
+            strcmp(current.radio, displayedStatus.radio) == 0 && strcmp(current.state, displayedStatus.state) == 0 &&
+            strcmp(current.motion, displayedStatus.motion) == 0)
             return;
-        display.showStatus(DEVICE_NAME, current.peer, current.distance, current.radio, current.state);
+        display.showStatus(DEVICE_NAME, current.peer, current.distance, current.radio, current.state, current.motion);
         displayedStatus = current;
     }
 
@@ -1481,6 +1532,7 @@ void setup()
     espNowFallbackPending = false;
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     displayReady = false;
+    motionReady = false;
     displayedStatus = {}; // Request one initial draw when runtime is awake and drained.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
@@ -1504,7 +1556,7 @@ void setup()
         Serial.printf("CC1101 ARM INIT | %s | CPU stays awake\n", CC1101SleepArm::toString(armInit));
     }
     // Recover and ACK any retained CC1101 wake packet before doing sensor I2C work.
-    const bool motionReady = motion.begin(MOTION_SDA_PIN, MOTION_SCL_PIN, MOTION_INT1_PIN);
+    motionReady = motion.begin(MOTION_SDA_PIN, MOTION_SCL_PIN, MOTION_INT1_PIN);
     const int motionLevel = digitalRead(motion.getInterruptPin());
     if (motionReady)
         Serial.printf("MOTION INIT | OK (DEVID=0xE5) | GPIO%u INT1=%d | startup=%d "
@@ -1516,6 +1568,7 @@ void setup()
 
     displayReady = display.begin();
     if (!displayReady) Serial.println("DISPLAY INIT | FAILED | continuing");
+    led.begin(); // Retained wake recovery and shared-I2C hardware initialization are complete.
 
     Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
@@ -1562,6 +1615,11 @@ void setup()
         Serial.println("MOTION PEER WAKE | one-shot request");
         requestPeerWake();
     }
+
+    // One bootstrap attempt per runtime startup, even before peer ONLINE.
+    // UNKNOWN suppresses heartbeats; this bounded check supplies its own probes.
+    if (proximityClassification == ProximityClassification::UNKNOWN)
+        startProximityCheck(uint32_t(millis())); // Existing ACTIVE/overlap guards; no loop-based restart.
 }
 
 
@@ -1571,6 +1629,7 @@ void setup()
 
 void loop()
 {
+    led.update(uint32_t(millis())); // One bounded animation step, independent of motion/radio state.
     checkProximityEligibility(); // Observe boundaries even if power changes back to ACTIVE below.
     // Clear stale tracking even if a power transition returns to ACTIVE below.
     if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
@@ -1624,6 +1683,7 @@ void loop()
 
     if (
         !pauseAutomaticHeartbeats &&
+        proximityClassification != ProximityClassification::UNKNOWN &&
         PowerManager::automaticHeartbeatAllowed() &&
         controlCount == 0 &&
         !waitingForAck &&

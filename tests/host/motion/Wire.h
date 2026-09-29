@@ -8,26 +8,42 @@ namespace MotionPlatform
 {
     extern bool isrAttached, stuckHigh;
     extern void (*isr)();
+    struct InterruptCalls { unsigned attaches = 0, detaches = 0; };
+    inline InterruptCalls& interruptCalls() { static InterruptCalls calls; return calls; }
 }
 inline void pinMode(int pin, int mode) { assert(pin == 3 && mode == INPUT); }
 inline int digitalPinToInterrupt(int pin) { return pin; }
 inline void attachInterrupt(int pin, void (*handler)(), int mode)
-{ assert(pin == 3 && mode == RISING); MotionPlatform::isr = handler; MotionPlatform::isrAttached = true; }
+{
+    assert(pin == 3 && mode == RISING && !MotionPlatform::isrAttached);
+    ++MotionPlatform::interruptCalls().attaches;
+    MotionPlatform::isr = handler; MotionPlatform::isrAttached = true;
+}
 inline void detachInterrupt(int pin)
-{ assert(pin == 3); MotionPlatform::isrAttached = false; MotionPlatform::isr = nullptr; }
+{
+    assert(pin == 3 && MotionPlatform::isrAttached); // Reject the cold-boot detach regression.
+    ++MotionPlatform::interruptCalls().detaches;
+    MotionPlatform::isrAttached = false; MotionPlatform::isr = nullptr;
+}
 struct HostWire
 {
     std::array<uint8_t, 64> registers{};
     std::vector<uint8_t> tx;
     std::vector<std::pair<uint8_t, uint8_t>> writes;
     unsigned operations = 0, failAt = 0;
+    unsigned begins = 0, beginFailures = 0, identifications = 0;
+    unsigned wrongDeviceReads = 0, wrongThresholdReads = 0;
+    bool failAll = false;
+    uint32_t clock = 0;
     int corruptRegister = -1;
     uint8_t reg = 0, received = 0;
     bool hasByte = false;
-    bool step() { ++hostNow; return ++operations != failAt; }
-    void begin(uint8_t sda, uint8_t scl) { assert(sda == 0 && scl == 1); }
+    bool step() { ++hostNow; ++operations; return !failAll && operations != failAt; }
+    bool begin(uint8_t sda, uint8_t scl)
+    { assert(sda == 0 && scl == 1); ++begins; if (beginFailures) { --beginFailures; return false; } return true; }
+    void setClock(uint32_t value) { clock = value; }
     void beginTransmission(uint8_t address) { assert(address == 0x53); tx.clear(); }
-    void write(uint8_t value) { tx.push_back(value); }
+    void write(uint8_t value) { if (tx.empty() && value == 0) ++identifications; tx.push_back(value); }
     int endTransmission(bool = true)
     {
         if (!step()) return 4;
@@ -46,6 +62,8 @@ struct HostWire
         hasByte = step();
         if (!hasByte) return 0;
         received = registers[reg];
+        if (reg == 0x00 && wrongDeviceReads) { --wrongDeviceReads; received ^= 1; }
+        if (reg == 0x24 && wrongThresholdReads) { --wrongThresholdReads; received ^= 1; }
         if (reg == 0x30) registers[reg] = 0; // Latched INT_SOURCE clears on read.
         return 1;
     }

@@ -16,7 +16,8 @@ public:
         const char* peer,
         const char* distance,
         const char* radio,
-        const char* state
+        const char* state,
+        const char* motion
     );
 
 
