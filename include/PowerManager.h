@@ -53,11 +53,15 @@ namespace PowerManager
     void begin(Protocol::DeviceId device, ControlSender sender);
     void update(uint32_t now);
     void forceIdle(uint32_t now);
+    // The loop has established product eligibility; do not interrupt another state.
+    void idleAfterInactivity(uint32_t now);
     void injectActivity(uint32_t now);
 
     // requestId comes from the existing application message-ID allocator.
     bool requestSleep(uint16_t requestId, uint32_t now);
-    void handleControl(const Protocol::Message& message, uint32_t now);
+    // Admission is sampled by the loop before sending the request's receipt.
+    // It applies only to a fresh transaction, never duplicates or arbitration.
+    void handleControl(const Protocol::Message& message, uint32_t now, bool admitFreshRequest);
     bool controlStillNeeded(Protocol::MessageType type, uint16_t sleepId);
     void controlSent(Protocol::MessageType type, uint16_t sleepId, uint32_t now);
     void controlFailed(Protocol::MessageType type, uint16_t sleepId, uint32_t now);

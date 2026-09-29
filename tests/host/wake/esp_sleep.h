@@ -11,18 +11,22 @@ namespace WakePlatform
     extern bool returnFromSleep;
     extern esp_sleep_wakeup_cause_t cause;
     extern uint64_t mask;
+    extern uint64_t enabledGpioMask, timerUs;
+    extern unsigned timerCalls, sleepCalls;
     struct Entered {};
 }
 inline auto esp_sleep_get_wakeup_cause() -> esp_sleep_wakeup_cause_t { return WakePlatform::cause; }
 inline uint64_t esp_sleep_get_gpio_wakeup_status() { return WakePlatform::mask; }
 inline esp_err_t esp_sleep_disable_wakeup_source(esp_sleep_wakeup_cause_t)
-{ WakePlatform::sources = false; return ESP_OK; }
+{ WakePlatform::sources = false; WakePlatform::enabledGpioMask = 0; WakePlatform::timerUs = 0; return ESP_OK; }
 inline esp_err_t esp_deep_sleep_enable_gpio_wakeup(uint64_t mask, int mode)
 {
     assert(mask == ((1ULL << 4) | (1ULL << 3)) && mode == ESP_GPIO_WAKEUP_GPIO_HIGH);
     WakePlatform::sources = true;
+    WakePlatform::enabledGpioMask = mask;
     return WakePlatform::failSetup ? -1 : ESP_OK;
 }
-inline esp_err_t esp_sleep_enable_timer_wakeup(uint64_t us) { assert(us == 30000000); return ESP_OK; }
+inline esp_err_t esp_sleep_enable_timer_wakeup(uint64_t us)
+{ assert(us == 30000000); ++WakePlatform::timerCalls; WakePlatform::timerUs = us; return ESP_OK; }
 inline void esp_deep_sleep_start()
-{ if (!WakePlatform::returnFromSleep) throw WakePlatform::Entered{}; }
+{ ++WakePlatform::sleepCalls; if (!WakePlatform::returnFromSleep) throw WakePlatform::Entered{}; }

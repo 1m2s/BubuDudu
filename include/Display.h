@@ -20,6 +20,8 @@ public:
         const char* motion
     );
 
+    void showDeepSleep(const char* deviceName);
+
 
 private:
 

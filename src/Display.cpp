@@ -48,3 +48,15 @@ void Display::showStatus(const char* deviceName, const char* peer,
     oled.drawStr(48, 60, motion);
     oled.sendBuffer();
 }
+
+void Display::showDeepSleep(const char* deviceName)
+{
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+    oled.drawStr(0, 10, deviceName);
+    oled.drawStr(0, 25, "STATUS:");
+    oled.drawStr(0, 35, "DEEP SLEEP");
+    oled.drawStr(0, 50, "WAKE:");
+    oled.drawStr(0, 60, "MOTION / PEER");
+    oled.sendBuffer();
+}

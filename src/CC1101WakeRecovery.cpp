@@ -381,7 +381,8 @@ namespace CC1101WakeRecovery
         Serial.printf("WAKE ACK | sent=%d | RX_READY=%d\n", report.ackSent, report.rxReady);
     }
 
-    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated)
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated,
+                        void (*beforeSleep)())
     {
         const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
         RtcState::invalidate();
@@ -398,7 +399,7 @@ namespace CC1101WakeRecovery
             if (result == ESP_OK)
                 result = esp_deep_sleep_enable_gpio_wakeup((1ULL << GDO0) | (1ULL << MOTION_INT1_PIN),
                                                            ESP_GPIO_WAKEUP_GPIO_HIGH);
-            if (result == ESP_OK) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
+            if (result == ESP_OK && !coordinated) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
             if (result == ESP_OK)
             {
                 digitalWrite(CS, HIGH);
@@ -408,7 +409,8 @@ namespace CC1101WakeRecovery
             reason = "SETUP_FAILED";
             if (result == ESP_OK)
             {
-                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH | mask=0x18 | timer=30s INTEGRATION SAFETY TIMER\n", label);
+                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH | mask=0x18 | timer=%s\n", label,
+                              coordinated ? "OFF" : "30s INTEGRATION SAFETY TIMER");
                 Serial.printf("%s | ENTERING | USB may disconnect; p reprints wake report\n", label);
                 Serial.flush();
                 // Recheck AFTER arm inspection, wake-source setup and logging.
@@ -422,8 +424,15 @@ namespace CC1101WakeRecovery
                         reason = "GDO_HIGH";
                         if (digitalRead(GDO0) == LOW)
                         {
-                            esp_deep_sleep_start(); // Success does not return.
-                            reason = "DEEP_SLEEP_RETURNED";
+                            if (beforeSleep) beforeSleep();
+                            // Activity/RX can arrive during the final OLED transfer.
+                            reason = blockedReason();
+                            if (!reason && digitalRead(GDO0) != LOW) reason = "GDO_HIGH";
+                            if (!reason)
+                            {
+                                esp_deep_sleep_start(); // Success does not return.
+                                reason = "DEEP_SLEEP_RETURNED";
+                            }
                         }
                     }
                 }

@@ -48,5 +48,9 @@ namespace CC1101WakeRecovery
     // drained, otherwise a diagnostic reason. Success does not return; ANY
     // return is a refusal/abort. Saves only at the final entry boundary.
     // Caller prepares Motion first; guard must also reject asserted GPIO3.
-    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated);
+    // Product sleep uses GPIO wake only; bench entry retains the 30s safety timer.
+    // Optional presentation callback runs only after successful arm/setup/final
+    // checks; guards are checked again after its framebuffer transfer.
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated,
+                        void (*beforeSleep)() = nullptr);
 }

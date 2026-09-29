@@ -42,4 +42,25 @@ int main()
         assert(Wire.begins == 0 && Wire.operations == 0 && hostNow == 0);
     }
     puts("PASS: real OLED renderer has six readable 6x10 rows, STATUS/MOTION labels, both identities and all motion/status values within 128x64; shared-I2C init bypass retained, no polling or delays");
+    for (const char* device : {"BUBU", "DUDU"})
+    {
+        display.showStatus(device, "ONLINE", "FAR", "CC1101", "ACTIVE", "MOVING");
+        const auto sends = hostOled().sends, begins = hostOled().begins;
+        display.showDeepSleep(device);
+        const char* expected[]{device, "STATUS:", "DEEP SLEEP", "WAKE:", "MOTION / PEER"};
+        const unsigned rows[]{10, 25, 35, 50, 60};
+        const auto& text = hostOled().text;
+        assert(text.size() == 5 && hostOled().font == u8g2_font_6x10_tf);
+        for (unsigned i = 0; i < text.size(); ++i)
+        {
+            assert(text[i].value == expected[i] && text[i].x == 0 && text[i].y == rows[i]);
+            assert(text[i].value.size() * 6 <= 128 && text[i].y <= 64);
+        }
+        assert(hostOled().sends == sends + 1 && hostOled().clears == hostOled().sends);
+        assert(hostOled().begins == begins && hostOled().transfers == hostOled().sends);
+        assert(hostOled().hardwareInitializations == 0 && Wire.begins == 0 && Wire.operations == 0 && hostNow == 0);
+        display.showStatus(device, "ONLINE", "CLOSE", "ESP-NOW", "IDLE", "STILL");
+        assert(hostOled().text.size() == 11 && hostOled().text[8].value == "IDLE");
+    }
+    puts("PASS: final OLED clears stale awake fields, fits both identities/DEEP SLEEP/MOTION / PEER in 128x64, transfers exactly once without reinitialization, polling or delay; awake layout restores unchanged");
 }

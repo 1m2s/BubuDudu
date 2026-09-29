@@ -91,6 +91,19 @@ namespace
     uint32_t sleepDrainStarted = 0;
     constexpr uint32_t SLEEP_DRAIN_TIMEOUT_MS = 3000;
 
+    constexpr uint32_t AUTOMATIC_SLEEP_INACTIVITY_MS = 35000;
+    constexpr uint32_t AUTOMATIC_SLEEP_PEER_GRACE_MS = 3000;
+    uint32_t lastMeaningfulActivity = 0;
+    bool automaticSleepArmed = false;
+    bool productSleepEligible(uint32_t now, uint32_t requiredInactivityMs = AUTOMATIC_SLEEP_INACTIVITY_MS);
+
+    void noteLocalActivity(uint32_t now)
+    {
+        lastMeaningfulActivity = now;
+        automaticSleepArmed = true;
+        PowerManager::injectActivity(now);
+    }
+
 
     // ======================================================
     // Device identity
@@ -202,6 +215,25 @@ namespace
         {
             Serial.printf("PROXIMITY CHECK | TIMEOUT | samples=%u\n", proximitySampleCount);
             resetProximityCheck();
+        }
+    }
+
+    void serviceMotion()
+    {
+        const MotionEvent event = motion.getEvent();
+        const uint32_t now = uint32_t(millis());
+        if (event == MotionEvent::Activity)
+        {
+            Serial.println("MOTION AWAKE | MOVING");
+            noteLocalActivity(now);
+            cancelProximityCheck("MOVEMENT");
+        }
+        else if (event == MotionEvent::Inactivity)
+            Serial.println("MOTION AWAKE | INACTIVITY");
+        if (updateMovement(event, now))
+        {
+            Serial.println("MOVEMENT | SETTLED | state=READY");
+            startProximityCheck(now);
         }
     }
 
@@ -830,8 +862,7 @@ namespace
         lastPeerEventId =
             message.messageId;
 
-        // Only a new application EVENT is meaningful activity. Re-ACKing an
-        // old duplicate must not execute the event/cancellation a second time.
+        // Periodic Heartbeat is background traffic, not local user activity.
         PowerManager::applicationEvent(millis());
 
 
@@ -1029,10 +1060,18 @@ namespace
                 Serial.println("POWER: malformed control rejected");
                 return;
             }
+            // Sample fresh admission BEFORE this packet creates its own ACK TX.
+            // An existing transaction retains duplicate/collision/phase handling.
+            const bool freshRequest = message.type == Protocol::MessageType::SleepRequest &&
+                !PowerManager::transaction().active;
+            const bool admitFreshRequest = freshRequest && productSleepEligible(uint32_t(millis()),
+                AUTOMATIC_SLEEP_INACTIVITY_MS - AUTOMATIC_SLEEP_PEER_GRACE_MS);
             // Receipt ACK is independent of semantic acceptance. Duplicates
             // and stale controls are acknowledged, then evaluated by the FSM.
             const bool receiptAccepted = sendAck(message.messageId);
-            PowerManager::handleControl(message, millis());
+            PowerManager::handleControl(message, millis(), admitFreshRequest);
+            if (freshRequest && PowerManager::transaction().active)
+                automaticSleepArmed = false; // Participation also consumes our automatic initiation opportunity.
             if (!receiptAccepted && PowerManager::localState() == PowerManager::LocalState::SLEEPING)
             {
                 Serial.println("COORDINATED DEEP SLEEP | ABORTED | reason=RECEIPT_TX_REJECTED");
@@ -1227,6 +1266,32 @@ namespace
         return digitalRead(MOTION_INT1_PIN) != 0 ? "MOTION_INT1_HIGH" : nullptr;
     }
 
+    bool productSleepEligible(uint32_t now, uint32_t requiredInactivityMs)
+    {
+        return uint32_t(now - lastMeaningfulActivity) >= requiredInactivityMs &&
+            motionReady && movementState == MovementState::READY &&
+            proximityUpdateState != ProximityUpdateState::CHECKING &&
+            PowerManager::automaticHeartbeatAllowed() && PowerManager::cooldownLeftMs(now) == 0 &&
+            sleepTransportBlockedReason() == nullptr;
+    }
+
+    void serviceAutomaticSleep()
+    {
+        const uint32_t now = uint32_t(millis());
+        if (!automaticSleepArmed || !productSleepEligible(now)) return;
+        PowerManager::idleAfterInactivity(now);
+        if (PowerManager::requestSleep(nextMessageId++, now))
+            automaticSleepArmed = false;
+    }
+
+    void showDeepSleepStatus()
+    {
+        if (!displayReady) return;
+        display.showDeepSleep(DEVICE_NAME);
+        // An aborted entry must repaint even if the awake fields are unchanged.
+        displayedStatus = {};
+    }
+
     void enterPhysicalSleep(bool coordinated)
     {
         led.off(); // Sleep wins immediately; animation is never a drain condition.
@@ -1236,7 +1301,8 @@ namespace
         if (motion.prepareForSleep())
         {
             Serial.println("MOTION SLEEP ARM | READY | GPIO3 LOW | activity only | INT_ENABLE=0x10 POWER_CTL=0x08");
-            CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepEntryBlockedReason, coordinated);
+            CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepEntryBlockedReason, coordinated,
+                                               showDeepSleepStatus);
         }
         else
         {
@@ -1268,6 +1334,14 @@ namespace
                 PowerManager::notifySleepExecutionFailed(millis());
                 sleepDrainWaiting = false;
             }
+            return;
+        }
+        // Catch Activity arriving while this iteration processed radio work.
+        // Existing activity semantics revoke an unconsumed SLEEPING decision.
+        serviceMotion();
+        if (PowerManager::localState() != PowerManager::LocalState::SLEEPING)
+        {
+            sleepDrainWaiting = false;
             return;
         }
         PowerManager::SleepDecision decision{};
@@ -1450,9 +1524,11 @@ namespace
                 if (!protocolReady || waitingForAck || controlCount != 0)
                     Serial.println("POWER: start refused; wait for transport to drain (p shows pending TX)");
                 else
-                    PowerManager::requestSleep(nextMessageId++, now);
+                {
+                    if (PowerManager::requestSleep(nextMessageId++, now)) automaticSleepArmed = false;
+                }
                 break;
-            case 'a': PowerManager::injectActivity(now); break;
+            case 'a': noteLocalActivity(now); break; // Explicit local user activity injection.
             case 'h':
                 pauseAutomaticHeartbeats = !pauseAutomaticHeartbeats;
                 Serial.printf("BENCH: automatic heartbeats %s; pending TX/ACKs still run\n",
@@ -1533,6 +1609,8 @@ void setup()
     selectedTransport = pendingTransport = Transport::ESP_NOW; // RAM-only; never restored from RTC.
     displayReady = false;
     motionReady = false;
+    automaticSleepArmed = false;
+    lastMeaningfulActivity = 0;
     displayedStatus = {}; // Request one initial draw when runtime is awake and drained.
     Serial.begin(115200);
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
@@ -1620,6 +1698,8 @@ void setup()
     // UNKNOWN suppresses heartbeats; this bounded check supplies its own probes.
     if (proximityClassification == ProximityClassification::UNKNOWN)
         startProximityCheck(uint32_t(millis())); // Existing ACTIVE/overlap guards; no loop-based restart.
+    lastMeaningfulActivity = uint32_t(millis()); // Fresh runtime, including a completely stationary boot.
+    automaticSleepArmed = true;
 }
 
 
@@ -1634,6 +1714,7 @@ void loop()
     // Clear stale tracking even if a power transition returns to ACTIVE below.
     if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
         resetMovement();
+    if (protocolReady) serviceMotion(); // Real movement wins before admission, controls and physical entry.
     // Activity/deadlines take effect before any queued control can advance the
     // FSM. Receipt ACKs in the RX batch still run before transport timeouts.
     servicePowerTest();
@@ -1668,6 +1749,7 @@ void loop()
     CC1101WakeRecovery::serviceAwake(PEER_DEVICE, receiveCc1101); // RX ACK before the 300 ms deadline.
     discardObsoleteControls();
     handleAckTimeout();
+    serviceAutomaticSleep();
     sendNextControl();
 
 
@@ -1697,22 +1779,6 @@ void loop()
         startHeartbeatEvent();
     }
 
-    // Diagnostic only: consume both LINK-mode events without driving policy.
-    // Physical entry above either reboots or restores awake Motion before returning.
-    const MotionEvent motionEvent = motion.getEvent();
-    switch (motionEvent)
-    {
-        case MotionEvent::Activity: Serial.println("MOTION AWAKE | MOVING"); break;
-        case MotionEvent::Inactivity: Serial.println("MOTION AWAKE | INACTIVITY"); break;
-        case MotionEvent::None: break;
-    }
-    if (motionEvent == MotionEvent::Activity) cancelProximityCheck("MOVEMENT");
-    const uint32_t motionNow = uint32_t(millis());
-    if (updateMovement(motionEvent, motionNow))
-    {
-        Serial.println("MOVEMENT | SETTLED | state=READY");
-        startProximityCheck(motionNow);
-    }
     serviceProximityProbe(uint32_t(millis()));
 
     // Best-effort diagnostics only, after all normal protocol/sleep/motion work.

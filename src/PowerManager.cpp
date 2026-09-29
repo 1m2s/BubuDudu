@@ -177,7 +177,7 @@ namespace PowerManager
             wakeDeadline = 0;
             setLocal(LocalState::ACTIVE, "SIMULATED_WAKE_COMPLETE");
         }
-        // IDLE never starts negotiation automatically, even after cooldown.
+        // Expiry alone never starts another transaction; initiation belongs to the loop's policy.
     }
 
     void forceIdle(uint32_t now)
@@ -204,6 +204,13 @@ namespace PowerManager
         return emit(Protocol::MessageType::SleepRequest, now);
     }
 
+    void idleAfterInactivity(uint32_t now)
+    {
+        update(now);
+        if (local == LocalState::ACTIVE)
+            setLocal(LocalState::IDLE, "LOCAL_INACTIVITY");
+    }
+
     void injectActivity(uint32_t now)
     {
         update(now);
@@ -224,7 +231,7 @@ namespace PowerManager
         // Repeated activity cannot keep extending WAKING or erase cooldown.
     }
 
-    void handleControl(const Protocol::Message& message, uint32_t now)
+    void handleControl(const Protocol::Message& message, uint32_t now, bool admitFreshRequest)
     {
         update(now);
         using Type = Protocol::MessageType;
@@ -280,13 +287,15 @@ namespace PowerManager
                 emit(Type::SleepReady, now);
                 return;
             }
-            if (local == LocalState::IDLE && !sleep.active && !cooldownActive)
+            if (admitFreshRequest && !sleep.active && !cooldownActive &&
+                (local == LocalState::ACTIVE || local == LocalState::IDLE))
             {
+                idleAfterInactivity(now);
                 startTransaction(id, SleepRole::PARTICIPANT, now);
                 emit(Type::SleepReady, now);
                 return;
             }
-            reject(message, "REQUEST requires IDLE/no cooldown; no takeover after COMMIT");
+            reject(message, "REQUEST requires local sleep eligibility/no cooldown; no takeover after COMMIT");
             if (!sleep.active && sendControl)
                 sendControl(Type::SleepCancel, id); // Best-effort refusal.
             return;
@@ -435,11 +444,11 @@ namespace PowerManager
         return local == LocalState::ACTIVE || local == LocalState::IDLE;
     }
 
-    void applicationEvent(uint32_t now)
+    void applicationEvent(uint32_t /*now*/)
     {
-        if (sleep.active)
-            injectActivity(now);
-        setPeer(PeerState::ONLINE); // Actual application activity is awake evidence.
+        // Heartbeat is the only application EVENT. Periodic background traffic
+        // is not user activity and cannot revoke sleep intent or agreement.
+        notePeerSeen();
     }
 
     void notePeerSeen()
