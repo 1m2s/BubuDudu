@@ -11,6 +11,15 @@ namespace CC1101WakeTx
         constexpr uint8_t SIDLE = 0x36, SFTX = 0x3B, STX = 0x35, SRX = 0x34, SFRX = 0x3A;
         constexpr uint32_t ACK_US = 300000, TX_US = 200000;
         constexpr uint8_t MAX_RETRIES = 2;
+        constexpr uint8_t DEFERRED_CAPACITY = 8;
+        Protocol::Message deferredEvents[DEFERRED_CAPACITY]{};
+        uint8_t deferredHead = 0, deferredCount = 0;
+        bool sending = false;
+        struct Ownership
+        {
+            Ownership() { sending = true; }
+            ~Ownership() { sending = false; }
+        };
 
         struct Status { uint8_t state, bytes; };
         bool inspect(Status& status, uint32_t started)
@@ -135,6 +144,11 @@ namespace CC1101WakeTx
                 }
                 else if (status.state == 1 && status.bytes != 0)
                 {
+                    if (deferredCount == DEFERRED_CAPACITY)
+                    {
+                        Serial.println("CC1101 WAKE TX | DEFERRED_FULL | episode stopped | FIFO preserved | no receipt");
+                        return Result::Busy;
+                    }
                     // IDLE means complete with our existing MCSM1 profile.
                     // Copy before restarting RX; no blind FIFO flush.
                     uint8_t raw[64];
@@ -152,6 +166,17 @@ namespace CC1101WakeTx
                             ack.type == Protocol::MessageType::Ack &&
                             ack.event == Protocol::EventType::None && ack.ackForMessageId == event.messageId)
                             return Result::Acked;
+                        if (ack.version == Protocol::VERSION && ack.sender == peer &&
+                            ack.type == Protocol::MessageType::Event &&
+                            Protocol::isHeartbeat(ack.event) && ack.ackForMessageId == 0)
+                        {
+                            deferredEvents[(deferredHead + deferredCount) % DEFERRED_CAPACITY] = ack;
+                            ++deferredCount;
+                            Serial.printf("CC1101 WAKE TX | DEFERRED EVENT | id=%u | event=%u | count=%u | receipt after ownership release\n",
+                                          ack.messageId, unsigned(ack.event), deferredCount);
+                            if (restoreRx(recoveryUsed) == RxResult::Failed) return Result::RadioUnavailable;
+                            continue; // Same ACK deadline; EVENT is never wake acknowledgement.
+                        }
                     }
                     invalid = true;
                     Serial.printf("CC1101 WAKE ACK | id=%u | REJECTED\n", event.messageId);
@@ -168,6 +193,12 @@ namespace CC1101WakeTx
     Report send(const Protocol::Message& event, Protocol::DeviceId peer)
     {
         Report report;
+        if (sending || deferredPending())
+        {
+            report.result = Result::Busy;
+            return report;
+        }
+        Ownership ownership; // No deferred consumer may transmit until ALL exits release this.
         const auto ready = CC1101SleepArm::prepareForSleep().result;
         if (ready != CC1101SleepArm::Result::Ready)
         {
@@ -195,9 +226,20 @@ namespace CC1101WakeTx
             rx = restoreRx(recoveryUsed);
             report.rxReady = rx == RxResult::Ready;
             // ACK evidence remains valid even if the final RX restart fails.
-            if (report.result == Result::Acked || rx == RxResult::Failed) break;
+            if (report.result == Result::Acked || report.result == Result::Busy || rx == RxResult::Failed) break;
         }
         return report;
+    }
+
+    bool deferredPending() { return deferredCount != 0; }
+
+    bool takeDeferredEvent(Protocol::Message& event)
+    {
+        if (sending || !deferredCount) return false;
+        event = deferredEvents[deferredHead];
+        deferredHead = (deferredHead + 1) % DEFERRED_CAPACITY;
+        --deferredCount;
+        return true;
     }
 
     const char* toString(Result result)

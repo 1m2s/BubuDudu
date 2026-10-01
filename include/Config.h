@@ -4,6 +4,7 @@
 
 // Confirmed wiring on both boards.
 constexpr uint8_t MOTION_SDA_PIN = 0, MOTION_SCL_PIN = 1, MOTION_INT1_PIN = 3;
+constexpr uint8_t BUTTON_PIN = 5; // Momentary button to GND; internal pull-up.
 
 #if defined(DEVICE_BUBU)
 constexpr char DEVICE_NAME[] = "BUBU";

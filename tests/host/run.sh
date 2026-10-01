@@ -33,6 +33,11 @@ for device in BUBU DUDU; do
     "$build_dir/test_cc1101_wake_tx_$device"
     "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
         -fsanitize=address,undefined -fno-omit-frame-pointer \
+        -D"DEVICE_$device" -I"$test_dir/wake" -I"$test_dir/cc1101" -I"$test_dir" -I"$repo_dir/include" \
+        "$test_dir/cc1101_wake_forward_test.cpp" -o "$build_dir/test_cc1101_wake_forward_$device"
+    "$build_dir/test_cc1101_wake_forward_$device"
+    "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+        -fsanitize=address,undefined -fno-omit-frame-pointer \
         -D"DEVICE_$device" -I"$test_dir/espnow" -I"$test_dir" -I"$repo_dir/include" \
         "$test_dir/espnow_drain_test.cpp" -o "$build_dir/test_espnow_drain_$device"
     "$build_dir/test_espnow_drain_$device"

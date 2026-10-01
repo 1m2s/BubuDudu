@@ -43,6 +43,7 @@ namespace CC1101WakeRecovery
     // Failed RX restart/unknown radio disables service until reboot.
     void serviceAwake(Protocol::DeviceId peer, ReceiveHandler handler = nullptr);
     bool awakeBusy(); // TX/restoration or asserted packet latch; no competing owner.
+    bool awakeStopped(); // Runtime failure cutoff; not proof of physical RX readiness.
     void printReport(const BootInfo& boot, bool historyRestored, const Report& report);
     // Shared manual/coordinated physical entry. Guard returns nullptr when
     // drained, otherwise a diagnostic reason. Success does not return; ANY

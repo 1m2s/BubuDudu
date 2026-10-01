@@ -16,6 +16,9 @@ namespace WakePlatform
     esp_sleep_wakeup_cause_t cause = ESP_SLEEP_WAKEUP_GPIO;
     uint64_t mask = 1ULL << 4;
     uint64_t enabledGpioMask = 0, timerUs = 0;
+    uint64_t highWakeMask = 0, hardwareGpioMask = 0, hardwareHighMask = 0;
+    bool timerEnabled = false;
+    unsigned gpioWakeCalls = 0, failGpioWakeCall = 0;
     unsigned timerCalls = 0, sleepCalls = 0;
 }
 using Type = Protocol::MessageType;
@@ -62,6 +65,9 @@ void fresh()
     WakePlatform::sources = false; WakePlatform::failSetup = false; WakePlatform::failRelease = false;
     WakePlatform::returnFromSleep = false;
     WakePlatform::enabledGpioMask = WakePlatform::timerUs = 0;
+    WakePlatform::highWakeMask = WakePlatform::hardwareGpioMask = WakePlatform::hardwareHighMask = 0;
+    WakePlatform::timerEnabled = false;
+    WakePlatform::gpioWakeCalls = WakePlatform::failGpioWakeCall = 0;
     WakePlatform::timerCalls = WakePlatform::sleepCalls = finalFrames = 0;
     highDuringFrame = motionDuringFrame = false;
     deliveries = 0; callbacks = 0; saves = 0; duplicateEvent = false; highDuringSave = false;
@@ -263,6 +269,21 @@ void serviceApplication()
 }
 void testApplicationRuntime()
 {
+    // New user intent uses the same awake TX/preflight/RX/receipt path and wire size.
+    auto user = event; user.event = Protocol::EventType::UserHeartbeat;
+    auto outboundUser = user; outboundUser.sender = local;
+    fresh(); assert(submitAwake(outboundUser) == SubmitResult::Accepted);
+    assert(SPI.transmissions[0].size() == 9 && memcmp(&SPI.transmissions[0][1], &outboundUser, 8) == 0);
+    hostUs += 10000; serviceApplication(); assert(!awakeBusy());
+    fresh(); receipt = true; latch(user); serviceApplication();
+    assert(appPackets.size() == 1 && appPackets[0].event == Protocol::EventType::UserHeartbeat);
+    assert(receiptResult == SubmitResult::Accepted && awakeBusy());
+    fresh(); latch(user); const auto recoveredUser = recover(true, peer, handle);
+    assert(recoveredUser.processed && recoveredUser.ackSent && recoveredUser.rxReady && deliveries == 1);
+    latch(user); service(); finishRetry(); assert(deliveries == 1);
+    fresh(); user.event = static_cast<Protocol::EventType>(3); latch(user); serviceApplication();
+    assert(appPackets.empty() && SPI.transmissions.empty());
+
     const Protocol::Message outbound{1, Type::Event, 88, local, Protocol::EventType::Heartbeat, 0};
     const Protocol::Message incomingAck{1, Type::Ack, 90, peer, Protocol::EventType::None, 88};
     fresh(); const auto began = hostUs;
@@ -333,7 +354,7 @@ void testApplicationRuntime()
     assert(submitAwake(outbound) == SubmitResult::Busy && awakeBusy());
     serviceApplication(); assert(SPI.rxFifo.size() == 2 && appPackets.empty());
     hostUs += 50000; serviceApplication();
-    assert(awakeState == AwakeState::Stopped && SPI.rxFifo.size() == 2);
+    assert(awakeState == AwakeState::Stopped && awakeStopped() && SPI.rxFifo.size() == 2);
     const auto stopped = SPI.commands;
     for (unsigned i = 0; i < 40; ++i) serviceApplication();
     assert(SPI.commands == stopped);
@@ -374,8 +395,53 @@ void testApplicationRuntime()
     puts("PASS: awake application TX/RX, receipt priority, wake retry precedence, FIFO races, failure cutoff and aborted sleep");
 }
 
+void testMixedWakeConfiguration()
+{
+    fresh();
+    assert(!awakeStopped());
+    assert(esp_deep_sleep_enable_gpio_wakeup(0x18, ESP_GPIO_WAKEUP_GPIO_HIGH) == ESP_OK);
+    assert(esp_deep_sleep_enable_gpio_wakeup(0x20, ESP_GPIO_WAKEUP_GPIO_LOW) == ESP_OK);
+    assert(WakePlatform::enabledGpioMask == 0x38 && WakePlatform::highWakeMask == 0x18);
+    assert(WakePlatform::hardwareGpioMask == 0x38 && WakePlatform::hardwareHighMask == 0x18);
+    assert(esp_sleep_enable_timer_wakeup(30000000) == ESP_OK);
+    assert(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) == ESP_OK);
+    assert(!WakePlatform::sources && !WakePlatform::timerEnabled);
+    assert(WakePlatform::enabledGpioMask == 0x38 && WakePlatform::highWakeMask == 0x18);
+    assert(WakePlatform::hardwareGpioMask == 0x38 && WakePlatform::hardwareHighMask == 0x18);
+    assert(WakePlatform::timerUs == 30000000); // Stored config survives trigger disable.
+    assert(esp_deep_sleep_enable_gpio_wakeup(0x20, ESP_GPIO_WAKEUP_GPIO_LOW) == ESP_OK);
+    assert(WakePlatform::sources && !WakePlatform::timerEnabled && WakePlatform::highWakeMask == 0x18);
+
+    // Demonstrate why production must keep fixed, disjoint polarities on IDF 4.4.7.
+    assert(esp_deep_sleep_enable_gpio_wakeup(0x20, ESP_GPIO_WAKEUP_GPIO_HIGH) == ESP_OK);
+    assert(esp_deep_sleep_enable_gpio_wakeup(0x20, ESP_GPIO_WAKEUP_GPIO_LOW) == ESP_OK);
+    assert(WakePlatform::hardwareHighMask == 0x18 && WakePlatform::highWakeMask == 0x38);
+    for (auto mask : {0x20ULL, 0x30ULL})
+    {
+        fresh(); WakePlatform::mask = mask;
+        const auto boot = captureBoot();
+        assert(boot.wokeFromGpio(5) && boot.wokeFromGpio(4) == (mask == 0x30));
+        assert(boot.gpioMask == mask);
+    }
+
+    fresh(); WakePlatform::failGpioWakeCall = 2;
+    enterDeepSleep(save, guard, true, finalFrame);
+    assert(WakePlatform::gpioWakeCalls == 2 && WakePlatform::sleepCalls == 0 && saves == 0);
+    assert(!WakePlatform::sources && !WakePlatform::timerEnabled && !WakePlatform::held);
+    assert(WakePlatform::enabledGpioMask == 0x18 && WakePlatform::highWakeMask == 0x18);
+    assert(Serial.log.find("ABORTED | reason=SETUP_FAILED") != std::string::npos);
+    // Retry after an aborted entry in the SAME runtime: masks were not reset by ALL.
+    WakePlatform::failGpioWakeCall = 0; guardCalls = 0;
+    bool entered = false;
+    try { enterDeepSleep(save, guard, true, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
+    assert(entered && WakePlatform::enabledGpioMask == 0x38 && WakePlatform::highWakeMask == 0x18);
+    assert(WakePlatform::hardwareHighMask == 0x18 && !WakePlatform::timerEnabled);
+    puts("PASS: installed C3 SDK accumulation/per-pin polarity/ALL clearing modeled; mixed 0x38 wake, checked GPIO5 failure, same-runtime re-arm, GPIO5-only and coincident GPIO4/5 evidence");
+}
+
 int main()
 {
+    testMixedWakeConfiguration();
     testApplicationRuntime();
     testAwakeRetry();
     testWakeSources();
@@ -499,17 +565,21 @@ int main()
         }
         fresh(); entered = false;
         WakePlatform::timerUs = 30000000; // A previously enabled timer must also be cleared.
+        WakePlatform::timerEnabled = true;
         try { enterDeepSleep(save, guard, coordinated, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
         assert(entered && saves == 1 && guardCalls == 4 && RtcState::load(history));
         assert(finalFrames == 1 && WakePlatform::sleepCalls == 1);
         assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources);
-        assert(WakePlatform::enabledGpioMask == ((1ULL << 3) | (1ULL << 4)));
+        assert(WakePlatform::enabledGpioMask == 0x38 && WakePlatform::hardwareGpioMask == 0x38);
+        assert(WakePlatform::highWakeMask == 0x18 && WakePlatform::hardwareHighMask == 0x18);
+        assert(WakePlatform::gpioWakeCalls == 2);
         assert(WakePlatform::timerCalls == (coordinated ? 0U : 1U));
-        assert(WakePlatform::timerUs == (coordinated ? 0U : 30000000U));
+        assert(WakePlatform::timerUs == 30000000U); // ALL leaves stored duration, but disables its trigger.
+        assert(WakePlatform::timerEnabled == !coordinated);
         assert((Serial.log.find("INTEGRATION SAFETY TIMER") != std::string::npos) == !coordinated);
         assert((Serial.log.find("timer=OFF") != std::string::npos) == coordinated);
         for (auto command : SPI.commands) assert(command & 0x80);
     }
     puts("PASS: retained FIFO before destructive strobes, bounds/format/RTC rejection, ACK/RX failures, timer, final-GDO abort and bench entry");
-    puts("PASS: shared entry draws final frame once after arm/setup/RTC/guards, checks Motion/RX again after drawing, cleans up failures/returns; product GPIO3+GPIO4 only (no timer), bench retains 30s timer");
+    puts("PASS: shared entry draws final frame once after arm/setup/RTC/guards, checks Motion/RX again after drawing, cleans up failures/returns; product GPIO3/4 HIGH + GPIO5 LOW (0x38, no timer), bench retains 30s timer");
 }

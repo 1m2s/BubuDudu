@@ -104,6 +104,94 @@ namespace
         PowerManager::injectActivity(now);
     }
 
+    constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
+    bool buttonRawPressed = false;
+    bool buttonStablePressed = false;
+    uint32_t buttonChangedAt = 0;
+    bool buttonHeartbeatPending = false;
+    bool buttonWakeIntentHeld = false;
+    bool buttonWakeRetryOnPress = false;
+    uint32_t buttonWakeHeldAt = 0;
+    constexpr uint32_t BUTTON_WAKE_DRAIN_TIMEOUT_MS = 3000;
+    bool retainedUserAnimationPending = false;
+    uint16_t retainedUserAnimationId = 0;
+    const char* lastButtonSleepBlock = nullptr;
+
+    void failButtonWake(const char* reason)
+    {
+        if (!buttonWakeIntentHeld) return;
+        buttonWakeIntentHeld = buttonHeartbeatPending = false;
+        buttonWakeRetryOnPress = true;
+        Serial.printf("BUTTON WAKE | GIVE_UP | reason=%s | intent cleared | delivery=UNCONFIRMED | new debounced press required\n", reason);
+    }
+
+    void beginButton()
+    {
+        pinMode(BUTTON_PIN, INPUT_PULLUP);
+        buttonRawPressed = digitalRead(BUTTON_PIN) == LOW;
+        buttonWakeIntentHeld = bootInfo.wokeFromGpio(BUTTON_PIN);
+        // A latched wake is already one press, even if released during startup.
+        // Seed the pressed state so only a stable HIGH can rearm an awake edge.
+        buttonStablePressed = buttonWakeIntentHeld;
+        buttonChangedAt = uint32_t(millis());
+        buttonWakeHeldAt = buttonChangedAt;
+        buttonWakeRetryOnPress = false;
+        buttonHeartbeatPending = buttonWakeIntentHeld;
+        lastButtonSleepBlock = nullptr;
+        if (buttonWakeIntentHeld)
+        {
+            Serial.println("BUTTON WAKE | GPIO5 | one UserHeartbeat intent preserved | HELD_FOR_PEER_WAKE_HANDOFF");
+            noteLocalActivity(buttonChangedAt);
+        }
+    }
+
+    void serviceButton()
+    {
+        const uint32_t now = uint32_t(millis());
+        const bool pressed = digitalRead(BUTTON_PIN) == LOW;
+        if (pressed != buttonRawPressed)
+        {
+            buttonRawPressed = pressed;
+            buttonChangedAt = now;
+        }
+        if (buttonRawPressed == buttonStablePressed || uint32_t(now - buttonChangedAt) < BUTTON_DEBOUNCE_MS)
+            return;
+        buttonStablePressed = buttonRawPressed;
+        if (!buttonStablePressed)
+        {
+            Serial.println("BUTTON | RELEASED | stable 30ms | rearmed");
+            return; // Release does not clear the held wake intent or create an EVENT.
+        }
+        Serial.println("BUTTON | PRESSED");
+        noteLocalActivity(now);
+        if (!buttonHeartbeatPending)
+        {
+            buttonHeartbeatPending = true;
+            if (buttonWakeRetryOnPress)
+            {
+                buttonWakeIntentHeld = true;
+                buttonWakeHeldAt = now;
+                Serial.println("BUTTON WAKE | RETRY_ARMED | new debounced press");
+            }
+            Serial.println("BUTTON HEARTBEAT | PENDING");
+        }
+    }
+
+    const char* buttonSleepBlockedReason()
+    {
+        // A held LOW would immediately wake again. Poll at admission/final guards;
+        // a complete pulse between polls or in SDK sleep entry can still be missed.
+        const char* reason = digitalRead(BUTTON_PIN) == LOW ? "BUTTON_LOW" :
+            buttonWakeIntentHeld ? "BUTTON_WAKE_INTENT_HELD" :
+            buttonHeartbeatPending ? "BUTTON_HEARTBEAT_PENDING" : nullptr;
+        if (reason != lastButtonSleepBlock)
+        {
+            lastButtonSleepBlock = reason;
+            if (reason) Serial.printf("BUTTON SLEEP | BLOCKED | reason=%s\n", reason);
+        }
+        return reason;
+    }
+
 
     // ======================================================
     // Device identity
@@ -197,7 +285,7 @@ namespace
 
     void startProximityCheck(uint32_t now)
     {
-        if (proximityUpdateState == ProximityUpdateState::CHECKING ||
+        if (buttonHeartbeatPending || proximityUpdateState == ProximityUpdateState::CHECKING ||
             PowerManager::localState() != PowerManager::LocalState::ACTIVE ||
             PowerManager::peerState() == PowerManager::PeerState::OFFLINE)
             return;
@@ -420,6 +508,12 @@ namespace
 
     uint16_t lastPeerEventId =
         0;
+
+    // Awake user dedup also survives interleaved background EVENTs. No visual queue.
+    uint16_t recentUserEventIds[RX_QUEUE_LENGTH]{};
+    uint32_t recentUserEventTimes[RX_QUEUE_LENGTH]{};
+    constexpr uint32_t USER_EVENT_HISTORY_MS = 10000; // Covers retries; never retains IDs across allocator wrap.
+    UBaseType_t recentUserEventCount = 0, nextUserEventSlot = 0;
 
 
     // ======================================================
@@ -693,9 +787,16 @@ namespace
     // Create a new heartbeat EVENT
     // ======================================================
 
-    void startHeartbeatEvent()
+    bool backgroundHeartbeatAllowed()
     {
-        pendingTransport = selectedTransport;
+        return proximityClassification == ProximityClassification::CLOSE &&
+            PowerManager::automaticHeartbeatAllowed();
+    }
+
+    void startHeartbeatEvent(Transport transport = selectedTransport,
+                             Protocol::EventType event = Protocol::EventType::Heartbeat)
+    {
+        pendingTransport = transport;
         pendingMessage.version =
             Protocol::VERSION;
 
@@ -713,7 +814,7 @@ namespace
 
 
         pendingMessage.event =
-            Protocol::EventType::Heartbeat;
+            event;
 
 
         pendingMessage.ackForMessageId =
@@ -727,9 +828,9 @@ namespace
         waitingForAck =
             true;
 
-        // One shared visual beat per new application EVENT, independent of delivery.
-        // Retries only call transmitPendingMessage(), so cannot replay this request.
-        if (proximityClassification != ProximityClassification::UNKNOWN)
+        // Button intent animates only its receiver. Background retains CLOSE output.
+        // Retries only call transmitPendingMessage(), so cannot replay either request.
+        if (event == Protocol::EventType::Heartbeat && backgroundHeartbeatAllowed())
             led.requestHeartbeat();
 
         transmitPendingMessage(
@@ -814,6 +915,11 @@ namespace
             message.messageId ==
                 lastPeerEventId;
 
+        if (message.event == Protocol::EventType::UserHeartbeat)
+            for (UBaseType_t i = 0; i < recentUserEventCount; ++i)
+                duplicate = duplicate || (recentUserEventIds[i] == message.messageId &&
+                    uint32_t(uint32_t(millis()) - recentUserEventTimes[i]) < USER_EVENT_HISTORY_MS);
+
 
         // --------------------------------------------------
         // Duplicate EVENT
@@ -862,6 +968,14 @@ namespace
         lastPeerEventId =
             message.messageId;
 
+        if (message.event == Protocol::EventType::UserHeartbeat)
+        {
+            recentUserEventIds[nextUserEventSlot] = message.messageId;
+            recentUserEventTimes[nextUserEventSlot] = uint32_t(millis());
+            nextUserEventSlot = (nextUserEventSlot + 1) % RX_QUEUE_LENGTH;
+            if (recentUserEventCount < RX_QUEUE_LENGTH) ++recentUserEventCount;
+        }
+
         // Periodic Heartbeat is background traffic, not local user activity.
         PowerManager::applicationEvent(millis());
 
@@ -882,10 +996,16 @@ namespace
 
 
         // Runtime requests happen only after validation and duplicate rejection.
-        // UNKNOWN, including retained wake delivery, has no visual heartbeat.
+        // Only explicit user intent gets priority, regardless of local distance.
+        // Retained delivery records its visual obligation in handleWakeEvent().
         if (sendReceipt && message.type == Protocol::MessageType::Event &&
-            message.event == Protocol::EventType::Heartbeat &&
-            proximityClassification != ProximityClassification::UNKNOWN)
+            message.event == Protocol::EventType::UserHeartbeat)
+        {
+            led.requestUserHeartbeat();
+            Serial.printf("PARTNER LED | USER HEARTBEAT | id=%u | via=%s\n",
+                          message.messageId, transportName(transport));
+        }
+        else if (sendReceipt && message.event == Protocol::EventType::Heartbeat && backgroundHeartbeatAllowed())
             led.requestHeartbeat();
 
 
@@ -1042,6 +1162,7 @@ namespace
             // Replies are correlated solely by the RSSI observation's complete message.
             if (message.type == Protocol::MessageType::ProximityProbeReply) return;
             if (message.ackForMessageId != 0) return;
+            if (buttonHeartbeatPending) return; // Measurement replies yield to queued user intent.
             const auto state = PowerManager::localState();
             if (state != PowerManager::LocalState::ACTIVE && state != PowerManager::LocalState::IDLE)
                 return;
@@ -1090,7 +1211,7 @@ namespace
         {
             case Protocol::MessageType::Event:
 
-                if (message.event != Protocol::EventType::Heartbeat || message.ackForMessageId != 0) break;
+                if (!Protocol::isHeartbeat(message.event) || message.ackForMessageId != 0) break;
                 handleEvent(
                     message, true, transport
                 );
@@ -1249,6 +1370,7 @@ namespace
     const char* sleepTransportBlockedReason()
     {
         if (!protocolReady) return "RUNTIME_NOT_READY";
+        if (CC1101WakeTx::deferredPending()) return "CC1101_WAKE_EVENTS_PENDING";
         if (CC1101WakeRecovery::awakeBusy()) return "CC1101_RUNTIME_BUSY";
         if (waitingForAck) return "ACK_PENDING";
         if (controlCount != 0) return "CONTROL_QUEUED";
@@ -1262,13 +1384,16 @@ namespace
 
     const char* sleepEntryBlockedReason()
     {
+        if (const char* reason = buttonSleepBlockedReason()) return reason;
         if (const char* reason = sleepTransportBlockedReason()) return reason;
-        return digitalRead(MOTION_INT1_PIN) != 0 ? "MOTION_INT1_HIGH" : nullptr;
+        if (digitalRead(MOTION_INT1_PIN) != 0) return "MOTION_INT1_HIGH";
+        return nullptr;
     }
 
     bool productSleepEligible(uint32_t now, uint32_t requiredInactivityMs)
     {
         return uint32_t(now - lastMeaningfulActivity) >= requiredInactivityMs &&
+            buttonSleepBlockedReason() == nullptr &&
             motionReady && movementState == MovementState::READY &&
             proximityUpdateState != ProximityUpdateState::CHECKING &&
             PowerManager::automaticHeartbeatAllowed() && PowerManager::cooldownLeftMs(now) == 0 &&
@@ -1339,11 +1464,13 @@ namespace
         // Catch Activity arriving while this iteration processed radio work.
         // Existing activity semantics revoke an unconsumed SLEEPING decision.
         serviceMotion();
+        serviceButton();
         if (PowerManager::localState() != PowerManager::LocalState::SLEEPING)
         {
             sleepDrainWaiting = false;
             return;
         }
+        if (buttonSleepBlockedReason()) return; // Keep raw LOW/pending intent ahead of decision consumption.
         PowerManager::SleepDecision decision{};
         if (!PowerManager::takeSleepDecision(decision)) return;
         Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
@@ -1357,19 +1484,23 @@ namespace
 
     // Shared manual/boot wake request. The transmitter owns the entire bounded
     // retry episode; this layer allocates exactly one EVENT after runtime guards.
-    void requestPeerWake()
+    void serviceDeferredWakeEvents();
+
+    CC1101WakeTx::Report requestPeerWake()
     {
-        if (CC1101WakeRecovery::awakeBusy())
+        CC1101WakeTx::Report refused;
+        refused.result = CC1101WakeTx::Result::Busy;
+        if (CC1101WakeTx::deferredPending() || CC1101WakeRecovery::awakeBusy())
         {
             Serial.println("CC1101 WAKE TX | REFUSED | awake CC1101 operation pending");
-            return;
+            return refused;
         }
         if (!protocolReady || waitingForAck || controlCount != 0 ||
             uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
             !PowerManager::automaticHeartbeatAllowed())
         {
             Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
-            return;
+            return refused;
         }
         const Protocol::Message event{Protocol::VERSION, Protocol::MessageType::Event,
             nextMessageId++, LOCAL_DEVICE, Protocol::EventType::Heartbeat, 0};
@@ -1380,11 +1511,25 @@ namespace
             Serial.printf("CC1101 WAKE TX | id=%u | GIVE_UP | retries=%u | reason=%s | RX_READY=%d\n",
                 event.messageId, result.attempts ? result.attempts - 1 : 0,
                 CC1101WakeTx::toString(result.result), result.rxReady);
+        serviceDeferredWakeEvents(); // send() has returned SPI ownership, even on failure.
+        return result;
     }
 
     void receiveCc1101(const Protocol::Message& message)
     {
         handleReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message), Transport::CC1101);
+    }
+
+    void serviceDeferredWakeEvents()
+    {
+        if (!protocolReady || (CC1101WakeRecovery::awakeBusy() && !CC1101WakeRecovery::awakeStopped())) return;
+        Protocol::Message event{};
+        if (!CC1101WakeTx::takeDeferredEvent(event)) return;
+        Serial.printf("CC1101 WAKE TX | FORWARD EVENT | id=%u | via=CC1101\n", event.messageId);
+        // Normal validation/dedup/receiver LED and same-radio receipt. One per
+        // boundary: finish its asynchronous ACK before forwarding another.
+        // A stopped radio still permits delivery; failed receipts log explicitly.
+        receiveCc1101(event);
     }
 
     bool applicationTransportPolicyBlocked()
@@ -1425,6 +1570,53 @@ namespace
         automaticSelectionPending = false;
         Serial.printf("APP TRANSPORT AUTO | selected=%s | proximity=%s\n", transportName(selectedTransport),
                       proximityClassification == ProximityClassification::FAR ? "FAR" : "CLOSE");
+    }
+
+    void serviceButtonHeartbeat()
+    {
+        if (!buttonHeartbeatPending) return;
+        // Intent preempts measurement, but never an in-flight radio packet or ACK.
+        cancelProximityCheck("BUTTON_HEARTBEAT");
+        if (buttonWakeIntentHeld)
+        {
+            if (uint32_t(millis() - buttonWakeHeldAt) >= BUTTON_WAKE_DRAIN_TIMEOUT_MS)
+            {
+                failButtonWake("DRAIN_TIMEOUT");
+                return;
+            }
+            if (CC1101WakeRecovery::awakeStopped())
+            {
+                failButtonWake("CC1101_RUNTIME_STOPPED");
+                return;
+            }
+            // Drain coincident traffic first; don't skip a received user pulse
+            // while the existing synchronous wake sender waits for its ACK.
+            if (sleepTransportBlockedReason() || sleepDrainWaiting ||
+                !PowerManager::automaticHeartbeatAllowed() || led.userHeartbeatActive()) return;
+            Serial.println("BUTTON WAKE | PEER_WAKE | one bounded episode");
+            const auto result = requestPeerWake();
+            const bool peerAcked = result.result == CC1101WakeTx::Result::Acked;
+            Serial.printf("BUTTON WAKE | RESULT | peer_ack=%d | RX_READY=%d | attempts=%u\n",
+                          peerAcked, result.rxReady, result.attempts);
+            if (!peerAcked || !result.rxReady)
+            {
+                failButtonWake(peerAcked ? "LOCAL_RX_NOT_READY" : CC1101WakeTx::toString(result.result));
+                return;
+            }
+            buttonWakeIntentHeld = buttonWakeRetryOnPress = false;
+            Serial.println("BUTTON WAKE | HANDOFF | UserHeartbeat pending | delivery awaits application ACK");
+        }
+        if (sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed())
+            return;
+        serviceAutomaticTransportSelection();
+        // UNKNOWN uses the long-range awake radio without asserting CLOSE/FAR.
+        // submitAwake/serviceAwake retain ownership of preflight and RX recovery.
+        const Transport transport = proximityClassification == ProximityClassification::UNKNOWN ?
+            Transport::CC1101 : selectedTransport;
+        buttonHeartbeatPending = false;
+        Serial.printf("BUTTON HEARTBEAT | SEND | via=%s | proximity=%s\n", transportName(transport),
+                      proximityClassification == ProximityClassification::UNKNOWN ? "UNKNOWN" : "KNOWN");
+        startHeartbeatEvent(transport, Protocol::EventType::UserHeartbeat);
     }
 
     void selectApplicationTransport(Transport transport)
@@ -1594,6 +1786,12 @@ bool restoreRtcHistory()
 Protocol::Message handleWakeEvent(const Protocol::Message& event, bool& processed)
 {
     processed = handleEvent(event, false);
+    if (processed && event.type == Protocol::MessageType::Event && event.event == Protocol::EventType::UserHeartbeat)
+    {
+        retainedUserAnimationId = event.messageId;
+        retainedUserAnimationPending = true; // One retained packet, before its receipt ACK.
+        Serial.printf("PARTNER LED | DEFERRED USER HEARTBEAT | id=%u\n", event.messageId);
+    }
     return {Protocol::VERSION, Protocol::MessageType::Ack, nextMessageId++,
             LOCAL_DEVICE, Protocol::EventType::None, event.messageId};
 }
@@ -1601,6 +1799,8 @@ Protocol::Message handleWakeEvent(const Protocol::Message& event, bool& processe
 void setup()
 {
     bootInfo = CC1101WakeRecovery::captureBoot(); // EARLIEST: before Serial/SPI.
+    retainedUserAnimationPending = false;
+    recentUserEventCount = nextUserEventSlot = 0; // RAM-only; retained dedup remains authoritative at wake.
     resetMovement(); // Startup sensor history is not a fresh awake movement.
     resetProximityCheck();
     proximityClassification = ProximityClassification::UNKNOWN; // RAM-only; no retained distance.
@@ -1613,6 +1813,9 @@ void setup()
     lastMeaningfulActivity = 0;
     displayedStatus = {}; // Request one initial draw when runtime is awake and drained.
     Serial.begin(115200);
+    if (bootInfo.wokeFromGpio(BUTTON_PIN))
+        Serial.printf("BUTTON WAKE | DETECTED | GPIO5 | captured mask=0x%02llX\n",
+                      static_cast<unsigned long long>(bootInfo.gpioMask));
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
     if (bootInfo.deep)
     {
@@ -1621,7 +1824,7 @@ void setup()
         if (!rtcRestored) RtcState::invalidate();
         // GPIO mask identifies the wake SOURCE, not whether FIFO data exists.
         // Inspect retained RX even for motion/timer (empty is normal); never
-        // reset away a coincident packet. Both GPIO bits use this same path.
+        // reset away a coincident packet. All GPIO wake inputs use this same path.
         wakeReport = CC1101WakeRecovery::recover(rtcRestored, PEER_DEVICE, handleWakeEvent);
         CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
     }
@@ -1647,6 +1850,13 @@ void setup()
     displayReady = display.begin();
     if (!displayReady) Serial.println("DISPLAY INIT | FAILED | continuing");
     led.begin(); // Retained wake recovery and shared-I2C hardware initialization are complete.
+    if (retainedUserAnimationPending)
+    {
+        retainedUserAnimationPending = false;
+        led.requestUserHeartbeat();
+        Serial.printf("PARTNER LED | USER HEARTBEAT | id=%u | via=CC1101 | retained=1\n", retainedUserAnimationId);
+    }
+    beginButton();
 
     Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
@@ -1655,6 +1865,7 @@ void setup()
     if (receiveQueue == nullptr)
     {
         Serial.println("ESP-NOW RECEIVE QUEUE CREATION FAILED");
+        failButtonWake("RUNTIME_INIT_FAILED");
         return;
     }
 
@@ -1668,6 +1879,7 @@ void setup()
         Serial.println(
             "ESP-NOW STARTUP FAILED"
         );
+        failButtonWake("RUNTIME_INIT_FAILED");
 
 
         return;
@@ -1688,7 +1900,7 @@ void setup()
     // One-shot boot policy, after retained recovery, Motion and runtime setup.
     // GPIO4 is CC1101 GDO0: its participation suppresses a return wake, even
     // when GPIO3 also fired. Never re-evaluate this from loop() or rearm on failure.
-    if (bootInfo.wokeFromGpio(MOTION_INT1_PIN) && !bootInfo.wokeFromGpio(4))
+    if (!buttonWakeIntentHeld && bootInfo.wokeFromGpio(MOTION_INT1_PIN) && !bootInfo.wokeFromGpio(4))
     {
         Serial.println("MOTION PEER WAKE | one-shot request");
         requestPeerWake();
@@ -1696,7 +1908,7 @@ void setup()
 
     // One bootstrap attempt per runtime startup, even before peer ONLINE.
     // UNKNOWN suppresses heartbeats; this bounded check supplies its own probes.
-    if (proximityClassification == ProximityClassification::UNKNOWN)
+    if (!buttonHeartbeatPending && proximityClassification == ProximityClassification::UNKNOWN)
         startProximityCheck(uint32_t(millis())); // Existing ACTIVE/overlap guards; no loop-based restart.
     lastMeaningfulActivity = uint32_t(millis()); // Fresh runtime, including a completely stationary boot.
     automaticSleepArmed = true;
@@ -1709,17 +1921,19 @@ void setup()
 
 void loop()
 {
-    led.update(uint32_t(millis())); // One bounded animation step, independent of motion/radio state.
+    led.update(uint32_t(millis()), backgroundHeartbeatAllowed()); // Current state, no saved CLOSE output.
     checkProximityEligibility(); // Observe boundaries even if power changes back to ACTIVE below.
     // Clear stale tracking even if a power transition returns to ACTIVE below.
     if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
         resetMovement();
     if (protocolReady) serviceMotion(); // Real movement wins before admission, controls and physical entry.
+    serviceButton(); // Only a debounced press counts as meaningful local activity.
     // Activity/deadlines take effect before any queued control can advance the
     // FSM. Receipt ACKs in the RX batch still run before transport timeouts.
     servicePowerTest();
     if (!protocolReady)
     {
+        failButtonWake("RUNTIME_NOT_READY");
         resetMovement();
         cancelProximityCheck("RUNTIME_NOT_READY");
         delay(10);
@@ -1747,6 +1961,7 @@ void loop()
     // ------------------------------------------------------
 
     CC1101WakeRecovery::serviceAwake(PEER_DEVICE, receiveCc1101); // RX ACK before the 300 ms deadline.
+    serviceDeferredWakeEvents(); // Also drain failed/overflowed episodes before admission or new button work.
     discardObsoleteControls();
     handleAckTimeout();
     serviceAutomaticSleep();
@@ -1755,7 +1970,8 @@ void loop()
 
     // Physical execution is separate from semantic agreement.
     serviceSleepExecution();
-    serviceAutomaticTransportSelection(); // Apply policy before the next EVENT snapshots its transport.
+    serviceButtonHeartbeat(); // User intent has priority at the same transport boundary.
+    serviceAutomaticTransportSelection(); // Apply policy before the next periodic EVENT snapshots its transport.
 
 
     // ------------------------------------------------------
@@ -1764,6 +1980,7 @@ void loop()
     // ------------------------------------------------------
 
     if (
+        !buttonHeartbeatPending &&
         !pauseAutomaticHeartbeats &&
         proximityClassification != ProximityClassification::UNKNOWN &&
         PowerManager::automaticHeartbeatAllowed() &&

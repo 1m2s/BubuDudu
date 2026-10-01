@@ -12,7 +12,9 @@ inline void delayMicroseconds(uint32_t us) { hostUs += us; }
 inline void pinMode(int, int) {}
 inline void digitalWrite(int pin, int value) { assert(pin == 10); csLevel = value; }
 inline int& motionGpioLevel() { static int level = LOW; return level; }
-inline int digitalRead(int pin) { return pin == 20 ? int(misoHigh) : pin == 3 ? motionGpioLevel() : gdoLevel; }
+inline int& buttonGpioLevel() { static int level = HIGH; return level; }
+inline int digitalRead(int pin)
+{ return pin == 20 ? int(misoHigh) : pin == 3 ? motionGpioLevel() : pin == 5 ? buttonGpioLevel() : gdoLevel; }
 struct SPISettings { SPISettings(uint32_t, int, int) {} };
 
 struct HostSPI

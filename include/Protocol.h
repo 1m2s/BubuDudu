@@ -28,7 +28,8 @@ namespace Protocol
     enum class EventType : uint8_t
     {
         None      = 0,
-        Heartbeat = 1
+        Heartbeat = 1,     // Background/peer wake; never a user request.
+        UserHeartbeat = 2 // Explicit button intent, using the same reliable EVENT.
     };
 
     struct __attribute__((packed)) Message
@@ -47,6 +48,11 @@ namespace Protocol
         sizeof(Message) == 8,
         "Protocol::Message must be exactly 8 bytes"
     );
+
+    inline bool isHeartbeat(EventType event)
+    {
+        return event == EventType::Heartbeat || event == EventType::UserHeartbeat;
+    }
 
     inline bool isSleepControl(MessageType type)
     {

@@ -115,7 +115,7 @@ namespace CC1101WakeRecovery
             memcpy(&packet, &raw[1], sizeof(packet));
             report.packetRecovered = true;
             const bool event = packet.type == Protocol::MessageType::Event &&
-                packet.event == Protocol::EventType::Heartbeat && packet.ackForMessageId == 0;
+                Protocol::isHeartbeat(packet.event) && packet.ackForMessageId == 0;
             const bool ack = application && packet.type == Protocol::MessageType::Ack &&
                 packet.event == Protocol::EventType::None;
             if (packet.version != Protocol::VERSION || packet.sender != peer || (!event && !ack))
@@ -215,12 +215,14 @@ namespace CC1101WakeRecovery
         return awakeState == AwakeState::Tx || awakeState == AwakeState::RxPending || digitalRead(GDO0) == HIGH;
     }
 
+    bool awakeStopped() { return awakeState == AwakeState::Stopped; }
+
     SubmitResult submitAwake(const Protocol::Message& packet)
     {
         if (awakeState == AwakeState::Stopped) return SubmitResult::Failed;
         if (awakeBusy()) return SubmitResult::Busy;
         const bool event = packet.type == Protocol::MessageType::Event &&
-            packet.event == Protocol::EventType::Heartbeat && packet.ackForMessageId == 0;
+            Protocol::isHeartbeat(packet.event) && packet.ackForMessageId == 0;
         const bool ack = packet.type == Protocol::MessageType::Ack && packet.event == Protocol::EventType::None;
         if (packet.version != Protocol::VERSION || (!event && !ack)) return SubmitResult::Failed;
         const auto radio = CC1101SleepArm::prepareForSleep();
@@ -395,10 +397,16 @@ namespace CC1101WakeRecovery
         esp_err_t result = ESP_OK;
         if (!reason)
         {
+            constexpr uint64_t highWakeMask = (1ULL << GDO0) | (1ULL << MOTION_INT1_PIN);
+            constexpr uint64_t lowWakeMask = 1ULL << BUTTON_PIN;
+            static_assert((highWakeMask & lowWakeMask) == 0, "Wake polarities must be disjoint");
+            static_assert((highWakeMask | lowWakeMask) == 0x38, "GPIO3/4 HIGH + GPIO5 LOW wake mask");
+            // Installed C3 SDK accumulates disjoint masks. Never flip a pin's polarity.
             result = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
             if (result == ESP_OK)
-                result = esp_deep_sleep_enable_gpio_wakeup((1ULL << GDO0) | (1ULL << MOTION_INT1_PIN),
-                                                           ESP_GPIO_WAKEUP_GPIO_HIGH);
+                result = esp_deep_sleep_enable_gpio_wakeup(highWakeMask, ESP_GPIO_WAKEUP_GPIO_HIGH);
+            if (result == ESP_OK)
+                result = esp_deep_sleep_enable_gpio_wakeup(lowWakeMask, ESP_GPIO_WAKEUP_GPIO_LOW);
             if (result == ESP_OK && !coordinated) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
             if (result == ESP_OK)
             {
@@ -409,7 +417,7 @@ namespace CC1101WakeRecovery
             reason = "SETUP_FAILED";
             if (result == ESP_OK)
             {
-                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH | mask=0x18 | timer=%s\n", label,
+                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH + GPIO5 LOW | mask=0x38 | timer=%s\n", label,
                               coordinated ? "OFF" : "30s INTEGRATION SAFETY TIMER");
                 Serial.printf("%s | ENTERING | USB may disconnect; p reprints wake report\n", label);
                 Serial.flush();

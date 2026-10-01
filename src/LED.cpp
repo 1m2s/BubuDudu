@@ -20,22 +20,36 @@ void LED::begin()
 
 void LED::requestHeartbeat()
 {
+    if (userHeartbeat) return; // Background cannot replace or extend the user pulse.
+    phase = Phase::Requested;
+}
+
+void LED::requestUserHeartbeat()
+{
+    userHeartbeat = true;
     phase = Phase::Requested;
 }
 
 bool LED::busy() const { return phase != Phase::Idle; }
+bool LED::userHeartbeatActive() const { return userHeartbeat; }
 
 void LED::off()
 {
     phase = Phase::Idle;
+    userHeartbeat = false;
     startedAt = 0;
     shownRed = 0;
     pixel.clear();
     pixel.show();
 }
 
-void LED::update(uint32_t now)
+void LED::update(uint32_t now, bool backgroundAllowed)
 {
+    if (!userHeartbeat && !backgroundAllowed)
+    {
+        if (busy()) off();
+        return;
+    }
     // Avoid the driver's latch wait during animation; try again next loop.
     if (phase == Phase::Idle || !pixel.canShow()) return;
     if (phase == Phase::Requested)
