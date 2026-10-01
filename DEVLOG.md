@@ -3575,3 +3575,208 @@ The separate `main` documentation commit is `docs: record automatic sleep and pe
 Continue optimization and testing on `feature/sleep-execution`, particularly reproduce and investigate the Bubu startup OLED anomaly if possible. Preserve the verified automatic sleep/wake chain while narrowing that observation to a reproducible case.
 
 Then perform another final integration review before deciding whether to merge firmware into `main`. The next step is not an immediate firmware merge, a new feature or repository-polish work.
+
+## 2026-10-01
+
+### Completed
+
+Prepared `integration/final-firmware` from the existing working firmware checkpoint:
+
+`fece5af0de8cec8aed57234af49ecd44d72d4115` — `feat: add button-triggered partner heartbeat and deep-sleep wake`
+
+That checkpoint already contained the physical-button heartbeat, GPIO5 deep-sleep wake, bounded peer-wake handoff, retained user animation and concurrent CC1101 EVENT-forwarding correction. These are prior checkpoint capabilities, summarized below from the committed `BUTTON_HEARTBEAT.md`; they were not all implemented during this October 1 session.
+
+The integration preparation preserved the working firmware and established a current acceptance record and automated-check workflow. Subsequent work removed the manual serial bench interface while preserving automatic operation. Software validation was reported passing, but the user could not physically test the cleanup before stopping. The complete unfinished change was therefore saved in a dedicated stash instead of being committed to the firmware branch.
+
+Session closure returned the checkout to the existing `main` branch for this development-log-only update. No firmware was merged into main, and no hardware was flashed during closure.
+
+### Prior Working Checkpoint — Button Heartbeat and Wake
+
+The committed button feature adds `UserHeartbeat = 2` within the existing version-1, eight-byte message format. Both devices must use firmware that understands the new event value. The physical GPIO5-to-GND button retains 30 ms press/release debounce and one bounded pending intent. Button work takes priority over periodic Heartbeats and proximity measurement after existing in-flight work drains. UNKNOWN proximity routes the request through CC1101 without fabricating a CLOSE or FAR classification.
+
+A new received UserHeartbeat invokes the receiver's priority 700 ms double pulse once. It does not add a sender animation. Duplicate retries receive the normal receipt ACK without another pulse, including retries interleaved with background or newer user events. After the user pulse, normal background output resumes only when current CLOSE and power eligibility permit it. The existing application outbox, immutable in-flight message, 300 ms ACK timeout and two same-ID retries remain authoritative.
+
+Coordinated sleep uses GPIO3/GPIO4 HIGH and GPIO5 LOW, combined mask `0x38`, with the product timer OFF. Earliest GPIO5 wake evidence preserves one intent even if the button is released before initialization finishes. A stable release is required before another press can be accepted. Raw LOW and pending button work block sleep, preventing repeated immediate wakeups from a held button.
+
+After retained-radio recovery and runtime initialization, wake-origin intent uses one bounded CC1101 peer-wake episode. Only a matching peer wake ACK together with confirmed local RX readiness releases the intent into the reliable UserHeartbeat path with a fresh ID. The wake episode retains three attempts and at most one RX recovery; failure clears the held request and reports unconfirmed delivery. It does not begin another episode every loop. A later stable release and new press can request another bounded attempt. Button wake counts as local activity and rearms the normal inactivity timer.
+
+The same checkpoint repairs incoming traffic during the synchronous peer-wake ACK wait. Valid concurrent Heartbeat/UserHeartbeat EVENTs enter an eight-packet deferred queue. Application delivery and receipt transmission wait until wake TX releases radio ownership, then use the existing consumer and same-radio ACK path. These packets do not satisfy the wake ACK or extend its deadline. Queue exhaustion stops the wake episode before consuming the next FIFO packet, preserving bounded storage and the unread packet.
+
+A newly processed retained UserHeartbeat records one deferred visual obligation before its receipt ACK. That obligation is consumed once after LED initialization, without replaying application delivery or allocating another EVENT. These retained and concurrent delivery paths were preserved by the serial cleanup.
+
+### Final Firmware Integration Preparation
+
+The branch audit found no missing active subsystem requiring a merge from the historical feature branches. Existing history already supplied the current communication, Motion, display, LED, power and wake paths. Older header moves, task-based animation, sensor profiles and radio experiments were not imported over the working implementations.
+
+Two local preparation commits were created above `fece5af`:
+
+* `960d5f58b9c9d9f1ce06cfa6c10ff947de61bbb7` — `docs: preserve development history on final firmware branch`
+
+* `97135b2bff2042c7f0e473ccc8f0456861d89f0d` — `ci: prepare final firmware acceptance checks`
+
+Main's development history through `4defa2e` and `simulations/battery_indicator_v1.txt` were preserved exactly on the integration branch. The battery simulation remains historical design material, not measured battery validation. The reviewed GitHub Actions workflow was incorporated, with host tests followed by explicitly sequential Bubu and Dudu firmware builds. `FINAL_FIRMWARE_TEST.md` records the candidate acceptance sequence and open evidence.
+
+The preparation commits did not change firmware sources, headers, host tests, PlatformIO configuration or port-selection tooling relative to `fece5af`. Closure verified that relationship and the preserved history/simulation directly from the committed trees.
+
+GitHub Actions has not been verified for this candidate. The workflow belongs to the integration branch; publishing this DEVLOG-only main update does not publish that workflow or the feature firmware.
+
+### Physical Radio Observations Before the Cleanup
+
+Physical logs supplied before the serial cleanup showed successful application delivery over both ESP-NOW and CC1101, bounded fallback and recovery, and automatic return to ESP-NOW after an eligible CLOSE classification.
+
+The user reported unexpected behavior after sequential flashing and normal behavior after resetting. Bubu also switched back after movement and settlement before its own reset. That observation matters: neither a reset requirement nor an "only after flashing" cause has been established. The startup/radio-selection behavior remains unresolved, and no investigation or fix for it was included in the serial-command task.
+
+These observations provide useful evidence for the existing checkpoint, but do not pass the complete final acceptance checklist. Earlier button/partner animation, GPIO5-only wake (`mask=0x20`) and return to coordinated sleep (`mask=0x38`, timer OFF) remain prior physical evidence. Repeated CC1101 wake requests and subsequent user events also succeeded in the same runtime. Missing startup output during USB reconnection prevents claiming that every wake handoff detail was captured.
+
+The exact physical `DEFERRED EVENT` overlap remains uncaptured despite deterministic host coverage of the real waiter and forwarding path. An earlier unsuccessful overlap attempt exhausted bounded wake/user retries without a captured received packet; its cause remains unresolved. The short press-and-release limitation during the final sleep-entry polling/SDK critical interval is also unchanged. No physical validation of the new serial cleanup has occurred.
+
+### Unfinished Serial-Command Cleanup
+
+The cleanup removes the firmware input dispatcher for:
+
+```text
+e c p x w i s a h d ?
+```
+
+Command help, command-only status/responses and the obsolete `Sleep handshake bench` startup banner are removed. The manual application-radio selector, forced-IDLE helper, heartbeat pause toggle, one-second control-delay toggle and bench-only 30-second sleep timer are removed where they were used solely by those commands. No replacement or hidden command interface and no new debug-build configuration were added.
+
+`servicePowerTest()` previously performed both command handling and the regular `PowerManager::update(now)`. Removing the dispatcher therefore retained that power update explicitly at the same point in the normal loop, before queued control work and protocol-readiness early return. Sleep deadlines and ordinary power-state progress continue even when serial input is present.
+
+The automatic peer-wake helper remains because Motion and button wake use it. Automatic radio selection, fallback/recovery, reliable delivery, receipt ACKs, bounded retries, duplicate suppression, physical button behavior, receiver user animation, Motion/proximity processing and OLED/LED servicing remain in the production flow. Coordinated sleep keeps its arming/drain/final-entry guards and GPIO-only wake policy. Useful automatic diagnostics remain available through serial output. Hardware wiring was unchanged.
+
+Host tests were retained and adapted to explicit harness setup or production inputs instead of command injection. Delayed-control collision, timeout and cancellation tests still exercise the real queue/FSM, with delay injected by the host callback. Periodic scheduling is isolated by the harness where necessary; cadence tests exercise the production schedule. Former manual-selector tests now verify that serial input cannot override automatic policy or consume pending fallback decisions.
+
+New inertness coverage compares the real loop with and without every former command character and line ending across twelve scenarios for both identities. It checks runtime state, packets, message IDs, retries, power deadlines, animation and physical input behavior, including due heartbeats, negotiation, sleep drain, pending wake work and runtime failure. The input remains unread and cannot drive firmware behavior.
+
+### Host Tests and Build Verification
+
+Before this closure, Codex reported the following results for the unfinished cleanup:
+
+* complete `bash tests/host/run.sh` suite — PASS, including Bubu and Dudu and the real CC1101 wake-waiter/application-forwarding regression
+
+* AddressSanitizer and UndefinedBehaviorSanitizer — enabled by the existing runner; no reported errors
+
+* `pio run -e bubu -j 1` — PASS, 89.68 seconds
+
+* `pio run -e dudu -j 1` — PASS, 83.66 seconds; started only after Bubu completed
+
+* `git diff --check` and complete eleven-file correction review — PASS
+
+These are the earlier cleanup validation results, not a new hardware result or a rerun on main. Physical validation of the cleanup is still pending. This closure did not rerun the firmware host suites or builds after switching to main.
+
+Closure checked that all eleven current cleanup files matched the recorded validated content hashes before stashing. The saved stash was then compared byte-for-byte with the captured cleanup diff, and its file contents matched those same hashes. Documentation diff checks, exact staged-file review, protected-file checks and stash/ref preservation checks were performed for this documentation update. Those checks establish preservation and documentation scope; they do not add RF, USB, LED, wake or power evidence.
+
+### Current Working State
+
+The firmware candidate remains on `integration/final-firmware` at:
+
+`97135b2bff2042c7f0e473ccc8f0456861d89f0d`
+
+The uncommitted cleanup is preserved in a new stash named:
+
+`On integration/final-firmware: wip: remove serial bench commands; physical validation pending - 2026-10-01`
+
+Its full object ID is:
+
+`e2472ca16d9a1329a8ca526037905540b88453dd`
+
+Its base commit is:
+
+`97135b2bff2042c7f0e473ccc8f0456861d89f0d`
+
+The stash contains exactly these eleven changed files:
+
+* `include/CC1101WakeRecovery.h`
+
+* `include/CC1101WakeTx.h`
+
+* `include/PowerManager.h`
+
+* `include/RtcState.h`
+
+* `src/CC1101WakeRecovery.cpp`
+
+* `src/CC1101WakeTx.cpp`
+
+* `src/PowerManager.cpp`
+
+* `src/main.cpp`
+
+* `tests/host/cc1101_wake_forward_test.cpp`
+
+* `tests/host/cc1101_wake_test.cpp`
+
+* `tests/host/sleep_handshake_test.cpp`
+
+The cleanup is stashed, not committed or merged. The five pre-existing stash objects remain unchanged; adding the new stash shifted their numeric indices. Restore by the full object ID rather than relying on `stash@{0}`. The new stash excludes `.vscode/extensions.json` and has no staged changes in its index snapshot.
+
+The checkout is on main. Before this update, local main and the live origin branch both matched `4defa2e46d4977a67f4e0191228c3ac3ec4fbae8`, so no synchronization was required. Main receives only this appended DEVLOG entry and still does not contain the practical feature firmware. All previous DEVLOG entries are preserved exactly.
+
+The original `.vscode/extensions.json` modification remains outside the stash, unchanged and unstaged, with SHA-256:
+
+`b14aaff9d2eaeb2c2d6e0893007079d33676ab6a1e8f9fc2a4bbfb706e14f846`
+
+The integration and historical feature refs, `chore/repository-polish`, synced `sources/` files and unrelated work were preserved. This closure does not push the integration branch or create a release tag. Presentation work remains deferred.
+
+Startup/radio-selection observations and the earlier Bubu startup/OLED anomaly remain unresolved. The uncaptured physical overlap, incomplete final acceptance sequence and cleanup physical test remain open. Battery hardware, the incoming power module, current consumption and runtime have not been validated; no battery result is inferred from the preserved simulation or USB bench operation.
+
+### Problems Solved
+
+* ambiguity about whether historical feature branches needed to be merged over the current working firmware
+
+* risk of losing main's development history and battery design reference during integration preparation
+
+* serial characters overriding automatic behavior through legacy bench commands, addressed in the stashed cleanup pending physical validation
+
+* risk of deleting the regular power-management update together with the command handler
+
+* host regressions depending on a production manual interface instead of explicit test setup
+
+* risk of losing the unfinished cleanup or mixing the protected editor modification into its stash
+
+* ambiguity about the firmware checkpoint, stash restoration target and remaining validation at the next session
+
+The startup/radio-selection cause, physical deferred-EVENT overlap, complete candidate acceptance and battery behavior are not included as solved.
+
+### Git Commits
+
+The prior working firmware checkpoint is:
+
+`fece5af0de8cec8aed57234af49ecd44d72d4115` — `feat: add button-triggered partner heartbeat and deep-sleep wake`
+
+The local integration preparation commits are:
+
+* `960d5f58b9c9d9f1ce06cfa6c10ff947de61bbb7` — `docs: preserve development history on final firmware branch`
+
+* `97135b2bff2042c7f0e473ccc8f0456861d89f0d` — `ci: prepare final firmware acceptance checks`
+
+There is no serial-cleanup firmware commit. Stash `e2472ca16d9a1329a8ca526037905540b88453dd` preserves that unfinished work above `97135b2`.
+
+The separate main documentation commit is `docs: record final firmware preparation and pending cleanup`. Its only changed file is `DEVLOG.md`; it does not merge, cherry-pick or copy the firmware or integration workflow into main.
+
+### Next Step
+
+Resume the unfinished cleanup on its existing integration branch. First verify the branch/ref state and preserve the protected editor modification. Then restore the recorded stash without dropping it:
+
+```bash
+git switch integration/final-firmware
+git stash apply e2472ca16d9a1329a8ca526037905540b88453dd
+```
+
+Confirm the eleven-file cleanup is restored on its recorded base and `.vscode/extensions.json` remains unchanged and unstaged. If the checkout or base has changed, review the difference before proceeding; do not use a blanket restore or discard to force the old state.
+
+Upload matching Bubu and Dudu builds strictly sequentially, then perform one manageable physical cleanup check with paired serial logs at 115200 baud:
+
+```text
+both updated devices awake
+    -> type ecpxwisahd? into the serial monitor
+    -> no command response or manual behavior override
+    -> press and release Bubu's physical button once
+    -> Dudu receives the UserHeartbeat and plays one user pulse
+    -> leave both stationary with buttons released
+    -> normal coordinated sleep, mask=0x38, timer=OFF
+```
+
+Normal automatic diagnostics may continue while characters are typed. Observe the partner LED as well as the matching receipt; an ACK alone is not proof that the intended animation ran. Allow the existing 35-second inactivity policy and normal movement/proximity/transport guards to determine sleep eligibility.
+
+Validate the cleanup physically before committing it. Retain the stash while reviewing the restored work and results. Complete remaining candidate acceptance deliberately afterward; do not treat this documentation closure as firmware integration, a verified GitHub Actions run, a release or the start of presentation work.
