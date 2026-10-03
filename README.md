@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — feature/sleep-handshake
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `baea754`. Coordinated sleep protocol checkpoint over ESP-NOW: REQUEST → READY → COMMIT → SLEEP_ACK. Both CPUs remain physically awake even when the FSM reports SLEEPING.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- A packet ACK confirms receipt; the separate SLEEP_ACK accepts the sleep commit.
+- Simultaneous coordinators need deterministic arbitration without extending the original hard deadline.
+- Duplicate controls must preserve retry budgets and avoid repeating transitions; permanent packet loss can still leave different peer states.
 
-## Planned Features
+[Bench procedure and host checks](SLEEP_HANDSHAKE_TEST.md) · [Power state machine](src/PowerManager.cpp) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
