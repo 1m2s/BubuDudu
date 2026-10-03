@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — feature/ws2812
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `a4ea899`. Local Motion + WS2812B heartbeat checkpoint. A dedicated LED module drives one pixel on GPIO21; the main loop calls its delay-based animation and enters deep sleep after inactivity.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- Two brightness ramps with different peaks produce the local double-pulse heartbeat.
+- Delay-based animation occupies the main loop between Motion checks.
+- Clear and transmit the LED buffer before sleep; the external pixel otherwise retains its last output.
 
-## Planned Features
+[LED implementation](src/LED.cpp) · [Application](src/main.cpp) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
