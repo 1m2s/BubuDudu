@@ -4110,3 +4110,87 @@ without claiming new post-refactor physical acceptance.
 
 Merging this integration is a software checkpoint, not a fully hardware-validated
 release.
+
+## 2026-10-03 — Main checkpoint and remaining acceptance work
+
+### Completed today
+
+The final integration described above is now merged into `main`. Local history
+confirms PR #1 merged at `3f6ae82`, followed by documentation/evidence commit
+`5ce0ec1`. The earlier merge-handoff wording is historical; this entry records
+the resulting main checkpoint without rewriting earlier development history.
+
+The shared firmware now has the five runtime modules, split host regression
+suites and pinned automated host/build checks documented in the preceding
+entry. The six-second FAR heartbeat and preserved CLOSE/button behavior are
+part of this software checkpoint. No new feature or firmware repair was made
+during this closing review.
+
+The presentation pass refreshed `README.md`, `REQUIREMENTS.md` and
+`INTERFACES.md`, and added three selected images with provenance under
+`docs/images/`: a historical CC1101 SPI capture, an I2C debugging capture and a
+Falstad battery-indicator simulation. These are useful existing evidence, but
+they are not new physical acceptance results. The README already links to the
+architecture, host testing, acceptance record and development log.
+
+### Current working state and validation
+
+The checkout was already on `main` at `5ce0ec1` when this update began. The
+preceding entry records passing local host checks, sanitizer checks, both
+firmware builds and the verified integration CI run. Those results remain
+software evidence for their recorded checkpoints; no firmware tests, builds,
+uploads or physical experiments were repeated for this DEVLOG-only update.
+
+The complete current firmware still needs a fresh physical acceptance run on
+both devices. Cases 1–10 in `FINAL_FIRMWARE_TEST.md` remain Pending. Earlier
+hardware milestones do not establish a pass for the integrated firmware now
+on main. The acceptance document's dated October 1 baseline/upload guidance
+must not be mistaken for today's firmware version.
+
+### Known issues and remaining scope
+
+- Initial `NOT_IN_RX` has no established root cause; persistent CC1101
+  `Stopped` remains unresolved.
+- Rare failed-sleep recovery has host coverage for the intended behavior but
+  still lacks complete verification of the reported hardware failure case.
+- OLED visibility remains unresolved/unverified. Initialization, address ACKs
+  and attempted transfers alone do not establish a readable screen.
+- The awake motion threshold of 0.625 g remains a trial setting requiring
+  physical validation. Proximity classification is not calibrated distance.
+- Gesture detection and measured battery current/runtime characterization
+  remain unfinished. Battery assembly and earlier battery-powered operation
+  do not establish runtime or charging-under-load performance.
+- Historical `RadioTask` and `CC1101Radio` remain dormant in the source tree.
+  The older receive routine's documented FIFO-length-bound concern remains;
+  inspect dependencies before removing this code or ever re-enabling it.
+- Exact physical deferred-traffic overlap and the short button-pulse window
+  around final sleep entry remain evidence/behavior limitations.
+
+The review identified physical verification as the highest-priority remaining
+work. Further portfolio improvements can include a finished-device photo,
+heartbeat/OLED demonstration, an architecture graphic and measured power
+results. Existing historical bus screenshots should retain their limited
+claims. Subjective project ratings are not validation evidence.
+
+### Files, commits and hardware
+
+- This closing update changes only `DEVLOG.md` on `main`; earlier entries are
+  preserved. The existing `.vscode/extensions.json` modification is unrelated
+  and remains outside this update.
+- Today's integration commit sequence and its software checks are listed in
+  the preceding entry. Main additionally records merge `3f6ae82` and
+  documentation/evidence commit `5ce0ec1`.
+- No wiring, component, battery configuration or flashed firmware changed
+  during this closing update. No additional hardware problem is declared
+  solved by the repository merge or documentation work.
+
+### Exact next step
+
+Resume physical acceptance with case 1 only: both devices boot, Motion
+initializes and settles, and both OLEDs visibly show live status. First record
+the source commit and confirm which matching Bubu/Dudu builds are actually
+installed; reconcile the historical acceptance instructions with that version
+before testing. Then capture paired serial logs and direct observations of
+both screens using the existing verified bench wiring and power arrangement.
+Record pass, fail or missing evidence explicitly before moving to case 2 or
+making another firmware change.
