@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — feature/button-heartbeat
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `fece5af`. Button interaction and automatic sleep checkpoint, sharing commit fece5af with feature/sleep-execution. A debounced press requests a receiver-only 700 ms heartbeat; GPIO5 wake preserves a pending press through reboot and a bounded peer-wake handoff.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- Latch GPIO5 wake evidence before initialization so an early button release does not lose the request.
+- A peer-wake ACK plus local RX readiness permits handoff; the subsequent UserHeartbeat still needs its own application ACK.
+- Defer concurrent EVENTs while the wake transmitter owns SPI, then process them through normal deduplication and receipt handling.
 
-## Planned Features
+[Button behavior and limitations](BUTTON_HEARTBEAT.md) · [Application](src/main.cpp) · [Host checks](tests/host/run.sh) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
