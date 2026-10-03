@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — feature/oled
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `9cc2089`. Local display checkpoint combining Motion, the FreeRTOS heartbeat task and an SH1106 OLED. The screen shows device identity, ACTIVE/INACTIVE state and normal/motion boot reason; it does not show the later peer/radio dashboard.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- ADXL345 at 0x53 and OLED at 0x3C can share GPIO0/1; a bus scan helps distinguish their addresses.
+- U8g2 takes the OLED address shifted left by one bit.
+- Keep boot reason separate from live activity state so a later motion event does not rewrite the origin of the boot.
 
-## Planned Features
+[Display implementation](src/Display.cpp) · [Application and bus scan](src/main.cpp) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
