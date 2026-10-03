@@ -26,9 +26,9 @@ namespace
 
     constexpr uint8_t EXPECTED_DEVID  = 0xE5;
 
-    // 0.75 g awake setting: physically tuned for pickup/noise rejection on current boards.
+    // Trial 0.625 g awake setting (nearest to 0.6 g); physical validation pending.
     // Sleep keeps the independently verified deliberate-motion threshold (3 g).
-    constexpr uint8_t AWAKE_ACTIVITY_THRESHOLD = 12;
+    constexpr uint8_t AWAKE_ACTIVITY_THRESHOLD = 10;
     constexpr uint8_t SLEEP_ACTIVITY_THRESHOLD = 48;
     constexpr uint8_t STARTUP_ATTEMPTS = 3;
     constexpr uint32_t STARTUP_RETRY_DELAY_MS = 20;
@@ -145,7 +145,15 @@ bool Motion::begin(
         }
         // Motion remains the sole bus owner. Retry a failed Wire.begin(), but
         // keep a successfully initialized shared bus in place for sensor retries.
-        if (!busReady) busReady = Wire.begin(sdaPin, sclPin);
+        if (!busReady)
+        {
+            busReady = Wire.begin(sdaPin, sclPin);
+#ifdef DEVICE_DUDU
+            diagnosticBusReady = busReady;
+            Serial.printf("I2C STARTUP DUDU | Wire.begin SDA=%u SCL=%u | result=%u (%s)\n",
+                          sdaPin, sclPin, unsigned(busReady), busReady ? "READY" : "FAILED");
+#endif
+        }
         if (busReady && beginAttempt(startupCaptured))
         {
             interruptOccurred = false;
@@ -156,6 +164,34 @@ bool Motion::begin(
     }
     return false; // setup() reports FAILED and continues; no background retry.
 }
+
+#ifdef DEVICE_DUDU
+void Motion::reportStartupI2cHealth(uint8_t oledAddress) const
+{
+    // Address-only START/address/STOP, once per device in setup(). No register
+    // access, recovery or setting changes. These extra transfers affect timing.
+    const struct { const char* name; uint8_t address; } devices[]{
+        {"ADXL345", ADXL345_ADDRESS}, {"OLED", oledAddress}
+    };
+    for (const auto& device : devices)
+    {
+        if (!diagnosticBusReady)
+        {
+            Serial.printf("I2C ADDRESS DUDU | %s addr7=0x%02X | SKIPPED (Wire.begin failed)\n",
+                          device.name, device.address);
+            continue;
+        }
+        Wire.beginTransmission(device.address);
+        const uint8_t result = Wire.endTransmission(true);
+        // Installed ESP32 Wire (Arduino 2.0.17): ESP_OK->0, ESP_FAIL->2,
+        // ESP_ERR_TIMEOUT->5, otherwise 4. Code 2 is not exclusive to NACK.
+        const char* meaning = result == 0 ? "ACK" : result == 2 ? "NACK_OR_ESP_FAIL" :
+            result == 4 ? "OTHER_ERROR" : result == 5 ? "TIMEOUT" : "UNEXPECTED_CODE";
+        Serial.printf("I2C ADDRESS DUDU | %s addr7=0x%02X | result=%u (%s)\n",
+                      device.name, device.address, result, meaning);
+    }
+}
+#endif
 
 bool Motion::beginAttempt(bool& startupCaptured)
 {

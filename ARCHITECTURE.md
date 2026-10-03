@@ -48,7 +48,9 @@ Secondary 433 MHz wireless communication system.
 
 The system will eventually support:
 
-Active -> Idle -> Sleep -> Motion Wake -> Active
+Active -> Sleep Negotiation -> Sleep -> Motion Wake -> Active
+
+Awake devices remain ACTIVE while stationary; inactivity qualifies sleep admission.
 
 The ADXL345 interrupt output will be used to wake the ESP32 from sleep.
 

@@ -5,7 +5,7 @@ EVENT/ACK reliability rules. The EVENT enum now explicitly distinguishes:
 
 | `event` | Meaning | Awake LED behavior |
 | --- | --- | --- |
-| `Heartbeat = 1` | Background heartbeat or existing peer wake | Background output only while locally CLOSE and ACTIVE/IDLE |
+| `Heartbeat = 1` | Background heartbeat or existing peer wake | Background output only while locally CLOSE and ACTIVE |
 | `UserHeartbeat = 2` | Debounced physical button request | No added sender animation; receiver plays the priority 700 ms double pulse |
 
 This is an additive event value within protocol version 1. Message size, message
@@ -37,7 +37,7 @@ servicing continues. Sleep still cancels LED output immediately.
 
 After completion, no old CLOSE state or missed background request is restored.
 The next normally scheduled background request checks current proximity and
-ACTIVE/IDLE eligibility. Normal CLOSE application traffic/cadence is retained;
+ACTIVE eligibility. Normal CLOSE application traffic/cadence is retained;
 FAR application traffic and radio fallback/recovery continue without background
 CLOSE output. Button sends do not interrupt or restart the sender's active
 background animation. Application messages still share the existing single

@@ -39,6 +39,11 @@ public:
         uint8_t interruptPin
     );
 
+#ifdef DEVICE_DUDU
+    // Temporary startup observation, called once after Motion/Display begin.
+    void reportStartupI2cHealth(uint8_t oledAddress) const;
+#endif
+
     // Pause the ISR, clear latched events, and enable only activity on INT1.
     // A failed preparation must be followed by cancelSleepPreparation().
     bool prepareForSleep();
@@ -68,6 +73,9 @@ public:
 
 
 private:
+#ifdef DEVICE_DUDU
+    bool diagnosticBusReady = false; // Actual Wire.begin result, independent of sensor configuration.
+#endif
     // One complete startup identification/configuration attempt; no runtime retries.
     bool beginAttempt(bool& startupCaptured);
 

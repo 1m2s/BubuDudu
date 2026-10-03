@@ -16,6 +16,16 @@ struct HostSerial
 {
     std::string log;
     std::deque<char> input;
+    int writeCapacity = 256;
+    unsigned capacityChecks = 0, writes = 0;
+    int availableForWrite() { ++capacityChecks; return writeCapacity; }
+    size_t write(const uint8_t* data, size_t size)
+    {
+        assert(size <= size_t(writeCapacity));
+        ++writes;
+        log.append(reinterpret_cast<const char*>(data), size);
+        return size;
+    }
     void begin(unsigned long) {}
     void flush() {}
     int available() { return static_cast<int>(input.size()); }

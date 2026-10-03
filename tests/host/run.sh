@@ -52,4 +52,11 @@ done
     -I"$test_dir/motion" -I"$test_dir" -I"$repo_dir/include" \
     "$test_dir/display_status_test.cpp" -o "$build_dir/test_display_status"
 "$build_dir/test_display_status"
+for device in BUBU DUDU; do
+    "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror \
+        -fsanitize=address,undefined -fno-omit-frame-pointer \
+        -D"DEVICE_$device" -I"$test_dir/motion" -I"$test_dir" -I"$repo_dir/include" \
+        "$test_dir/i2c_startup_test.cpp" -o "$build_dir/test_i2c_startup_$device"
+    "$build_dir/test_i2c_startup_$device"
+done
 echo "Host binaries: $build_dir"

@@ -15,7 +15,7 @@ int main()
     assert(hostOled().hardwareInitializations == 0);
     for (const char* device : {"BUBU", "DUDU"})
     for (const char* motion : {"STILL", "MOVING", "SETTLING", "N/A"})
-    for (const char* state : {"ACTIVE", "IDLE", "SLEEP NEG", "SLEEP", "WAKING"})
+    for (const char* state : {"ACTIVE", "SLEEP NEG", "SLEEP", "WAKING"})
     {
         const auto sends = hostOled().sends;
         display.showStatus(device, "ONLINE", "CLOSE", "ESP-NOW", state, motion);
@@ -59,8 +59,8 @@ int main()
         assert(hostOled().sends == sends + 1 && hostOled().clears == hostOled().sends);
         assert(hostOled().begins == begins && hostOled().transfers == hostOled().sends);
         assert(hostOled().hardwareInitializations == 0 && Wire.begins == 0 && Wire.operations == 0 && hostNow == 0);
-        display.showStatus(device, "ONLINE", "CLOSE", "ESP-NOW", "IDLE", "STILL");
-        assert(hostOled().text.size() == 11 && hostOled().text[8].value == "IDLE");
+        display.showStatus(device, "ONLINE", "CLOSE", "ESP-NOW", "ACTIVE", "STILL");
+        assert(hostOled().text.size() == 11 && hostOled().text[8].value == "ACTIVE");
     }
     puts("PASS: final OLED clears stale awake fields, fits both identities/DEEP SLEEP/MOTION / PEER in 128x64, transfers exactly once without reinitialization, polling or delay; awake layout restores unchanged");
 }

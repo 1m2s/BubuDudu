@@ -33,6 +33,11 @@ namespace PowerManager
         bool cooldownActive = false;
         uint32_t cooldownDeadline = 0;
         uint32_t wakeDeadline = 0;
+        // Lifecycle association avoids comparing wrapping IDs/timestamps. A new
+        // failure invalidates any older EVENT; a new negotiation supersedes all
+        // evidence and deferred measurement from the previous failed episode.
+        enum class SleepRecovery { None, AwaitingEvent, AwaitingAck, CheckPending };
+        SleepRecovery sleepRecovery = SleepRecovery::None;
 
         // Wrap-safe for these short deadlines, with update called regularly.
         // No deadline is more than INT32_MAX milliseconds into the future.
@@ -86,12 +91,13 @@ namespace PowerManager
         {
             if (sendControl && sendControl(type, sleep.sleepId))
                 return true;
-            cancelNegotiation(now, LocalState::IDLE, PeerState::UNKNOWN, "CONTROL_QUEUE_FAILED");
+            cancelNegotiation(now, LocalState::ACTIVE, PeerState::UNKNOWN, "CONTROL_QUEUE_FAILED");
             return false;
         }
 
         void startTransaction(uint16_t id, SleepRole role, uint32_t now)
         {
+            sleepRecovery = SleepRecovery::None;
             sleep.active = true;
             sleep.sleepId = id;
             sleep.role = role;
@@ -125,6 +131,7 @@ namespace PowerManager
 
     void begin(Protocol::DeviceId device, ControlSender sender)
     {
+        sleepRecovery = SleepRecovery::None;
         local = LocalState::ACTIVE;
         peer = PeerState::UNKNOWN;
         sleep = SleepTransaction{};
@@ -167,9 +174,9 @@ namespace PowerManager
             // Overall limit wins if both deadlines have expired. Nothing can
             // extend it by repeatedly requesting another negotiation.
             if (expired(now, sleep.hardDeadline))
-                cancelNegotiation(now, LocalState::IDLE, PeerState::UNKNOWN, "HARD_TIMEOUT");
+                cancelNegotiation(now, LocalState::ACTIVE, PeerState::UNKNOWN, "HARD_TIMEOUT");
             else if (expired(now, sleep.phaseDeadline))
-                cancelNegotiation(now, LocalState::IDLE, PeerState::UNKNOWN, "PHASE_TIMEOUT");
+                cancelNegotiation(now, LocalState::ACTIVE, PeerState::UNKNOWN, "PHASE_TIMEOUT");
         }
 
         if (local == LocalState::WAKING && expired(now, wakeDeadline))
@@ -183,21 +190,14 @@ namespace PowerManager
     bool requestSleep(uint16_t requestId, uint32_t now)
     {
         update(now);
-        if (local != LocalState::IDLE || sleep.active || cooldownActive)
+        if (local != LocalState::ACTIVE || sleep.active || cooldownActive)
         {
-            Serial.println("POWER: negotiation refused; requires IDLE and expired cooldown");
+            Serial.println("POWER: negotiation refused; requires ACTIVE and expired cooldown");
             return false;
         }
 
         startTransaction(requestId, SleepRole::COORDINATOR, now);
         return emit(Protocol::MessageType::SleepRequest, now);
-    }
-
-    void idleAfterInactivity(uint32_t now)
-    {
-        update(now);
-        if (local == LocalState::ACTIVE)
-            setLocal(LocalState::IDLE, "LOCAL_INACTIVITY");
     }
 
     void injectActivity(uint32_t now)
@@ -277,9 +277,8 @@ namespace PowerManager
                 return;
             }
             if (admitFreshRequest && !sleep.active && !cooldownActive &&
-                (local == LocalState::ACTIVE || local == LocalState::IDLE))
+                local == LocalState::ACTIVE)
             {
-                idleAfterInactivity(now);
                 startTransaction(id, SleepRole::PARTICIPANT, now);
                 emit(Type::SleepReady, now);
                 return;
@@ -312,7 +311,7 @@ namespace PowerManager
         }
         if (message.type == Type::SleepCancel)
         {
-            cancelNegotiation(now, LocalState::IDLE, PeerState::ONLINE, "PEER_CANCEL", false);
+            cancelNegotiation(now, LocalState::ACTIVE, PeerState::ONLINE, "PEER_CANCEL", false);
             return;
         }
         if (message.type == Type::SleepReady && sleep.role == SleepRole::COORDINATOR)
@@ -398,7 +397,7 @@ namespace PowerManager
         if (sleep.active)
         {
             const PeerState outcome = type == Protocol::MessageType::SleepRequest ? PeerState::OFFLINE : PeerState::UNKNOWN;
-            cancelNegotiation(now, LocalState::IDLE, outcome, "CONTROL_RETRIES_EXHAUSTED");
+            cancelNegotiation(now, LocalState::ACTIVE, outcome, "CONTROL_RETRIES_EXHAUSTED");
         }
         else
         {
@@ -421,16 +420,17 @@ namespace PowerManager
     void notifySleepExecutionFailed(uint32_t now)
     {
         if (local != LocalState::SLEEPING || sleep.active) return;
+        sleepRecovery = SleepRecovery::AwaitingEvent;
         completed = CompletedReply{};
         cooldownActive = true;
         cooldownDeadline = now + FAILURE_COOLDOWN_MS;
-        setLocal(LocalState::IDLE, "SLEEP_EXECUTION_FAILED");
+        setLocal(LocalState::ACTIVE, "SLEEP_EXECUTION_FAILED");
         // Peer may already be asleep. No CANCEL, OFFLINE inference or retry.
     }
 
     bool automaticHeartbeatAllowed()
     {
-        return local == LocalState::ACTIVE || local == LocalState::IDLE;
+        return local == LocalState::ACTIVE;
     }
 
     void applicationEvent(uint32_t /*now*/)
@@ -454,6 +454,27 @@ namespace PowerManager
         // SLEEP_PENDING/SLEEPING states with OFFLINE.
         if (peer != PeerState::SLEEP_PENDING && peer != PeerState::SLEEPING)
             setPeer(PeerState::OFFLINE);
+    }
+
+    void applicationTxStarted()
+    {
+        if (sleepRecovery == SleepRecovery::AwaitingEvent)
+            sleepRecovery = SleepRecovery::AwaitingAck;
+    }
+
+    void applicationTxAcknowledged()
+    {
+        if (sleepRecovery != SleepRecovery::AwaitingAck) return;
+        sleepRecovery = SleepRecovery::CheckPending;
+        setPeer(PeerState::ONLINE);
+        Serial.println("POWER: failed-sleep recovery | post-abort EVENT ACK | proximity check pending");
+    }
+
+    bool sleepRecoveryCheckPending() { return sleepRecovery == SleepRecovery::CheckPending; }
+
+    void sleepRecoveryCheckStarted()
+    {
+        if (sleepRecoveryCheckPending()) sleepRecovery = SleepRecovery::None;
     }
 
     LocalState localState() { return local; }
@@ -481,7 +502,6 @@ namespace PowerManager
         switch (state)
         {
             case LocalState::ACTIVE: return "ACTIVE";
-            case LocalState::IDLE: return "IDLE";
             case LocalState::SLEEP_NEGOTIATING: return "SLEEP_NEGOTIATING";
             case LocalState::SLEEPING: return "SLEEPING";
             case LocalState::WAKING: return "WAKING";

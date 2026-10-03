@@ -24,7 +24,7 @@ void fresh(Motion& motion)
     resetHardware();
     assert(motion.begin(0, 1, 3));
     assert(MotionPlatform::isrAttached);
-    assert(Wire.registers[0x24] == 12); // Tuned awake threshold, independent of sleep.
+    assert(Wire.registers[0x24] == 10); // Trial 0.625 g awake threshold, independent of sleep.
     assert(Wire.registers[0x25] == 4 && Wire.registers[0x26] == 3);
     assert(Wire.registers[0x27] == 0xFF && Wire.registers[0x31] == 0x09);
     assert(Wire.registers[0x2C] == 0x0A); // No data-rate change.
@@ -34,7 +34,7 @@ void assertAwake()
 {
     assert(MotionPlatform::isrAttached);
     assert(Wire.registers[0x2D] == 0x28 && Wire.registers[0x2E] == 0x18 && Wire.registers[0x2F] == 0);
-    assert(Wire.registers[0x24] == 12);
+    assert(Wire.registers[0x24] == 10);
 }
 
 void testStartupRetries()
@@ -285,7 +285,7 @@ int main()
     assert(!motion.begin(0, 1, 3)); // DEVID failure prevents sleep preparation.
     Wire.operations = 0;
     assert(!motion.prepareForSleep() && Wire.operations == 0);
-    puts("PASS: Motion awake=12/sleep=48/restore=12, activity-only arm, latched-source clearing, stuck HIGH, standby transition");
+    puts("PASS: Motion awake=10/sleep=48/restore=10, activity-only arm, latched-source clearing, stuck HIGH, standby transition");
     puts("PASS: every preparation I2C failure, readback/polarity faults, abort restore, uninitialized/failed sensor bounded");
     testAwakeEvents();
 }

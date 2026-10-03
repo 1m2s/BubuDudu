@@ -41,6 +41,9 @@ bool Motion::cancelSleepPreparation() { return true; }
 MotionEvent Motion::getEvent() { return MotionEvent::None; }
 MotionEvent Motion::getStartupEvent() const { return MotionEvent::None; }
 uint8_t Motion::getInterruptPin() const { return 3; }
+#ifdef DEVICE_DUDU
+void Motion::reportStartupI2cHealth(uint8_t) const {}
+#endif
 Display::Display() = default;
 bool Display::begin() { return false; }
 void Display::showStatus(const char*, const char*, const char*, const char*, const char*, const char*) {}
@@ -286,9 +289,66 @@ void testFull()
         assert(std::count(SPI.commands.begin(), SPI.commands.end(), uint8_t(0x30)) == 0);
     }
 }
+void recoveryLoop(uint32_t ms = 0)
+{
+    hostUs = std::max(hostUs, hostNow * 1000) + ms * 1000;
+    hostNow = hostUs / 1000;
+    loop();
+    hostUs = std::max(hostUs, hostNow * 1000);
+}
+
+void testPhysicalSleepFailureRecovery()
+{
+    // Investigation probe A, with the real arm inspection/abort, awake CC1101
+    // driver, application transaction matching and loop. Only hardware status
+    // and incoming packets are injected; no radio decision is simulated here.
+    fresh(false); selectedTransport = pendingTransport = Transport::ESP_NOW;
+    proximityClassification = ProximityClassification::CLOSE;
+    lastMeaningfulActivity = 0; automaticSleepArmed = false; nextEventTime = 1000000;
+    nextMessageId = 97; hostNow = 32000; hostUs = hostNow * 1000;
+    WakePlatform::sleepCalls = 0;
+    PowerManager::notePeerSeen();
+    auto receive = [](Type type, uint16_t id, uint16_t reference) {
+        const Protocol::Message packet{1, type, id, PEER_DEVICE, Event::None, reference};
+        queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        recoveryLoop();
+    };
+    receive(Type::SleepRequest, 70, 70);
+    receive(Type::Ack, 71, 98);
+    receive(Type::SleepCommit, 72, 70);
+    assert(PowerManager::localState() == PowerManager::LocalState::SLEEPING && pendingMessage.messageId == 100);
+    SPI.registers[0x35] = 1; // Captured hardware IDLE/empty/LOW; software remains Listening.
+    receive(Type::Ack, 73, 100);
+    assert(PowerManager::localState() == PowerManager::LocalState::ACTIVE);
+    assert(PowerManager::peerState() == PowerManager::PeerState::SLEEPING && !CC1101WakeRecovery::awakeStopped());
+    assert(WakePlatform::sleepCalls == 0 && SPI.transmissions.empty());
+    assert(Serial.log.find("reason=NOT_IN_RX | MARCSTATE=0x01 RXBYTES=0x00 GDO0=0") != std::string::npos);
+    recoveryLoop(nextEventTime - hostNow);
+    assert(waitingForAck && pendingMessage.messageId == 101 && pendingTransport == Transport::ESP_NOW);
+    for (unsigned i = 0; i < 3; ++i) recoveryLoop(ACK_TIMEOUT_MS);
+    assert(!waitingForAck && selectedTransport == Transport::CC1101);
+    assert(PowerManager::peerState() == PowerManager::PeerState::SLEEPING);
+    recoveryLoop(nextEventTime - hostNow);
+    const auto event = pendingMessage;
+    assert(event.messageId == 102 && pendingTransport == Transport::CC1101 && SPI.transmissions.empty());
+    assert(SPI.registers[0x35] == 0x0D); // Existing first-refusal recovery restored RX.
+    recoveryLoop(ACK_TIMEOUT_MS); recoveryLoop(2);
+    assert(SPI.transmissions.size() == 1 && memcmp(&event, &pendingMessage, sizeof(event)) == 0);
+    latch(frame({1, Type::Ack, 74, PEER_DEVICE, Event::None, event.messageId})); recoveryLoop();
+    assert(!waitingForAck && PowerManager::peerState() == PowerManager::PeerState::ONLINE);
+    assert(PowerManager::localState() == PowerManager::LocalState::ACTIVE && selectedTransport == Transport::CC1101);
+    assert(proximityUpdateState == ProximityUpdateState::CHECKING && !automaticSelectionPending);
+    assert(occurrences("POWER: failed-sleep recovery") == 1 && occurrences("PROXIMITY CHECK | START") == 1);
+    assert(std::count(SPI.commands.begin(), SPI.commands.end(), uint8_t(0x30)) == 0); // No reset added.
+    puts("PASS: real NOT_IN_RX abort -> ESP-NOW EVENT101 exhaustion -> CC1101 EVENT102 first-refusal RX restore/retry/ACK -> peer ONLINE while stationary ACTIVE; one deferred measurement, no new radio recovery or forced selection");
+}
+
 int main()
 {
+#ifndef FAILED_SLEEP_RECOVERY_TEST_ONLY
     testSuccess(); testTimeoutAndFailures(); testValidation(); testFull();
+#endif
+    testPhysicalSleepFailureRecovery();
     delete receiveQueue; receiveQueue = nullptr;
     printf("PASS %s: real wake waiter/application forwarding/receipt TX, duplicate retries/one user pulse, interleaved matching ACK, validation, unchanged deadlines/budgets, RX failures and full queue preserves FIFO\n", DEVICE_NAME);
     return 0;

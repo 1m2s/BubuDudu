@@ -9,7 +9,8 @@ namespace PowerManager
 {
     enum class LocalState : uint8_t
     {
-        ACTIVE, IDLE, SLEEP_NEGOTIATING, SLEEPING, WAKING
+        // RAM-only; retain existing values for the remaining states.
+        ACTIVE = 0, SLEEP_NEGOTIATING = 2, SLEEPING = 3, WAKING = 4
     };
 
     enum class PeerState : uint8_t
@@ -52,10 +53,9 @@ namespace PowerManager
     using ControlSender = bool (*)(Protocol::MessageType type, uint16_t sleepId);
     void begin(Protocol::DeviceId device, ControlSender sender);
     void update(uint32_t now);
-    // The loop has established product eligibility; do not interrupt another state.
-    void idleAfterInactivity(uint32_t now);
     void injectActivity(uint32_t now);
 
+    // The loop must establish inactivity, motion and transport eligibility first.
     // requestId comes from the existing application message-ID allocator.
     bool requestSleep(uint16_t requestId, uint32_t now);
     // Admission is sampled by the loop before sending the request's receipt.
@@ -68,7 +68,7 @@ namespace PowerManager
     // An unconsumed decision is discarded when leaving semantic SLEEPING.
     bool takeSleepDecision(SleepDecision& out);
     // Hardware-agnostic failure notification, valid only after completion.
-    // Discards execution/replay authority; keeps peer state and enters IDLE.
+    // Discards execution/replay authority; keeps peer state and returns to ACTIVE.
     void notifySleepExecutionFailed(uint32_t now);
     bool automaticHeartbeatAllowed();
     void applicationEvent(uint32_t now);
@@ -76,6 +76,13 @@ namespace PowerManager
     // Observations from existing protocol processing, not new radio policy.
     void notePeerSeen();
     void notePeerUnreachable();
+
+    // Application transaction boundaries, never retries or incoming EVENTs.
+    // Acknowledged is called only by the transport's exact matching-ACK path.
+    void applicationTxStarted();
+    void applicationTxAcknowledged();
+    bool sleepRecoveryCheckPending();
+    void sleepRecoveryCheckStarted();
 
     LocalState localState();
     PeerState peerState();

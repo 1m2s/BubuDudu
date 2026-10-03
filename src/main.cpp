@@ -38,6 +38,22 @@ namespace
     };
     DisplaySnapshot displayedStatus{};
 
+#ifdef DEVICE_DUDU
+    // Temporary observation only; attempts include awake/final-sleep frames,
+    // not initialization, and cannot confirm delivery to the physical panel.
+    struct DisplayDiagnostic
+    {
+        bool sampled = false;
+        uint32_t sampledAt = 0, attempts = 0, lastAttemptAt = 0;
+    } displayDiagnostic;
+
+    void noteDisplayAttempt()
+    {
+        ++displayDiagnostic.attempts;
+        displayDiagnostic.lastAttemptAt = uint32_t(millis());
+    }
+#endif
+
     enum class MovementState : uint8_t { READY, MOVING, WAITING };
     MovementState movementState = MovementState::READY;
     uint32_t settleStartedAt = 0;
@@ -96,6 +112,7 @@ namespace
     uint32_t lastMeaningfulActivity = 0;
     bool automaticSleepArmed = false;
     bool productSleepEligible(uint32_t now, uint32_t requiredInactivityMs = AUTOMATIC_SLEEP_INACTIVITY_MS);
+    const char* sleepTransportBlockedReason();
 
     void noteLocalActivity(uint32_t now)
     {
@@ -285,10 +302,19 @@ namespace
 
     void startProximityCheck(uint32_t now)
     {
-        if (buttonHeartbeatPending || proximityUpdateState == ProximityUpdateState::CHECKING ||
+        if (buttonHeartbeatPending ||
             PowerManager::localState() != PowerManager::LocalState::ACTIVE ||
             PowerManager::peerState() == PowerManager::PeerState::OFFLINE)
             return;
+        // Keep failed-entry recovery pending until application/control work and
+        // callbacks drain. An existing measurement can absorb it without restart.
+        if (PowerManager::sleepRecoveryCheckPending() &&
+            proximityUpdateState != ProximityUpdateState::CHECKING &&
+            (movementState != MovementState::READY || sleepDrainWaiting || sleepTransportBlockedReason()))
+            return;
+        // An eligible motion/peer check also satisfies the one deferred request.
+        PowerManager::sleepRecoveryCheckStarted();
+        if (proximityUpdateState == ProximityUpdateState::CHECKING) return;
         resetProximityCheck();
         checkStartedAt = now;
         proximityUpdateState = ProximityUpdateState::CHECKING;
@@ -327,6 +353,11 @@ namespace
 
     void serviceProximityProbe(uint32_t now)
     {
+        // Stationary ACTIVE can service recovery directly. Actual movement and
+        // settling keep their existing trigger; join a running check without restart.
+        if (PowerManager::sleepRecoveryCheckPending() &&
+            (movementState == MovementState::READY || proximityUpdateState == ProximityUpdateState::CHECKING))
+            startProximityCheck(now);
         serviceProximityCheck(now);
         if ((selectedTransport != Transport::CC1101 &&
              proximityClassification != ProximityClassification::UNKNOWN) ||
@@ -814,6 +845,7 @@ namespace
     void startHeartbeatEvent(Transport transport = selectedTransport,
                              Protocol::EventType event = Protocol::EventType::Heartbeat)
     {
+        PowerManager::applicationTxStarted(); // Retries never pass this boundary.
         pendingTransport = transport;
         pendingMessage.version =
             Protocol::VERSION;
@@ -893,6 +925,9 @@ namespace
                 " | message=%u | via=%s\n",
                 pendingMessage.messageId, transportName(transport)
             );
+
+            if (pendingMessage.type == Protocol::MessageType::Event)
+                PowerManager::applicationTxAcknowledged();
 
 
             waitingForAck =
@@ -1086,12 +1121,13 @@ namespace
 
     void startPeerAvailabilityProximityCheck(PowerManager::PeerState previousPeer)
     {
-        const bool returningOnCc1101 = previousPeer == PowerManager::PeerState::OFFLINE &&
-            selectedTransport == Transport::CC1101;
+        // Recovery may arrive before a deferred fallback switches the selected radio.
+        const bool recoveringPeer = previousPeer == PowerManager::PeerState::OFFLINE &&
+            (selectedTransport == Transport::CC1101 || espNowFallbackPending);
         const bool firstContact = previousPeer == PowerManager::PeerState::UNKNOWN &&
             proximityClassification == ProximityClassification::UNKNOWN;
         if (PowerManager::peerState() == PowerManager::PeerState::ONLINE &&
-            (returningOnCc1101 || firstContact))
+            (recoveringPeer || firstContact))
             startProximityCheck(uint32_t(millis())); // Existing guards and loop-owned probes remain authoritative.
     }
 
@@ -1182,7 +1218,7 @@ namespace
             if (message.ackForMessageId != 0) return;
             if (buttonHeartbeatPending) return; // Measurement replies yield to queued user intent.
             const auto state = PowerManager::localState();
-            if (state != PowerManager::LocalState::ACTIVE && state != PowerManager::LocalState::IDLE)
+            if (state != PowerManager::LocalState::ACTIVE)
                 return;
             const Protocol::Message reply{Protocol::VERSION, Protocol::MessageType::ProximityProbeReply,
                 nextMessageId++, LOCAL_DEVICE, Protocol::EventType::None, message.messageId};
@@ -1383,13 +1419,14 @@ namespace
     }
 
 
-    // nullptr means drained. Used before consuming a decision AND by the
-    // shared physical entry path after arm/setup, at the final save boundary.
-    const char* sleepTransportBlockedReason()
+    // Display alone may ignore a stopped CC1101's persistent busy indication.
+    // Continue checking every remaining blocker; the first reason is returned.
+    const char* transportBlockedReason(bool allowStoppedCc1101)
     {
         if (!protocolReady) return "RUNTIME_NOT_READY";
         if (CC1101WakeTx::deferredPending()) return "CC1101_WAKE_EVENTS_PENDING";
-        if (CC1101WakeRecovery::awakeBusy()) return "CC1101_RUNTIME_BUSY";
+        if (CC1101WakeRecovery::awakeBusy() && !(allowStoppedCc1101 && CC1101WakeRecovery::awakeStopped()))
+            return "CC1101_RUNTIME_BUSY";
         if (waitingForAck) return "ACK_PENDING";
         if (controlCount != 0) return "CONTROL_QUEUED";
         if (PowerManager::transaction().active) return "TRANSACTION_ACTIVE";
@@ -1398,6 +1435,13 @@ namespace
         if (!receiveQueue) return "RX_QUEUE_MISSING";
         if (uxQueueMessagesWaiting(receiveQueue) != 0) return "RX_QUEUED";
         return nullptr;
+    }
+
+    // nullptr means drained. Keep sleep admission/final entry and all other
+    // existing callers strict, including when CC1101 is stopped.
+    const char* sleepTransportBlockedReason()
+    {
+        return transportBlockedReason(false);
     }
 
     const char* sleepEntryBlockedReason()
@@ -1422,7 +1466,6 @@ namespace
     {
         const uint32_t now = uint32_t(millis());
         if (!automaticSleepArmed || !productSleepEligible(now)) return;
-        PowerManager::idleAfterInactivity(now);
         if (PowerManager::requestSleep(nextMessageId++, now))
             automaticSleepArmed = false;
     }
@@ -1430,6 +1473,9 @@ namespace
     void showDeepSleepStatus()
     {
         if (!displayReady) return;
+#ifdef DEVICE_DUDU
+        noteDisplayAttempt();
+#endif
         display.showDeepSleep(DEVICE_NAME);
         // An aborted entry must repaint even if the awake fields are unchanged.
         displayedStatus = {};
@@ -1516,7 +1562,7 @@ namespace
             uxQueueMessagesWaiting(receiveQueue) != 0 || PowerManager::transaction().active ||
             !PowerManager::automaticHeartbeatAllowed())
         {
-            Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
+            Serial.println("CC1101 WAKE TX | REFUSED | require ACTIVE and drained transport/RX queue");
             return refused;
         }
         const Protocol::Message event{Protocol::VERSION, Protocol::MessageType::Event,
@@ -1551,7 +1597,10 @@ namespace
 
     bool applicationTransportPolicyBlocked()
     {
+        // Let the pending recovery measurement arbitrate before old selection
+        // evidence. A subsequently OFFLINE peer still needs normal fallback.
         return sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed() ||
+            (PowerManager::sleepRecoveryCheckPending() && PowerManager::peerState() != PowerManager::PeerState::OFFLINE) ||
             proximityUpdateState == ProximityUpdateState::CHECKING;
     }
 
@@ -1672,23 +1721,73 @@ namespace
         }
     }
 
+#ifdef DEVICE_DUDU
+    void reportDisplayDecision(const DisplaySnapshot& current, const DisplaySnapshot& cached, const char* reason)
+    {
+        const auto local = PowerManager::localState();
+        if (local != PowerManager::LocalState::ACTIVE) return;
+        const uint32_t now = uint32_t(millis());
+        if (displayDiagnostic.sampled && uint32_t(now - displayDiagnostic.sampledAt) < 1000) return;
+        displayDiagnostic.sampled = true;
+        displayDiagnostic.sampledAt = now; // A dropped line also consumes this opportunity; never wait/retry.
+        const char* classification = proximityClassification == ProximityClassification::UNKNOWN ? "UNKNOWN" :
+            proximityClassification == ProximityClassification::CLOSE ? "CLOSE" : "FAR";
+        // Tuple order: peer/distance/radio/local-state/motion. Cache is the input
+        // to this decision, not evidence of a delivered or visible frame.
+        char line[256];
+        const int length = snprintf(line, sizeof(line),
+            "OLED %s ms=%lu power=%s/%s prox=%s/%s want=%s/%s/%s/%s/%s cache=%s/%s/%s/%s/%s "
+            "why=%s cc_stop=%u attempted=%lu last_ms=%lu\n",
+            DEVICE_NAME, static_cast<unsigned long>(now), PowerManager::toString(local),
+            PowerManager::toString(PowerManager::peerState()), classification,
+            proximityUpdateState == ProximityUpdateState::CHECKING ? "CHECKING" : "READY",
+            current.peer, current.distance, current.radio, current.state, current.motion,
+            cached.peer ? cached.peer : "-", cached.distance ? cached.distance : "-",
+            cached.radio ? cached.radio : "-", cached.state ? cached.state : "-", cached.motion ? cached.motion : "-",
+            reason, unsigned(CC1101WakeRecovery::awakeStopped()),
+            static_cast<unsigned long>(displayDiagnostic.attempts),
+            static_cast<unsigned long>(displayDiagnostic.lastAttemptAt));
+        // One bounded best-effort write; no flush, backlog or activity/sleep bookkeeping.
+        if (length > 0 && size_t(length) < sizeof(line) && Serial.availableForWrite() >= length)
+            (void)Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(length));
+    }
+#endif
+
     void serviceDisplayStatus()
     {
         // No framebuffer transfer during protocol deadlines, sleep transitions
         // or an outstanding probe reply. Passive CHECKING may be shown when idle.
-        if (!displayReady || sleepTransportBlockedReason() || sleepDrainWaiting ||
-            !PowerManager::automaticHeartbeatAllowed() || probeOutstanding)
-            return;
+        // Only display permits STOPPED/busy; all other guards retain their order.
+        const char* reason = !displayReady ? "DISPLAY_NOT_READY" : transportBlockedReason(true);
+        if (!reason && sleepDrainWaiting) reason = "SLEEP_DRAIN";
+        if (!reason && !PowerManager::automaticHeartbeatAllowed()) reason = "POWER_NOT_AWAKE";
+        if (!reason && probeOutstanding) reason = "PROBE_PENDING";
         const DisplaySnapshot current{displayPeerName(PowerManager::peerState()), displayDistanceName(),
                                       transportName(selectedTransport), displayStateName(PowerManager::localState()),
                                       displayMotionName()};
-        if (displayedStatus.peer && strcmp(current.peer, displayedStatus.peer) == 0 &&
-            strcmp(current.distance, displayedStatus.distance) == 0 &&
-            strcmp(current.radio, displayedStatus.radio) == 0 && strcmp(current.state, displayedStatus.state) == 0 &&
-            strcmp(current.motion, displayedStatus.motion) == 0)
-            return;
-        display.showStatus(DEVICE_NAME, current.peer, current.distance, current.radio, current.state, current.motion);
-        displayedStatus = current;
+#ifdef DEVICE_DUDU
+        const auto cached = displayedStatus;
+#endif
+        if (!reason)
+        {
+            if (displayedStatus.peer && strcmp(current.peer, displayedStatus.peer) == 0 &&
+                strcmp(current.distance, displayedStatus.distance) == 0 &&
+                strcmp(current.radio, displayedStatus.radio) == 0 && strcmp(current.state, displayedStatus.state) == 0 &&
+                strcmp(current.motion, displayedStatus.motion) == 0)
+                reason = "UNCHANGED";
+            else
+            {
+#ifdef DEVICE_DUDU
+                noteDisplayAttempt();
+#endif
+                display.showStatus(DEVICE_NAME, current.peer, current.distance, current.radio, current.state, current.motion);
+                displayedStatus = current;
+                reason = "ATTEMPTED";
+            }
+        }
+#ifdef DEVICE_DUDU
+        reportDisplayDecision(current, cached, reason);
+#endif
     }
 
 }
@@ -1754,6 +1853,9 @@ void setup()
     automaticSleepArmed = false;
     lastMeaningfulActivity = 0;
     displayedStatus = {}; // Request one initial draw when runtime is awake and drained.
+#ifdef DEVICE_DUDU
+    displayDiagnostic = {};
+#endif
     Serial.begin(115200);
     if (bootInfo.wokeFromGpio(BUTTON_PIN))
         Serial.printf("BUTTON WAKE | DETECTED | GPIO5 | captured mask=0x%02llX\n",
@@ -1791,6 +1893,10 @@ void setup()
 
     displayReady = display.begin();
     if (!displayReady) Serial.println("DISPLAY INIT | FAILED | continuing");
+#ifdef DEVICE_DUDU
+    // Keep Motion's configuration result separate from these later address checks.
+    motion.reportStartupI2cHealth(display.diagnosticI2cAddress());
+#endif
     led.begin(); // Retained wake recovery and shared-I2C hardware initialization are complete.
     if (retainedUserAnimationPending)
     {

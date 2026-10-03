@@ -34,18 +34,36 @@ struct HostWire
     unsigned begins = 0, beginFailures = 0, identifications = 0;
     unsigned wrongDeviceReads = 0, wrongThresholdReads = 0;
     bool failAll = false;
+    bool busReady = false;
+    uint8_t txAddress = 0;
+    std::array<uint8_t, 128> addressResults{};
+    std::vector<uint8_t> addressChecks;
     uint32_t clock = 0;
     int corruptRegister = -1;
     uint8_t reg = 0, received = 0;
     bool hasByte = false;
     bool step() { ++hostNow; ++operations; return !failAll && operations != failAt; }
     bool begin(uint8_t sda, uint8_t scl)
-    { assert(sda == 0 && scl == 1); ++begins; if (beginFailures) { --beginFailures; return false; } return true; }
-    void setClock(uint32_t value) { clock = value; }
-    void beginTransmission(uint8_t address) { assert(address == 0x53); tx.clear(); }
-    void write(uint8_t value) { if (tx.empty() && value == 0) ++identifications; tx.push_back(value); }
-    int endTransmission(bool = true)
     {
+        assert(sda == 0 && scl == 1); ++begins;
+        busReady = beginFailures == 0;
+        if (beginFailures) --beginFailures;
+        return busReady;
+    }
+    void setClock(uint32_t value) { clock = value; }
+    void beginTransmission(uint8_t address)
+    { assert(address == 0x53 || address == 0x3C); txAddress = address; tx.clear(); }
+    void write(uint8_t value) { if (tx.empty() && value == 0) ++identifications; tx.push_back(value); }
+    int endTransmission(bool sendStop = true)
+    {
+        if (tx.empty())
+        {
+            assert(busReady && sendStop); // Reject probes on an uninitialized bus or without STOP.
+            addressChecks.push_back(txAddress);
+            ++hostNow;
+            return addressResults[txAddress];
+        }
+        assert(txAddress == 0x53);
         if (!step()) return 4;
         assert(tx.size() == 1 || tx.size() == 2);
         reg = tx[0];
