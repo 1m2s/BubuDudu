@@ -1,37 +1,22 @@
 # BubuDudu
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+BubuDudu is a pair of wireless companion devices built around the ESP32-C3.
+Both identities share firmware for physical-button input, ADXL345 motion,
+ESP-NOW/CC1101 delivery, proximity experiments, LED heartbeat animations,
+OLED diagnostics and coordinated deep sleep with motion/button/radio wake.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+The integration retains a cooperative loop and bounded protocol retries. Awake
+devices stay ACTIVE, meaningful inactivity qualifies sleep, and CLOSE/FAR
+background pulses share priority with receiver-only user animations.
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- [Architecture and ownership](ARCHITECTURE.md)
+- [Host suites, CI and sequential firmware builds](tests/host/README.md)
+- [Button and heartbeat behavior](BUTTON_HEARTBEAT.md)
+- [Hardware acceptance and remaining evidence](FINAL_FIRMWARE_TEST.md)
+- [Development history](DEVLOG.md)
 
-## Planned Features
-
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+Software validation is separate from physical acceptance. The initial
+`NOT_IN_RX` cause, persistent CC1101 `Stopped` condition, rare failed-sleep
+hardware recovery and OLED visibility remain unresolved or unverified. The
+current 0.625 g awake Motion threshold is a preserved trial setting. Gesture
+detection and battery runtime characterization are not completed capabilities.

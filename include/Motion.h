@@ -39,6 +39,17 @@ public:
         uint8_t interruptPin
     );
 
+#ifdef DEVICE_DUDU
+    // Temporary startup observation, called once after Motion/Display begin.
+    void reportStartupI2cHealth(uint8_t oledAddress) const;
+#endif
+
+    // Pause the ISR, clear latched events, and enable only activity on INT1.
+    // A failed preparation must be followed by cancelSleepPreparation().
+    bool prepareForSleep();
+    // Restore normal awake LINK/activity/inactivity after any sleep refusal.
+    bool cancelSleepPreparation();
+
     // Check whether the ISR reported a new motion event.
     MotionEvent getEvent();
 
@@ -62,7 +73,15 @@ public:
 
 
 private:
+#ifdef DEVICE_DUDU
+    bool diagnosticBusReady = false; // Actual Wire.begin result, independent of sensor configuration.
+#endif
+    // One complete startup identification/configuration attempt; no runtime retries.
+    bool beginAttempt(bool& startupCaptured);
+
     uint8_t interruptPin = 255;
+    bool initialized = false;
+    bool interruptAttached = false;
 
     MotionEvent startupEvent = MotionEvent::None;
 
@@ -76,7 +95,7 @@ private:
 
 
     // ADXL345 register helpers.
-    void writeRegister(
+    bool writeRegister(
         uint8_t reg,
         uint8_t value
     );
@@ -85,6 +104,9 @@ private:
         uint8_t reg
     );
 
+
+    // Checked read for sleep preparation; never confuse I2C failure with zero.
+    bool readRegister(uint8_t reg, uint8_t& value);
 
     // Convert INT_SOURCE bits into a MotionEvent.
     MotionEvent decodeEvent(

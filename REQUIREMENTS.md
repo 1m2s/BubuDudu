@@ -58,7 +58,9 @@ Possible gestures include:
 
 The device must support:
 
-Active → Idle → Sleep → Motion Wake → Active
+Active → Sleep Negotiation → Sleep → Motion Wake → Active
+
+Awake devices remain ACTIVE while stationary; inactivity qualifies sleep admission.
 
 The ADXL345 must be capable of waking the ESP32 when movement occurs.
 
