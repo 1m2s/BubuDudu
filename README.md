@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — build/platformio
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `eedb2f5`. Shared PlatformIO foundation for two ESP32-C3 identities. The application only prints the selected device name over Serial; peripheral and radio behavior are later work.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- One source tree can select Bubu or Dudu through per-environment compiler flags.
+- Matching a board by MAC address avoids depending on changing USB port names.
+- Native USB CDC settings and a 115200-baud monitor are part of the initial bring-up configuration.
 
-## Planned Features
+[Build environments](platformio.ini) · [Port selection](tools/pio_select_port.py) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
