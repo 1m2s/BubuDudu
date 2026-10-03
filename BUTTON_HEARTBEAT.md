@@ -5,14 +5,14 @@ EVENT/ACK reliability rules. The EVENT enum now explicitly distinguishes:
 
 | `event` | Meaning | Awake LED behavior |
 | --- | --- | --- |
-| `Heartbeat = 1` | Background heartbeat or existing peer wake | Background output only while locally CLOSE and ACTIVE |
+| `Heartbeat = 1` | Background heartbeat or existing peer wake | Background output while locally CLOSE/FAR and ACTIVE |
 | `UserHeartbeat = 2` | Debounced physical button request | No added sender animation; receiver plays the priority 700 ms double pulse |
 
 This is an additive event value within protocol version 1. Message size, message
 types, IDs, and `ackForMessageId` semantics are unchanged. Both firmware identities
 must be updated together: older firmware rejects the new event value and cannot
 acknowledge a button request. ESP-NOW and awake/retained CC1101 validation accept
-both event values. Motion/manual peer wake still sends `Heartbeat = 1`; retained
+both event values. Motion/button peer wake still sends `Heartbeat = 1`; retained
 wake processing records a new user animation obligation before its receipt ACK,
 then invokes the animation once after LED initialization.
 
@@ -35,11 +35,12 @@ stores no animations or packets and resets on reboot.
 Animation updates remain non-blocking, and radio/input/motion/proximity/power
 servicing continues. Sleep still cancels LED output immediately.
 
-After completion, no old CLOSE state or missed background request is restored.
+After completion, no old proximity state or missed background request is restored.
 The next normally scheduled background request checks current proximity and
-ACTIVE eligibility. Normal CLOSE application traffic/cadence is retained;
-FAR application traffic and radio fallback/recovery continue without background
-CLOSE output. Button sends do not interrupt or restart the sender's active
+ACTIVE eligibility. CLOSE keeps its 2500 ms cadence. FAR uses 6000 ms and one
+shared background visual clock across outgoing/incoming EVENTs; duplicates,
+retries and offset peer traffic cannot add or restart FAR pulses. UNKNOWN
+suppresses background output. Button sends do not interrupt or restart the sender's active
 background animation. Application messages still share the existing single
 outbox and ACK-driven cadence.
 
@@ -54,7 +55,7 @@ echo a user EVENT. This behavior is symmetric for Dudu's button.
 
 The shared sleep entry now makes two checked, fixed-polarity calls: GPIO3/4 HIGH
 (`0x18`) and GPIO5 LOW (`0x20`), combined mask `0x38`. Product sleep still has no
-timer; diagnostic bench sleep retains its 30 s timer. Existing Motion/CC1101
+timer; the former serial bench sleep controls and their timer are removed. Existing Motion/CC1101
 arming, retained FIFO inspection, and final guards remain in place. The installed
 C3 IDF 4.4.7 SDK accumulates GPIO masks and configures per-pin wake polarity.
 Disabling all sources clears trigger enables, not stored GPIO masks/modes. Its
@@ -146,3 +147,11 @@ received during startup, its deferred log precedes that single invocation log.
 ACKs/retries must not add a pulse or another wake episode. Leave both stationary
 with buttons released: after the existing 35 s inactivity and normal drain/
 measurement guards, both must coordinate sleep again with `mask=0x38 | timer=OFF`.
+
+## Runtime and test locations
+
+`src/app/ButtonRuntime.*` owns debounce and pending/wake intent; `RadioRuntime.*`
+owns delivery, IDs, retries and deduplication; `Presentation.*` owns LED requests
+and retained animation; `SleepRuntime.*` owns sleep guards and startup policy.
+The real loop preserves their service order. See [host suites](tests/host/README.md)
+for the button, boot/wake, LED, automatic-sleep and real CC1101 forwarding tests.

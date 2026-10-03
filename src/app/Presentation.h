@@ -15,4 +15,4 @@ namespace Presentation
     void off();
     void showDeepSleepStatus();
     void serviceDisplayStatus();
-}
+} // namespace Presentation

@@ -13,21 +13,12 @@
 
 #include "Config.h"
 
-
 namespace
 {
     std::atomic<unsigned> pendingTx{0};
     std::atomic<unsigned> activeRx{0};
-    // ======================================================
-    // ESP-NOW configuration
-    // ======================================================
 
     constexpr uint8_t WIFI_CHANNEL = 1;
-
-
-    // ======================================================
-    // Peer MAC address
-    // ======================================================
 
 #ifdef DEVICE_BUBU
 
@@ -134,18 +125,8 @@ namespace
         Serial.println("ESPNOW RSSI | OBSERVER READY | diagnostics only");
     }
 
-
-    // ======================================================
-    // Application receive handler
-    // ======================================================
-
     ESPNowRadio::ReceiveHandler applicationReceiveHandler =
         nullptr;
-
-
-    // ======================================================
-    // Print MAC address
-    // ======================================================
 
     void printMacAddress(
         const uint8_t* mac
@@ -161,11 +142,6 @@ namespace
             mac[5]
         );
     }
-
-
-    // ======================================================
-    // ESP-NOW send callback
-    // ======================================================
 
     void onDataSent(
         const uint8_t* macAddress,
@@ -183,7 +159,6 @@ namespace
         Serial.print(
             " | "
         );
-
 
         if (
             status ==
@@ -203,11 +178,6 @@ namespace
         // Last callback operation: logging must finish before sleep is allowed.
         pendingTx.fetch_sub(1);
     }
-
-
-    // ======================================================
-    // ESP-NOW receive callback
-    // ======================================================
 
     void onDataReceived(
         const uint8_t* macAddress,
@@ -229,13 +199,7 @@ namespace
             length
         );
 
-
-        /*
-         * ESPNowRadio does NOT interpret the packet.
-         *
-         * It simply passes the bytes upward to whoever
-         * registered the receive handler.
-         */
+        // Forward bytes only; the loop-owned consumer validates and dispatches packets.
         if (
             applicationReceiveHandler !=
             nullptr
@@ -251,11 +215,6 @@ namespace
         activeRx.fetch_sub(1);
     }
 }
-
-
-// ==========================================================
-// ESPNowRadio public interface
-// ==========================================================
 
 namespace ESPNowRadio
 {
@@ -273,7 +232,6 @@ namespace ESPNowRadio
         applicationReceiveHandler =
             receiveHandler;
 
-
         Serial.println();
         Serial.println(
             "========================================"
@@ -287,25 +245,16 @@ namespace ESPNowRadio
             "========================================"
         );
 
-
         Serial.printf(
             "Device: %s\n",
             DEVICE_NAME
         );
 
-
-        // --------------------------------------------------
-        // Enable Wi-Fi station interface.
-        // --------------------------------------------------
-
         WiFi.mode(
             WIFI_STA
         );
 
-
-        // --------------------------------------------------
         // Proven ESP32-C3 Super Mini configuration.
-        // --------------------------------------------------
 
         if (!WiFi.setSleep(false))
         {
@@ -315,7 +264,6 @@ namespace ESPNowRadio
 
             return false;
         }
-
 
         if (
             !WiFi.setTxPower(
@@ -330,7 +278,6 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.println(
             "Wi-Fi sleep: disabled"
         );
@@ -339,17 +286,13 @@ namespace ESPNowRadio
             "Wi-Fi TX power: 8.5 dBm"
         );
 
-
-        // --------------------------------------------------
         // Both devices use channel 1.
-        // --------------------------------------------------
 
         esp_err_t channelResult =
             esp_wifi_set_channel(
                 WIFI_CHANNEL,
                 WIFI_SECOND_CHAN_NONE
             );
-
 
         if (
             channelResult !=
@@ -364,26 +307,18 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.printf(
             "Wi-Fi channel: %u\n",
             WIFI_CHANNEL
         );
 
-
-        // --------------------------------------------------
-        // Read local Wi-Fi MAC.
-        // --------------------------------------------------
-
         uint8_t localMac[6];
-
 
         esp_err_t macResult =
             esp_wifi_get_mac(
                 WIFI_IF_STA,
                 localMac
             );
-
 
         if (
             macResult !=
@@ -398,7 +333,6 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.print(
             "Local MAC: "
         );
@@ -409,14 +343,8 @@ namespace ESPNowRadio
 
         Serial.println();
 
-
-        // --------------------------------------------------
-        // Initialize ESP-NOW.
-        // --------------------------------------------------
-
         esp_err_t initResult =
             esp_now_init();
-
 
         if (
             initResult !=
@@ -431,15 +359,9 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.println(
             "ESP-NOW initialized"
         );
-
-
-        // --------------------------------------------------
-        // Register ESP-NOW callbacks.
-        // --------------------------------------------------
 
         if (
             esp_now_register_send_cb(
@@ -454,7 +376,6 @@ namespace ESPNowRadio
             return false;
         }
 
-
         if (
             esp_now_register_recv_cb(
                 onDataReceived
@@ -468,18 +389,11 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.println(
             "Callbacks registered"
         );
 
-
-        // --------------------------------------------------
-        // Register opposite BubuDudu device.
-        // --------------------------------------------------
-
         esp_now_peer_info_t peerInfo = {};
-
 
         memcpy(
             peerInfo.peer_addr,
@@ -487,18 +401,14 @@ namespace ESPNowRadio
             sizeof(PEER_MAC)
         );
 
-
         peerInfo.channel =
             WIFI_CHANNEL;
-
 
         peerInfo.ifidx =
             WIFI_IF_STA;
 
-
         peerInfo.encrypt =
             false;
-
 
         Serial.print(
             "Peer: "
@@ -510,12 +420,10 @@ namespace ESPNowRadio
 
         Serial.println();
 
-
         esp_err_t peerResult =
             esp_now_add_peer(
                 &peerInfo
             );
-
 
         if (
             peerResult !=
@@ -530,7 +438,6 @@ namespace ESPNowRadio
             return false;
         }
 
-
         Serial.println(
             "Peer registered"
         );
@@ -539,11 +446,6 @@ namespace ESPNowRadio
 
         return true;
     }
-
-
-    // ======================================================
-    // Send raw bytes
-    // ======================================================
 
     bool send(
         const uint8_t* data,

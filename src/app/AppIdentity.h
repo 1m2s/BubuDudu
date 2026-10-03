@@ -11,13 +11,16 @@ namespace AppIdentity
     constexpr Protocol::DeviceId LOCAL_DEVICE = Protocol::DeviceId::Dudu;
     constexpr Protocol::DeviceId PEER_DEVICE = Protocol::DeviceId::Bubu;
 #endif
-    inline const char* deviceName(Protocol::DeviceId device)
+    inline const char *deviceName(Protocol::DeviceId device)
     {
         switch (device)
         {
-            case Protocol::DeviceId::Bubu: return "BUBU";
-            case Protocol::DeviceId::Dudu: return "DUDU";
-            default: return "UNKNOWN";
+        case Protocol::DeviceId::Bubu:
+            return "BUBU";
+        case Protocol::DeviceId::Dudu:
+            return "DUDU";
+        default:
+            return "UNKNOWN";
         }
     }
-}
+} // namespace AppIdentity

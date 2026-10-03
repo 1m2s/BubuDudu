@@ -15,8 +15,8 @@ void setup()
     SleepRuntime::resetBootState();
     Serial.begin(115200);
     SleepRuntime::beginWake(); // Recover/ACK retained FIFO before sensor bus work.
-    MotionRuntime::begin(); // Sole shared-I2C initializer.
-    Presentation::begin(); // OLED, then LED, then retained user animation.
+    MotionRuntime::begin();    // Sole shared-I2C initializer.
+    Presentation::begin();     // OLED, then LED, then retained user animation.
     ButtonRuntime::beginButton();
     PowerManager::printStatus(millis());
     if (!RadioRuntime::begin())
@@ -32,8 +32,7 @@ void loop()
     Presentation::updateLed(uint32_t(millis()));
     MotionRuntime::checkProximityEligibility();
     // Observe boundaries before activity/deadlines can return the FSM to ACTIVE.
-    if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
-        MotionRuntime::resetMovement();
+    if (PowerManager::localState() != PowerManager::LocalState::ACTIVE) MotionRuntime::resetMovement();
     if (RadioRuntime::ready()) MotionRuntime::serviceMotion();
     ButtonRuntime::serviceButton();
     // Activity/deadlines precede controls; queued receipt ACKs precede retries.

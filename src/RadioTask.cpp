@@ -11,12 +11,8 @@
 #include "CC1101Radio.h"
 #include "Protocol.h"
 
-
 namespace
 {
-    // ========================================================
-    // Device configuration
-    // ========================================================
 
 #ifdef DEVICE_BUBU
 
@@ -44,21 +40,11 @@ namespace
 
 #endif
 
-
-    // ========================================================
-    // Reliability settings
-    // ========================================================
-
     constexpr unsigned long EVENT_INTERVAL_MS = 4000;
     constexpr unsigned long ACK_TIMEOUT_MS = 300;
     constexpr unsigned long PEER_OFFLINE_TIMEOUT_MS = 7000;
 
     constexpr uint8_t MAX_RETRIES = 2;
-
-
-    // ========================================================
-    // Protocol state
-    // ========================================================
 
     uint16_t nextMessageId = 1;
 
@@ -71,35 +57,15 @@ namespace
     unsigned long ackWaitStart = 0;
     unsigned long nextEventTime = 0;
 
-
-    // ========================================================
-    // Duplicate detection
-    // ========================================================
-
     bool haveLastPeerEvent = false;
 
     uint16_t lastPeerEventId = 0;
-
-
-    // ========================================================
-    // Peer availability
-    // ========================================================
 
     bool peerOnline = false;
 
     unsigned long lastPeerSeenTime = 0;
 
-
-    // ========================================================
-    // FreeRTOS state
-    // ========================================================
-
     TaskHandle_t radioTaskHandle = nullptr;
-
-
-    // ========================================================
-    // Helpers
-    // ========================================================
 
     const char* deviceName(Protocol::DeviceId device)
     {
@@ -116,7 +82,6 @@ namespace
         }
     }
 
-
     void setPeerOnline(bool online)
     {
         if (peerOnline == online)
@@ -124,9 +89,7 @@ namespace
             return;
         }
 
-
         peerOnline = online;
-
 
         if (online)
         {
@@ -144,18 +107,12 @@ namespace
         }
     }
 
-
     void notePeerSeen()
     {
         lastPeerSeenTime = millis();
 
         setPeerOnline(true);
     }
-
-
-    // ========================================================
-    // Send one protocol packet
-    // ========================================================
 
     bool sendProtocolMessage(
         const Protocol::Message& message
@@ -166,13 +123,11 @@ namespace
                 &message
             );
 
-
         bool transmitted =
             CC1101Radio::sendPacket(
                 bytes,
                 sizeof(message)
             );
-
 
         /*
          * sendPacket() finishes in IDLE.
@@ -189,14 +144,8 @@ namespace
             return false;
         }
 
-
         return transmitted;
     }
-
-
-    // ========================================================
-    // ACK transmission
-    // ========================================================
 
     void sendAck(uint16_t receivedMessageId)
     {
@@ -220,21 +169,13 @@ namespace
         ack.ackForMessageId =
             receivedMessageId;
 
-
-        /*
-         * Short TX/RX turnaround guard.
-         *
-         * Unlike delay(), vTaskDelay() puts THIS task
-         * to sleep and lets FreeRTOS run another task.
-         */
+        // TX/RX turnaround guard; yield this task during the radio settling interval.
         vTaskDelay(
             pdMS_TO_TICKS(5)
         );
 
-
         bool success =
             sendProtocolMessage(ack);
-
 
         if (success)
         {
@@ -253,11 +194,6 @@ namespace
         }
     }
 
-
-    // ========================================================
-    // EVENT transmission
-    // ========================================================
-
     void transmitPendingEvent(bool retry)
     {
         bool success =
@@ -265,9 +201,7 @@ namespace
                 pendingMessage
             );
 
-
         ackWaitStart = millis();
-
 
         if (retry)
         {
@@ -287,7 +221,6 @@ namespace
             );
         }
 
-
         if (!success)
         {
             Serial.println(
@@ -295,7 +228,6 @@ namespace
             );
         }
     }
-
 
     void startHeartbeatEvent()
     {
@@ -316,19 +248,12 @@ namespace
 
         pendingMessage.ackForMessageId = 0;
 
-
         retryCount = 0;
 
         waitingForAck = true;
 
-
         transmitPendingEvent(false);
     }
-
-
-    // ========================================================
-    // ACK handling
-    // ========================================================
 
     void handleAck(
         const Protocol::Message& message
@@ -341,7 +266,6 @@ namespace
             message.messageId
         );
 
-
         if (
             waitingForAck &&
             message.ackForMessageId ==
@@ -353,30 +277,21 @@ namespace
                 pendingMessage.messageId
             );
 
-
             waitingForAck = false;
 
             retryCount = 0;
-
 
             nextEventTime =
                 millis() +
                 EVENT_INTERVAL_MS;
 
-
             return;
         }
-
 
         Serial.println(
             "ACK IGNORED: does not match pending message"
         );
     }
-
-
-    // ========================================================
-    // EVENT handling
-    // ========================================================
 
     void handleEvent(
         const Protocol::Message& message
@@ -387,7 +302,6 @@ namespace
             message.messageId ==
                 lastPeerEventId;
 
-
         if (duplicate)
         {
             Serial.printf(
@@ -397,27 +311,18 @@ namespace
                 message.messageId
             );
 
-
-            /*
-             * Do NOT execute the event again.
-             *
-             * But ACK it again because our previous
-             * ACK may have been lost.
-             */
+            // Re-ACK retries after a lost receipt without delivering the event again.
             sendAck(
                 message.messageId
             );
 
-
             return;
         }
-
 
         haveLastPeerEvent = true;
 
         lastPeerEventId =
             message.messageId;
-
 
         Serial.printf(
             "RX NEW EVENT | sender=%s | id=%u | event=%u\n",
@@ -428,33 +333,18 @@ namespace
             )
         );
 
-
-        /*
-         * IMPORTANT:
-         *
-         * Do not trigger LED code directly from here.
-         *
-         * Soon RadioTask will put this event into
-         * a FreeRTOS queue for the application/LED side.
-         */
-
+        // This radio task must not own or call the application LED state machine.
 
         sendAck(
             message.messageId
         );
     }
 
-
-    // ========================================================
-    // Receive one packet and dispatch it
-    // ========================================================
-
     void handleIncomingMessage()
     {
         uint8_t buffer[32];
 
         uint8_t length = 0;
-
 
         if (
             !CC1101Radio::receivePacket(
@@ -467,7 +357,6 @@ namespace
             return;
         }
 
-
         if (
             length !=
             sizeof(Protocol::Message)
@@ -478,24 +367,16 @@ namespace
                 length
             );
 
-
             return;
         }
 
-
         Protocol::Message message;
-
 
         memcpy(
             &message,
             buffer,
             sizeof(message)
         );
-
-
-        // ----------------------------------------------------
-        // Protocol validation
-        // ----------------------------------------------------
 
         if (
             message.version !=
@@ -507,10 +388,8 @@ namespace
                 message.version
             );
 
-
             return;
         }
-
 
         if (
             message.sender !=
@@ -524,20 +403,10 @@ namespace
                 )
             );
 
-
             return;
         }
 
-
-        /*
-         * Any valid packet proves that the peer is alive.
-         */
         notePeerSeen();
-
-
-        // ----------------------------------------------------
-        // Message type dispatch
-        // ----------------------------------------------------
 
         switch (message.type)
         {
@@ -547,13 +416,11 @@ namespace
 
                 break;
 
-
             case Protocol::MessageType::Ack:
 
                 handleAck(message);
 
                 break;
-
 
             default:
 
@@ -568,18 +435,12 @@ namespace
         }
     }
 
-
-    // ========================================================
-    // ACK timeout + retry
-    // ========================================================
-
     void handleAckTimeout()
     {
         if (!waitingForAck)
         {
             return;
         }
-
 
         if (
             millis() - ackWaitStart <
@@ -589,12 +450,10 @@ namespace
             return;
         }
 
-
         Serial.printf(
             "ACK TIMEOUT | message=%u\n",
             pendingMessage.messageId
         );
-
 
         if (
             retryCount <
@@ -603,18 +462,11 @@ namespace
         {
             retryCount++;
 
-
-            /*
-             * Retry the SAME pendingMessage.
-             *
-             * Therefore the message ID stays identical.
-             */
+            // Retries preserve the original message ID and payload.
             transmitPendingEvent(true);
-
 
             return;
         }
-
 
         Serial.printf(
             "GIVE UP | message=%u"
@@ -623,24 +475,16 @@ namespace
             MAX_RETRIES
         );
 
-
         waitingForAck = false;
 
         retryCount = 0;
 
-
         setPeerOnline(false);
-
 
         nextEventTime =
             millis() +
             EVENT_INTERVAL_MS;
     }
-
-
-    // ========================================================
-    // Peer availability
-    // ========================================================
 
     void handlePeerAvailability()
     {
@@ -648,7 +492,6 @@ namespace
         {
             return;
         }
-
 
         if (
             millis() - lastPeerSeenTime >=
@@ -659,15 +502,9 @@ namespace
         }
     }
 
-
-    // ========================================================
-    // FreeRTOS Radio Task
-    // ========================================================
-
     void radioTask(void* parameter)
     {
         (void)parameter;
-
 
         Serial.println();
         Serial.println(
@@ -682,26 +519,18 @@ namespace
             "========================================"
         );
 
-
         Serial.printf(
             "Device: %s\n",
             DEVICE_NAME
         );
 
-
-        // ----------------------------------------------------
-        // CC1101 initialization
-        // ----------------------------------------------------
-
         CC1101Radio::begin();
-
 
         if (!CC1101Radio::reset())
         {
             Serial.println(
                 "RADIO TASK: RESET FAILED"
             );
-
 
             radioTaskHandle = nullptr;
 
@@ -710,11 +539,9 @@ namespace
             return;
         }
 
-
         Serial.println(
             "RESET OK"
         );
-
 
         if (
             !CC1101Radio::configureForPacketTest()
@@ -724,7 +551,6 @@ namespace
                 "RADIO TASK: CONFIG FAILED"
             );
 
-
             radioTaskHandle = nullptr;
 
             vTaskDelete(nullptr);
@@ -732,11 +558,9 @@ namespace
             return;
         }
 
-
         Serial.println(
             "RADIO CONFIG OK"
         );
-
 
         if (
             !CC1101Radio::startReceive()
@@ -746,7 +570,6 @@ namespace
                 "RADIO TASK: FAILED TO ENTER RX"
             );
 
-
             radioTaskHandle = nullptr;
 
             vTaskDelete(nullptr);
@@ -754,37 +577,26 @@ namespace
             return;
         }
 
-
         Serial.println(
             "RX OK"
         );
 
-
         nextEventTime =
             millis() +
             FIRST_EVENT_DELAY_MS;
-
 
         Serial.println();
         Serial.println(
             "RadioTask running."
         );
 
-
-        // ====================================================
-        // Task loop
-        // ====================================================
-
         while (true)
         {
             handleIncomingMessage();
 
-
             handleAckTimeout();
 
-
             handlePeerAvailability();
-
 
             if (
                 !waitingForAck &&
@@ -797,13 +609,7 @@ namespace
                 startHeartbeatEvent();
             }
 
-
-            /*
-             * Yield CPU time to the other FreeRTOS tasks.
-             *
-             * Later this is where LED, motion, display,
-             * etc. get their own CPU time.
-             */
+            // Yield so other FreeRTOS tasks can run.
             vTaskDelay(
                 pdMS_TO_TICKS(2)
             );
@@ -811,23 +617,15 @@ namespace
     }
 }
 
-
-// ============================================================
-// Public RadioTask interface
-// ============================================================
-
 namespace RadioTask
 {
     bool begin()
     {
-        /*
-         * Prevent accidentally creating two radio tasks.
-         */
+
         if (radioTaskHandle != nullptr)
         {
             return true;
         }
-
 
         BaseType_t result =
             xTaskCreate(
@@ -845,7 +643,6 @@ namespace RadioTask
 
                 &radioTaskHandle
             );
-
 
         return result == pdPASS;
     }

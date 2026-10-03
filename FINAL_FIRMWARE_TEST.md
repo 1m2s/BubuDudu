@@ -1,5 +1,18 @@
 # Final firmware acceptance
 
+> **2026-10-03 integration update.** The implementation now uses the runtime
+> modules in [Architecture](ARCHITECTURE.md), and the complete split host suite
+> and build workflow are described in [Testing](tests/host/README.md). Awake
+> state is ACTIVE (IDLE removed); CLOSE/FAR cadence is 2500/6000 ms; former
+> serial bench controls are inert. The preserved 0.625 g awake threshold is a
+> trial setting. Failed-entry evidence gating, pending-fallback recovery and
+> Dudu diagnostics have host coverage, not new physical acceptance.
+> Initial `NOT_IN_RX`, persistent CC1101 `Stopped`, rare failed-sleep hardware
+> recovery and OLED visibility remain unresolved/unverified. No device was
+> flashed for this finalization. Consult the appended DEVLOG for final commit
+> and remote CI evidence. The dated preparation record below is historical;
+> its build/ref/stash counts and documentation-only claims describe October 1.
+
 Prepared on 2026-10-01. Candidate branch: `integration/final-firmware`.
 Firmware baseline: `fece5af0de8cec8aed57234af49ecd44d72d4115`.
 Physical acceptance for this candidate is **pending**. Previous observations

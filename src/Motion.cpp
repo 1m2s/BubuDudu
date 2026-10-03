@@ -2,11 +2,6 @@
 
 #include <Wire.h>
 
-
-// ======================================================
-// ADXL345 constants
-// ======================================================
-
 namespace
 {
     constexpr uint8_t ADXL345_ADDRESS = 0x53;
@@ -34,27 +29,12 @@ namespace
     constexpr uint32_t STARTUP_RETRY_DELAY_MS = 20;
 }
 
-
-// ======================================================
-// Static ISR flag
-// ======================================================
-
 volatile bool Motion::interruptOccurred = false;
-
-
-// ======================================================
-// ISR
-// ======================================================
 
 void IRAM_ATTR Motion::handleInterrupt()
 {
     interruptOccurred = true;
 }
-
-
-// ======================================================
-// Register write
-// ======================================================
 
 bool Motion::writeRegister(
     uint8_t reg,
@@ -68,11 +48,6 @@ bool Motion::writeRegister(
 
     return Wire.endTransmission() == 0;
 }
-
-
-// ======================================================
-// Register read
-// ======================================================
 
 uint8_t Motion::readRegister(
     uint8_t reg
@@ -93,11 +68,6 @@ bool Motion::readRegister(uint8_t reg, uint8_t& value)
     return true;
 }
 
-
-// ======================================================
-// Convert INT_SOURCE into a useful application event
-// ======================================================
-
 MotionEvent Motion::decodeEvent(
     uint8_t interruptSource
 )
@@ -108,21 +78,14 @@ MotionEvent Motion::decodeEvent(
         return MotionEvent::Activity;
     }
 
-
     // Bit 3 = inactivity
     if (interruptSource & 0x08)
     {
         return MotionEvent::Inactivity;
     }
 
-
     return MotionEvent::None;
 }
-
-
-// ======================================================
-// Begin sensor
-// ======================================================
 
 bool Motion::begin(
     uint8_t sdaPin,
@@ -221,11 +184,6 @@ bool Motion::beginAttempt(bool& startupCaptured)
     return true;
 }
 
-
-// ======================================================
-// Get event generated through ISR
-// ======================================================
-
 MotionEvent Motion::getEvent()
 {
     // INT1 can already be HIGH when the ISR is reattached after a sleep abort.
@@ -235,20 +193,13 @@ MotionEvent Motion::getEvent()
         return MotionEvent::None;
     }
 
-
     // Clear our software flag.
     interruptOccurred = false;
-
 
     // INT_SOURCE tells us why INT1 fired and
     // clears the ADXL345 interrupt.
     return readPendingEvent();
 }
-
-
-// ======================================================
-// Read current ADXL345 interrupt event
-// ======================================================
 
 MotionEvent Motion::readPendingEvent()
 {
@@ -257,30 +208,15 @@ MotionEvent Motion::readPendingEvent()
     );
 }
 
-
-// ======================================================
-// Startup event
-// ======================================================
-
 MotionEvent Motion::getStartupEvent() const
 {
     return startupEvent;
 }
 
-
-// ======================================================
-// Interrupt pin
-// ======================================================
-
 uint8_t Motion::getInterruptPin() const
 {
     return interruptPin;
 }
-
-
-// ======================================================
-// Pause normal awake ISR
-// ======================================================
 
 void Motion::pauseInterrupt()
 {
@@ -294,11 +230,6 @@ void Motion::pauseInterrupt()
 
     interruptOccurred = false;
 }
-
-
-// ======================================================
-// Restore normal awake ISR
-// ======================================================
 
 void Motion::resumeInterrupt()
 {
