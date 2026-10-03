@@ -49,7 +49,10 @@ executing the real LED state machine.
 Each suite is a separate process and every case begins with `runCase` reset.
 RAM resets also clear pending packet bytes and history slots. RTC is invalidated
 between cases, but intentionally survives simulated reboots *within* a case.
-Most protocol fixtures postpone periodic traffic without a firmware test switch;
+The simulated reboot wrapper releases the old RAM receive queue before running
+the unchanged production `setup()`, so Linux LeakSanitizer can check every suite
+without leaked host allocations. Most protocol fixtures postpone periodic
+traffic without a firmware test switch;
 cadence tests explicitly execute the normal production schedule.
 
 ## Driver and hardware-boundary suites

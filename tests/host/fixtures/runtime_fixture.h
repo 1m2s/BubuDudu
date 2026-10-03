@@ -13,10 +13,20 @@ void pinMode(int pin, int mode);
 #include "observed_led.h"
 #define LED ObservedLED
 #define loop firmwareLoop
+#define setup firmwareSetup
 #include "production_app.h"
 #undef loop
+#undef setup
 #undef LED
 #include "../../../src/LED.cpp"
+// A real reset discards RAM queues. Simulated startup must release the previous
+// host allocation before the unchanged production setup creates a new queue.
+void setup()
+{
+    delete receiveQueue;
+    receiveQueue = nullptr;
+    firmwareSetup();
+}
 struct PhysicalSleepEntered {};
 // Protocol fixtures can postpone the periodic due time without a firmware pause
 // switch. Cadence/policy tests run the unmodified schedule instead.
