@@ -3944,3 +3944,169 @@ These are alternative recovery choices; do not apply both stashes on top of one 
 For the FAR change, retain the existing double pulse's colour, brightness, fades and 700 ms duration. Six seconds is the repetition interval, using the existing scheduling mechanism. CLOSE stays at 2500 ms. Outgoing and incoming background triggers, retries and duplicates must not add or repeatedly restart FAR animations. Physical-button priority, UNKNOWN and sleep behavior must remain unchanged.
 
 Keep OLED presentation, motion thresholds, proximity classification, radio selection, peer-state logic and reliability timeouts outside that change. After focused regression coverage and the host suite, build Bubu and Dudu sequentially. Then physically verify the FAR rhythm and preserved CLOSE/button behavior before proceeding to any other issue. No physical result is supplied by this closure.
+
+## 2026-10-03 — Final integration and software validation
+
+### Scope and preserved baseline
+
+Finalized the authorized integration on `integration/final-firmware`, starting at
+`2d79328697d2b03c47d54fe58fb8a5628c160394`. The actual starting
+files were 2,072 lines in `src/main.cpp` and 6,295 lines in the sleep-handshake test.
+The existing uncommitted work comprised 17 tracked integration files and the new
+`tests/host/i2c_startup_test.cpp`; the separate `.vscode/extensions.json` change was
+excluded. No applicable AGENTS.md was present in the project/ancestor directories.
+
+The included work was inventoried before restructuring: ACTIVE-only awake power
+state, evidence-gated failed-sleep recovery with deferred proximity, pending-
+fallback peer recovery, the current Motion threshold, stopped-radio display
+admission and Dudu I2C/OLED diagnostics, plus their regression tests and current
+policy documentation. The prior `2d79328` six-second FAR/manual-command-cleanup
+checkpoint was retained. No abandoned stash was applied.
+
+Recoverable baseline and validation evidence are under:
+
+`/Users/mohamedsellami/bubududu-restoration-backups/finalize-20261003T184817+0200`
+
+This includes a worktree archive, file SHA-256 manifest, complete Git bundle,
+working/index patches, refs and stash reflog, current-main DEVLOG copy, validation
+logs/results and integration-review inventory. All earlier stashes/backups were
+left intact. Protected `.vscode/extensions.json`, ignored `c_cpp_properties.json`
+and `launch.json` were preserved byte-for-byte and kept outside commits.
+
+Fetched main was `325a9d26df0475341e54fcfa426e3dca24d4cd56`. Its newer development
+record was inspected before integrating. The sole merge conflict was DEVLOG's
+append: the integration version was verified to be an exact prefix of main's
+version. The complete main version was retained, with this entry appended after
+it. Earlier historical claims and instructions were not rewritten.
+
+### Included functionality and structure
+
+`src/main.cpp` now contains only the readable startup/ordered cooperative loop.
+Five modules in `src/app` own their private state: `RadioRuntime` (queues, message
+IDs, retries/dedup, transport/fallback and RTC packet history), `MotionRuntime`
+(sensor/movement/proximity), `ButtonRuntime` (debounce and wake/user intent),
+`SleepRuntime` (boot routing, inactivity, drain and physical entry), and
+`Presentation` (display, diagnostics and LED/retained/FAR animation). No new task,
+duplicate state machine or global-state header was introduced.
+
+Preserved ordering includes earliest wake capture, retained FIFO recovery before
+I2C, Motion before OLED before LED, RX queue before callback registration, motion
+and button activity before sleep, received ACKs before retries, button work before
+periodic events, and bounded diagnostic work at the end of the loop. Existing
+radio transaction IDs, receipt matching, retries, duplicate handling, deferred
+wake EVENT forwarding/FIFO safety, inactivity safeguards, FAR/CLOSE and user
+animation behavior remain in their original production paths.
+
+The large test was split into 15 responsibility suites under `tests/host/suites`.
+All 92 original test functions and their 1,558 assertions were retained unchanged,
+including parameterized CLOSE/FAR paths and rollover/failure coverage. Shared
+production inclusion, hardware doubles, LED observation, reset and scenario
+helpers live in `tests/host/fixtures`. Each suite runs as its own process for
+Bubu and Dudu; each case also resets its fixture. RTC is cleared between cases,
+while intentionally retained during simulated reboots inside a case. The real
+CC1101 driver/wake-waiter/application-forwarding tests remain in the complete
+runner, alongside Motion, OLED, I2C, RTC and ESP-NOW driver coverage.
+
+Removed syntax-narrating/tutorial comments and repetitive banners. Electrical,
+register, timing, callback ownership, retained-data, protocol and failure-handling
+reasoning was preserved. Executable token comparisons verified that comment and
+format cleanup did not change code; diagnostic strings remain equivalent.
+Current architecture, button, README and testing documentation now match the
+modules and suites. The dated acceptance and sleep-handshake records retain their
+historical content, with a current acceptance addendum identifying changed policy.
+
+CI uses GitHub Actions on pull requests and branch pushes, including integration
+and main. It checks the relevant diff, calls the complete host runner with ASan
+and UBSan (fatal findings), builds Bubu then Dudu with `-j 1`, and verifies tracked
+files remain unchanged. PlatformIO Core 6.2.0, SCons 4.41101.0, Python 3.11.14,
+Espressif32 7.1.2, Arduino 2.0.17/IDF 4.4.7 packages, the RISC-V toolchain, esptool,
+filesystem tools, NeoPixel 1.15.5 and U8g2 2.36.18 use the verified pins recorded in
+configuration/testing docs. GitHub Actions references are verified commit pins;
+CI selects Clang 18 on Ubuntu 24.04. The hosted runner image can still receive
+updates; this is not a claim of a hermetic, bit-identical build environment.
+
+`BUBUDUDU_BUILD_ONLY=1` skips USB discovery and `ports.ini` updates. A host test
+executes the real port-selection script with USB access forbidden, validates
+board-free build targets and rejects upload/monitor targets. Normal local port
+selection remains available when that variable is unset. No device was flashed,
+no release/tag was created, and no backup was deleted.
+
+### Commit checkpoints and validation
+
+- `51dee39` — preserve the existing behavioral integration and diagnostics.
+- `b5858a3` — merge current main history, retaining all of its DEVLOG content.
+- `23d5684` — extract the five orchestration modules, with host and both firmware builds passing.
+- `d1e86f9` — split the production-loop suites with shared isolated fixtures.
+- `6753b3c` — current architecture/testing documentation and comment cleanup.
+- `9d61eaf` — pinned CI, complete shared runner and build-only port guard.
+- `3e54d66` — release host receive queues at the simulated reboot boundary.
+
+Before restructuring, the original complete host suite passed with ASan/UBSan
+(13.11 s), followed by Bubu (76.87 s) then Dudu (76.02 s), both using `-j 1`.
+The extracted modules passed the original suite and separate-translation-unit
+firmware builds; the split suite passed for both identities. Final local validation passed: complete host suite 37.55 s, then Bubu 83.16 s
+and Dudu 86.58 s, with build-only mode and `-j 1`. After the host-lifecycle fix
+below, the entire host suite passed again and both sequential incremental
+firmware builds passed (Bubu 2.50 s, Dudu 2.07 s).
+
+The first live push/PR checks at `9d61eaf` failed in Linux LeakSanitizer: simulated
+reboots in the host harness could overwrite an allocated RX queue. This was not
+reported by the local macOS sanitizer run. The failure was retained in the
+validation evidence, including [PR CI run 37140057164](https://github.com/1m2s/BubuDudu/actions/runs/37140057164).
+The shared host `setup()` wrapper now releases the previous RAM queue before
+calling the unchanged production setup. This models actual reboot ownership,
+keeps every original test body/assertion and leaves sanitizers enabled. No
+firmware behavior or test selection was changed to make this check pass.
+
+The complete integration diff was reviewed against current main, including the
+DEVLOG conflict resolution. Before this DEVLOG append, the 91-path implementation/documentation/test/build
+inventory excluded protected settings; 45 paths remained byte-identical to the
+recoverable starting worktree. All original integration capabilities were kept;
+no unresolved radio/OLED repair was bundled with the structural work.
+
+### Verified remote CI and merge handoff
+
+[PR #1](https://github.com/1m2s/BubuDudu/pull/1) contains the final integration and
+reviewable checkpoints. GitHub Actions [push run 37140223488](https://github.com/1m2s/BubuDudu/actions/runs/37140223488)
+passed on `3e54d66ba81147f792b7ee73ca891367969f9cb7`: the complete Linux Clang
+18.1.3 host suite with ASan/UBSan (including LeakSanitizer), whitespace checks,
+Bubu then Dudu `-j 1` builds from the pinned packages without connected boards,
+and the tracked-file clean-tree check. This is live service evidence, not YAML
+inspection alone.
+
+This DEVLOG append is committed and pushed as `docs: record final integration
+checkpoints and verified CI`. It changes documentation only after the validated
+code checkpoint. Its final push/PR checks must pass before the authorized merge;
+remote main and the resulting main CI are then verified separately. The task's
+final report supplies that resulting main SHA and live run link. At the initial
+repository audit, main had no branch protection/rules or required review; those
+requirements are rechecked at merge time. No check or review requirement is
+bypassed.
+
+### Hardware evidence and remaining issues
+
+No new physical experiment was performed in this finalization. Earlier DEVLOG
+observations (including battery assembly and prior sleep/wake/button milestones)
+remain historical hardware evidence; host doubles and firmware compilation do
+not add physical passes. Existing FAR/CLOSE and button behavior was preserved,
+without claiming new post-refactor physical acceptance.
+
+- The initial `NOT_IN_RX` cause is unresolved; no root cause is established here.
+- Persistent CC1101 `Stopped` remains a known defect/limitation. The awake driver
+  still stops after its bounded failure path; no permanent radio repair was added.
+- Rare failed-sleep hardware recovery remains unverified. New-event/matching-ACK
+  evidence gating and deferred proximity are covered deterministically on host;
+  that does not prove recovery of the reported intermittent hardware case.
+- OLED visibility remains unresolved. Dudu address/decision/attempt diagnostics
+  and stopped-radio redraw eligibility are preserved; ACKs, initialization return
+  values or attempted framebuffer transfers do not prove a visible panel.
+- Awake Motion threshold 10 (0.625 g) remains the preserved trial value, with
+  physical validation pending; sleep threshold 48 (3 g) and existing settling
+  timing were unchanged.
+- Exact physical deferred-traffic overlap, the short button pulse window at final
+  sleep entry, proximity calibration, and battery current/runtime/charging-under-
+  load evidence remain open. The dormant older CC1101 driver's documented receive
+  bound concern is outside the active application path and was not repaired.
+
+Merging this integration is a software checkpoint, not a fully hardware-validated
+release.
