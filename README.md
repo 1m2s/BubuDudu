@@ -1,22 +1,13 @@
-# BubuDudu
+# BubuDudu — integration/final-firmware
 
-BubuDudu is a pair of wireless companion devices built around the ESP32-C3.
-Both identities share firmware for physical-button input, ADXL345 motion,
-ESP-NOW/CC1101 delivery, proximity experiments, LED heartbeat animations,
-OLED diagnostics and coordinated deep sleep with motion/button/radio wake.
+Historical checkpoint `72b38b5`. Final integration checkpoint merged into main. Shared firmware uses a cooperative loop with separate radio, Motion, button, sleep and presentation modules. Host/CI and build evidence is recorded; physical acceptance remains incomplete.
 
-The integration retains a cooperative loop and bounded protocol retries. Awake
-devices stay ACTIVE, meaningful inactivity qualifies sleep, and CLOSE/FAR
-background pulses share priority with receiver-only user animations.
+## Things learnt
 
-- [Architecture and ownership](ARCHITECTURE.md)
-- [Host suites, CI and sequential firmware builds](tests/host/README.md)
-- [Button and heartbeat behavior](BUTTON_HEARTBEAT.md)
-- [Hardware acceptance and remaining evidence](FINAL_FIRMWARE_TEST.md)
-- [Development history](DEVLOG.md)
+- Separate runtime state by owner while preserving callback, receive, retry and sleep ordering.
+- Simulated reboots must release host-owned queues so LeakSanitizer can distinguish fixture leaks from firmware behavior.
+- Software evidence for failed-sleep recovery and display attempts does not resolve intermittent hardware recovery or visible OLED output.
 
-Software validation is separate from physical acceptance. The initial
-`NOT_IN_RX` cause, persistent CC1101 `Stopped` condition, rare failed-sleep
-hardware recovery and OLED visibility remain unresolved or unverified. The
-current 0.625 g awake Motion threshold is a preserved trial setting. Gesture
-detection and battery runtime characterization are not completed capabilities.
+[Architecture](ARCHITECTURE.md) · [Build and host tests](tests/host/README.md) · [Hardware acceptance](FINAL_FIRMWARE_TEST.md) · [Development log](DEVLOG.md)
+
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
