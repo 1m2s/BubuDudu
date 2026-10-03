@@ -3780,3 +3780,167 @@ both updated devices awake
 Normal automatic diagnostics may continue while characters are typed. Observe the partner LED as well as the matching receipt; an ACK alone is not proof that the intended animation ran. Allow the existing 35-second inactivity policy and normal movement/proximity/transport guards to determine sleep eligibility.
 
 Validate the cleanup physically before committing it. Retain the stash while reviewing the restored work and results. Complete remaining candidate acceptance deliberately afterward; do not treat this documentation closure as firmware integration, a verified GitHub Actions run, a release or the start of presentation work.
+
+## 2026-10-03
+
+### Completed
+
+This entry closes the hardware and debugging session that began on October 2 and continued into October 3, Europe/Berlin time.
+
+Assembled battery power for both devices and resumed the original manual-command cleanup on `integration/final-firmware`. Subsequent investigation expanded into radio/peer status, proximity, mounted-sensor sensitivity and OLED presentation. The combined experimental changes passed software checks, but physical observations exposed regressions. Those experiments were abandoned and backed up, and the original cleanup candidate was restored.
+
+The user then requested the existing double-pulse heartbeat in FAR at a six-second repetition interval. Further work on that request was immediately stopped for this session closure. Existing uncommitted FAR edits were found and preserved separately from the restored baseline; the requested change remains pending physical acceptance. No additional firmware implementation or firmware validation was performed during this documentation-only closure.
+
+Returned the checkout safely to main after preserving the integration work. Main receives only this appended development record; previous entries remain byte-for-byte unchanged.
+
+### Battery Power Assembly and Physical Observations
+
+The assembled battery supply uses:
+
+* protected Superfire 18650 cells
+
+* USB-C charger/protection boards
+
+* Adafruit TPS61023 MiniBoost modules
+
+The user measured approximately 3.9 V per cell and 4.99–5.02 V at the booster output. Both Bubu and Dudu operated from battery power.
+
+These are user-reported physical measurements and operation, not a characterized power budget. Current consumption, battery runtime and charging under load were not validated. The earlier battery simulation remains design material and does not supply those missing measurements.
+
+### Firmware Investigation and Abandoned Experiments
+
+The session investigated the following reported behavior:
+
+* CC1101 peer-status flicker
+
+* incorrect sleeping status
+
+* overly permissive CLOSE classification
+
+* excessive sensitivity with the sensor mounted in the device
+
+* OLED presentation
+
+A combined experimental patch passed software checks. Physical testing then found excessive sensitivity and later incorrect LED behavior. A sensitivity/display correction was also attempted. These changes were subsequently abandoned; they are not completed fixes in the restored firmware.
+
+The abandoned work remains recoverable in the existing stash:
+
+`b0f09dadaa8c1f36935b14e9c90c1cdedd5369d7`
+
+That stash and its restoration backups were preserved without alteration. The reported radio/status, classification, sensitivity and OLED issues remain observations requiring separate investigation. No successful resolution is inferred from the experimental host tests or builds.
+
+### Restored Candidate and Stopped FAR Heartbeat
+
+The restored candidate is the integration base:
+
+`97135b2bff2042c7f0e473ccc8f0456861d89f0d`
+
+plus the original manual-command cleanup stash:
+
+`e2472ca16d9a1329a8ca526037905540b88453dd`
+
+The original cleanup stash has that exact base. Closure compared the saved restoration archive against the cleanup stash: all 62 tracked files outside `.vscode/extensions.json` matched byte-for-byte. The subsequent experimental radio, peer-state, motion, proximity and OLED fixes are absent from this candidate.
+
+Inspection of the live integration checkout found only two additional files differing from the original cleanup snapshot:
+
+* `src/main.cpp`
+
+* `tests/host/sleep_handshake_test.cpp`
+
+Those differences belong to the stopped FAR-heartbeat attempt: the 6000 ms interval, FAR background eligibility, shared outgoing/incoming animation guard and associated regression changes. They were preserved in the new recovery stash and archive, not adopted as an accepted replacement for the restored candidate. Every other tracked file outside the editor modification still matched the original cleanup snapshot.
+
+The restored baseline retains the existing 2500 ms CLOSE interval, 4000 ms FAR message interval and CLOSE-only normal background-animation condition. The requested FAR change is still the next isolated task. No explicit post-restoration physical LED acceptance result was supplied, and no physical acceptance of the stopped FAR edits is claimed.
+
+### Host Tests and Build Verification
+
+Restoration evidence and backups remain under:
+
+`/Users/mohamedsellami/bubududu-restoration-backups/pre-bugfix-baseline-20261002T233708+0200`
+
+The saved `validation-results.json`, `host-suite.log`, `build-bubu.log` and `build-dudu.log` record this order for the restored candidate:
+
+* complete `bash tests/host/run.sh` suite — PASS
+
+* AddressSanitizer and UndefinedBehaviorSanitizer — PASS
+
+* Bubu PlatformIO build — PASS, 20.435 seconds
+
+* Dudu PlatformIO build — PASS, 18.733 seconds; started after Bubu completed
+
+Closure used that saved evidence and verified the restoration archive checksums. The firmware host suite and builds were not rerun for this DEVLOG-only task. These software results do not establish post-restoration physical LED acceptance, resolve the abandoned experiments or validate battery current, runtime or charging under load.
+
+Documentation checks cover the append-only DEVLOG diff, preservation of all earlier entry bytes, an empty staged diff, unchanged editor content and preserved branch/stash/backup state. They do not add hardware evidence.
+
+### Current Working State
+
+The integration branch remains at `97135b2bff2042c7f0e473ccc8f0456861d89f0d`. All uncommitted integration work present at closure, including the original cleanup and stopped FAR-heartbeat edits, is preserved in the new stash:
+
+`On integration/final-firmware: wip: session closure; restored cleanup and stopped FAR-heartbeat edits - 2026-10-03 Europe/Berlin`
+
+Its full object ID is:
+
+`683948af4c6d8a916791d4b180be00fe034df098`
+
+The stash's complete eleven-file integration diff and all 62 tracked file contents outside the editor setting were verified against the captured worktree. Its base is `97135b2bff2042c7f0e473ccc8f0456861d89f0d`; its index snapshot contains no staged change. The seven earlier stashes remain intact. Numeric stash positions have shifted, so recovery uses full object IDs.
+
+A separate verified archive, complete integration patch, stopped-FAR-only patch and preservation manifest are saved under:
+
+`/Users/mohamedsellami/bubududu-restoration-backups/session-closure-20261003T004354+0200`
+
+The archive is `integration-worktree.tar.gz`. `integration-work.patch` captures all integration changes above the base; `stopped-far-heartbeat.patch` captures only the two-file difference above the original cleanup. Existing restoration backups were retained unchanged.
+
+The checkout is now on main at `bfe599fc3cfa697237f7dad8a777d9ff6644623c`, with only this appended `DEVLOG.md` entry and the original editor modification. `.vscode/extensions.json` was excluded from the recovery stash and archive and remains unchanged and unstaged, with SHA-256:
+
+`b14aaff9d2eaeb2c2d6e0893007079d33676ab6a1e8f9fc2a4bbfb706e14f846`
+
+All existing branches and stashes are preserved. Main contains no imported integration firmware. The original cleanup, post-restoration LED acceptance, FAR heartbeat and remaining candidate acceptance are not declared physically complete.
+
+### Problems Solved
+
+* battery supply assembly and basic battery-powered operation demonstrated on both devices
+
+* separation of the abandoned combined experiments from the restored original cleanup candidate
+
+* verification of the restored candidate against its exact base, cleanup stash and saved validation evidence
+
+* preservation of stopped FAR edits without carrying firmware changes into main or losing the original baseline
+
+The peer/status observations, classification and mounted-sensor concerns, OLED presentation, post-restoration LED acceptance, FAR heartbeat acceptance and battery power characterization remain open.
+
+### Git Commits
+
+No new firmware commit, push or merge resulted from this work. The original cleanup, abandoned experiments and stopped FAR edits remain recoverable as uncommitted work in their separate stashes and backups.
+
+This closure creates no documentation commit either. Nothing was flashed, staged, committed, pushed or merged during closure. The only new main content is the unstaged DEVLOG append.
+
+### Next Step
+
+Proceed one change at a time. The next requested implementation is only the six-second FAR heartbeat, preserving CLOSE behavior, followed by physical testing before any further change. Do not restore the abandoned experimental fixes.
+
+The current main DEVLOG append is uncommitted. Preserve it separately before switching branches; leave `.vscode/extensions.json` outside that stash. To recover the exact integration work stopped at this closure, use:
+
+```bash
+git stash push -m "wip: preserve 2026-10-03 DEVLOG closure" -- DEVLOG.md
+git switch integration/final-firmware
+git rev-parse HEAD
+```
+
+Verify HEAD is `97135b2bff2042c7f0e473ccc8f0456861d89f0d` and only the protected editor modification remains before applying:
+
+```bash
+git stash apply 683948af4c6d8a916791d4b180be00fe034df098
+```
+
+This restores the original cleanup plus the stopped FAR edits. Review the two-file FAR difference before continuing; recovery itself is not acceptance. Keep the stash rather than popping it.
+
+To resume from the restored cleanup baseline instead, use the following apply command in place of the new recovery stash, on the same verified base with no integration changes applied:
+
+```bash
+git stash apply e2472ca16d9a1329a8ca526037905540b88453dd
+```
+
+These are alternative recovery choices; do not apply both stashes on top of one another. The stopped FAR patch remains available separately for review. If the base or worktree differs, preserve and inspect the difference before proceeding rather than forcing a restore.
+
+For the FAR change, retain the existing double pulse's colour, brightness, fades and 700 ms duration. Six seconds is the repetition interval, using the existing scheduling mechanism. CLOSE stays at 2500 ms. Outgoing and incoming background triggers, retries and duplicates must not add or repeatedly restart FAR animations. Physical-button priority, UNKNOWN and sleep behavior must remain unchanged.
+
+Keep OLED presentation, motion thresholds, proximity classification, radio selection, peer-state logic and reliability timeouts outside that change. After focused regression coverage and the host suite, build Bubu and Dudu sequentially. Then physically verify the FAR rhythm and preserved CLOSE/button behavior before proceeding to any other issue. No physical result is supplied by this closure.
