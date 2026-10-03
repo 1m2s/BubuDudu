@@ -23,7 +23,17 @@ struct ObservedLED : LED
 #undef LED
 #include "../../src/LED.cpp"
 struct PhysicalSleepEntered {};
-void loop() { try { firmwareLoop(); } catch (const PhysicalSleepEntered&) {} }
+// Protocol fixtures can postpone the periodic due time without a firmware pause
+// switch. Cadence/policy tests run the unmodified schedule instead.
+bool suppressPeriodicForTest = true;
+void loop()
+{
+    const auto scheduled = nextEventTime;
+    const unsigned long postponed = static_cast<unsigned long>(millis()) + 1000000UL;
+    if (suppressPeriodicForTest) nextEventTime = postponed;
+    try { firmwareLoop(); } catch (const PhysicalSleepEntered&) {}
+    if (suppressPeriodicForTest && nextEventTime == postponed) nextEventTime = scheduled;
+}
 
 uint32_t hostNow = 0;
 HostSerial Serial;
@@ -50,7 +60,7 @@ namespace CC1101SleepArm
         return result == Result::Ready ? "READY" : "RADIO_UNAVAILABLE";
     }
 }
-unsigned wakeRecoveries = 0, benchSleepCalls = 0;
+unsigned wakeRecoveries = 0;
 unsigned coordinatedAttempts = 0, physicalSleeps = 0, mockedTxInFlight = 0;
 bool mockedRxActive = false;
 bool holdEspReceipts = false;
@@ -200,11 +210,10 @@ namespace CC1101WakeRecovery
         return SubmitResult::Accepted;
     }
     void printReport(const BootInfo&, bool, const Report&) {}
-    void enterDeepSleep(void (*save)(), const char* (*guard)(), bool coordinated, void (*beforeSleep)())
+    void enterDeepSleep(void (*save)(), const char* (*guard)(), void (*beforeSleep)())
     {
         assert(!led.busy() && hostPixel().shown == 0);
         assert(beforeSleep != nullptr);
-        if (!coordinated) { ++benchSleepCalls; return; }
         ++coordinatedAttempts;
         const auto arm = CC1101SleepArm::prepareForSleep();
         if (arm.result != CC1101SleepArm::Result::Ready)
@@ -286,7 +295,7 @@ using Type = Protocol::MessageType;
 using Device = Protocol::DeviceId;
 using namespace PowerManager;
 // Pure FSM tests supply admission explicitly, as the production loop now does.
-// Their forceIdle() fixtures represent an already eligible participant.
+// Their idleAfterInactivity() fixtures represent an already eligible participant.
 void handleControl(const Protocol::Message& message, uint32_t now)
 {
     PowerManager::handleControl(message, now, localState() == LocalState::IDLE);
@@ -322,7 +331,7 @@ void testFsm()
     // Coordinator: packet receipt is not the sleep agreement.
     freshPower();
     assert(!requestSleep(27, 0));
-    forceIdle(0); assert(requestSleep(27, 0));
+    idleAfterInactivity(0); assert(requestSleep(27, 0));
     assert(transaction().role == SleepRole::COORDINATOR && transaction().phase == SleepPhase::WAIT_READY);
     assert(intents.back().type == Type::SleepRequest && intents.back().id == 27);
     notePeerSeen(); assert(peerState() == PeerState::SLEEP_PENDING);
@@ -341,7 +350,7 @@ void testFsm()
     assert(occurrences(Serial.log, "HANDSHAKE_COMPLETE") == effects);
 
     // Participant and duplicate REQUEST/COMMIT: one transition, repeatable response.
-    freshPower(); forceIdle(0);
+    freshPower(); idleAfterInactivity(0);
     auto request = control(Type::SleepRequest, 20);
     auto commit = control(Type::SleepCommit, 20, 21);
     handleControl(request, 100);
@@ -362,11 +371,11 @@ void testFsm()
     assert(occurrences(Serial.log, "HANDSHAKE_COMPLETE") == effects);
     commit.messageId = 99; handleControl(commit, 340);
     assert(intents.size() == replies + 1); // Same closed sleepId alone is insufficient.
-    injectActivity(400); update(650); forceIdle(650);
+    injectActivity(400); update(650); idleAfterInactivity(650);
     handleControl(request, 651); assert(!transaction().active); // Closed request stays closed.
 
     // Stale IDs, wrong sender, wrong role, malformed request cannot advance/cancel.
-    freshPower(); forceIdle(0); requestSleep(30, 0);
+    freshPower(); idleAfterInactivity(0); requestSleep(30, 0);
     for (auto type : {Type::SleepReady, Type::SleepCommit, Type::SleepAck, Type::SleepCancel})
     {
         handleControl(control(type, 29), 10);
@@ -375,27 +384,27 @@ void testFsm()
     handleControl(control(Type::SleepReady, 30, 90, Device::Bubu), 10);
     handleControl(control(Type::SleepCommit, 30), 10);
     assert(transaction().phase == SleepPhase::WAIT_READY);
-    freshPower(); forceIdle(0); auto malformed = control(Type::SleepRequest, 40); malformed.messageId = 41;
+    freshPower(); idleAfterInactivity(0); auto malformed = control(Type::SleepRequest, 40); malformed.messageId = 41;
     handleControl(malformed, 0); assert(!transaction().active);
 
     // Activity closes state first; late control cannot put the device to sleep.
-    freshPower(); forceIdle(0); handleControl(control(Type::SleepRequest, 40), 0);
+    freshPower(); idleAfterInactivity(0); handleControl(control(Type::SleepRequest, 40), 0);
     injectActivity(100); assert(localState() == LocalState::ACTIVE && !transaction().active);
     assert(intents.back().type == Type::SleepCancel && cooldownLeftMs(100) == 3000);
     handleControl(control(Type::SleepCommit, 40), 110);
     assert(localState() == LocalState::ACTIVE && !transaction().active);
-    forceIdle(200); assert(!requestSleep(99, 200));
+    idleAfterInactivity(200); assert(!requestSleep(99, 200));
     update(3100); handleControl(control(Type::SleepRequest, 40), 3101); assert(!transaction().active);
     handleControl(control(Type::SleepRequest, 41), 3102); assert(transaction().sleepId == 41);
     handleControl(control(Type::SleepCancel, 41), 3200);
     assert(localState() == LocalState::IDLE && !transaction().active && cooldownLeftMs(3200) == 3000);
 
     // Phase and absolute hard bounds. Duplicate READY cannot extend either bound.
-    freshPower(); forceIdle(0); requestSleep(27, 0); update(3000);
+    freshPower(); idleAfterInactivity(0); requestSleep(27, 0); update(3000);
     assert(!transaction().active && Serial.log.find("PHASE_TIMEOUT") != std::string::npos);
-    freshPower(); forceIdle(0); handleControl(control(Type::SleepRequest, 27), 0); update(3000);
+    freshPower(); idleAfterInactivity(0); handleControl(control(Type::SleepRequest, 27), 0); update(3000);
     assert(!transaction().active && localState() == LocalState::IDLE && peerState() == PeerState::UNKNOWN);
-    freshPower(); forceIdle(0); requestSleep(27, 0);
+    freshPower(); idleAfterInactivity(0); requestSleep(27, 0);
     handleControl(control(Type::SleepReady, 27), 2999);
     handleControl(control(Type::SleepReady, 27), 4999);
     assert(transaction().hardDeadline == 5000); update(5000);
@@ -408,10 +417,10 @@ void testFsm()
     // cannot extend the hard limit or send a CANCEL that kills the winning ID.
     for (uint16_t peerId : {uint16_t(20), uint16_t(44)})
     {
-        freshPower(Device::Bubu); forceIdle(0); requestSleep(20, 0);
+        freshPower(Device::Bubu); idleAfterInactivity(0); requestSleep(20, 0);
         handleControl(control(Type::SleepRequest, peerId, 0, Device::Dudu), 100);
         assert(transaction().role == SleepRole::COORDINATOR && transaction().sleepId == 20 && intents.size() == 1);
-        freshPower(Device::Dudu); forceIdle(0); requestSleep(peerId, 0);
+        freshPower(Device::Dudu); idleAfterInactivity(0); requestSleep(peerId, 0);
         handleControl(control(Type::SleepRequest, 20, 0, Device::Bubu), 100);
         assert(transaction().role == SleepRole::PARTICIPANT && transaction().sleepId == 20);
         assert(transaction().hardDeadline == 5000 && intents.size() == 2 && intents.back().type == Type::SleepReady);
@@ -419,36 +428,38 @@ void testFsm()
         controlSent(Type::SleepAck, 20, 210); assert(localState() == LocalState::SLEEPING);
     }
     // Tie-break never takes over an already committed coordinator transaction.
-    freshPower(Device::Dudu); forceIdle(0); requestSleep(44, 0);
+    freshPower(Device::Dudu); idleAfterInactivity(0); requestSleep(44, 0);
     handleControl(control(Type::SleepReady, 44, 90, Device::Bubu), 10);
     handleControl(control(Type::SleepRequest, 20, 0, Device::Bubu), 20);
     assert(transaction().role == SleepRole::COORDINATOR && transaction().sleepId == 44);
 
     // Different failure knowledge before and after COMMIT.
-    freshPower(); forceIdle(0); requestSleep(27, 0); controlFailed(Type::SleepRequest, 27, 900);
+    freshPower(); idleAfterInactivity(0); requestSleep(27, 0); controlFailed(Type::SleepRequest, 27, 900);
     assert(peerState() == PeerState::OFFLINE && localState() == LocalState::IDLE);
-    freshPower(); forceIdle(0); requestSleep(27, 0); handleControl(control(Type::SleepReady, 27), 10);
+    freshPower(); idleAfterInactivity(0); requestSleep(27, 0); handleControl(control(Type::SleepReady, 27), 10);
     controlFailed(Type::SleepCommit, 27, 900); assert(peerState() == PeerState::UNKNOWN && !transaction().active);
-    freshPower(); forceIdle(0); handleControl(control(Type::SleepRequest, 27), 0);
+    freshPower(); idleAfterInactivity(0); handleControl(control(Type::SleepRequest, 27), 0);
     handleControl(control(Type::SleepCommit, 27), 10); controlSent(Type::SleepAck, 27, 10);
     controlFailed(Type::SleepAck, 27, 910);
     assert(peerState() == PeerState::UNKNOWN && localState() == LocalState::SLEEPING);
-    freshPower(); forceIdle(0); acceptIntent = false; assert(!requestSleep(27, 0));
+    freshPower(); idleAfterInactivity(0); acceptIntent = false; assert(!requestSleep(27, 0));
     assert(!transaction().active && cooldownLeftMs(0) == 3000);
 
     // uint32 millis rollover, including a zero hard deadline.
     freshPower(); const uint32_t start = UINT32_MAX - 4999;
-    forceIdle(start); requestSleep(27, start);
+    idleAfterInactivity(start); requestSleep(27, start);
     handleControl(control(Type::SleepReady, 27), start + 2999);
     update(UINT32_MAX); assert(transaction().active); update(0);
     assert(!transaction().active && cooldownLeftMs(0) == 3000);
     update(3000); assert(cooldownLeftMs(3000) == 0);
     // Request IDs use serial arithmetic, independent of the clock rollover.
-    freshPower(); forceIdle(0); handleControl(control(Type::SleepRequest, 65530), 0);
-    injectActivity(10); update(3010); forceIdle(3010);
+    freshPower(); idleAfterInactivity(0); handleControl(control(Type::SleepRequest, 65530), 0);
+    injectActivity(10); update(3010); idleAfterInactivity(3010);
     handleControl(control(Type::SleepRequest, 5), 3011); assert(transaction().sleepId == 5);
 }
 
+bool queueTestSleepControl(Type type, uint16_t sleepId);
+extern bool deferControlsForTest;
 void freshApp()
 {
     motionReady = displayReady = true; displayedStatus = {}; // Model an initialized awake runtime.
@@ -467,10 +478,10 @@ void freshApp()
     protocolReady = true; waitingForAck = false; retryCount = 0; nextMessageId = 1;
     haveLastPeerEvent = false; lastPeerEventId = 0; testAckAlreadyDropped = false;
     recentUserEventCount = nextUserEventSlot = 0;
-    nextEventTime = 100000; controlCount = 0; pauseAutomaticHeartbeats = true; delayControlsForTest = false;
+    nextEventTime = 100000; controlCount = 0; suppressPeriodicForTest = true; deferControlsForTest = false;
     hostNow = 0; wire.clear(); radioAccepts = true; Serial.log.clear(); Serial.input.clear();
     armAttempts = 0; armResult = CC1101SleepArm::Result::Ready;
-    armInitializations = 0; wakeRecoveries = 0; benchSleepCalls = 0;
+    armInitializations = 0; wakeRecoveries = 0;
     injectedBoot = {}; injectWakePacket = false;
     awakeAckBusy = awakeRuntimeStopped = false; awakeServices = 0;
     wakeEvents.clear(); wakeTxResult = CC1101WakeTx::Result::AckTimeout;
@@ -486,13 +497,14 @@ void freshApp()
     motionIntLevel = 0; motionStartup = MotionEvent::None;
     bootInfo = {}; buttonLevel = HIGH; beginButton(); buttonConfigurations = 0;
     motionPendingEvent = MotionEvent::None; motionEventPolls = 0;
-    PowerManager::begin(LOCAL_DEVICE, queueSleepControl);
+    PowerManager::begin(LOCAL_DEVICE, queueTestSleepControl);
     // Existing protocol tests model an old, stationary runtime with automatic
     // initiation already consumed. Dedicated policy tests arm a fresh episode.
     lastMeaningfulActivity = uint32_t(0 - AUTOMATIC_SLEEP_INACTIVITY_MS);
     automaticSleepArmed = false;
     hostPixel() = {}; led.begin(); hostPixel() = {}; // Fresh awake LED, with startup instrumentation reset.
     led.requests = led.userRequests = 0;
+    haveFarBackgroundHeartbeat = false; lastFarBackgroundHeartbeatAt = 0;
     ledBeginsAtBoot = ledShowsAtBoot = 0;
     hostPixel().onBegin = [] {
         assert(!protocolReady && motionInitializations == 1 && displayInitializations == 1);
@@ -503,7 +515,38 @@ void freshKnownApp(ProximityClassification classification = ProximityClassificat
 {
     freshApp(); proximityClassification = classification;
 }
-void command(char c) { Serial.input.push_back(c); loop(); }
+// Explicit harness setup, never a serial command dispatcher. Delay injection is
+// confined to the FSM's test callback; production queues are immediately due.
+bool deferControlsForTest = false;
+bool queueTestSleepControl(Type type, uint16_t sleepId)
+{
+    const size_t before = controlCount;
+    const bool accepted = queueSleepControl(type, sleepId);
+    if (accepted && deferControlsForTest && controlCount > before)
+        controlQueue[controlCount - 1].notBefore += 1000U;
+    return accepted;
+}
+void idleForTest() { PowerManager::idleAfterInactivity(hostNow); loop(); }
+void requestSleepForTest()
+{
+    assert(protocolReady && !waitingForAck && controlCount == 0);
+    if (PowerManager::requestSleep(nextMessageId++, hostNow)) automaticSleepArmed = false;
+    loop();
+}
+void activityForTest() { noteLocalActivity(hostNow); loop(); }
+void deferControls() { deferControlsForTest = true; loop(); }
+void wakePeerForTest() { requestPeerWake(); loop(); }
+void selectTransportForTest(Transport transport)
+{
+    selectedTransport = transport;
+    automaticSelectionPending = espNowFallbackPending = false;
+    loop();
+}
+void typeSerialForTest(const char* text)
+{
+    while (*text) Serial.input.push_back(*text++);
+    loop();
+}
 void receive(const Protocol::Message& message)
 {
     queueReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message));
@@ -512,6 +555,19 @@ void receive(const Protocol::Message& message)
 Protocol::Message incoming(Type type, uint16_t id, uint16_t packet = 90)
 {
     return control(type, id, packet, PEER_DEVICE);
+}
+void failedSleepEntryForTest()
+{
+    PowerManager::begin(LOCAL_DEVICE, [](Type, uint16_t) { return true; });
+    PowerManager::idleAfterInactivity(hostNow);
+    const auto id = nextMessageId++;
+    assert(PowerManager::requestSleep(id, hostNow));
+    PowerManager::handleControl(incoming(Type::SleepReady, id), hostNow, true);
+    PowerManager::handleControl(incoming(Type::SleepAck, id), hostNow, true);
+    const auto originalFailure = entryFails;
+    entryFails = true; // Exercise abort/cleanup, without throwing a simulated reboot.
+    serviceSleepExecution();
+    entryFails = originalFailure;
 }
 size_t countWire(Type type)
 {
@@ -523,7 +579,7 @@ void testTransport()
 {
     // Receipt ACK never substitutes for SLEEP_ACK; an out-of-order READY can
     // nevertheless retire REQUEST whose receipt ACK was lost.
-    freshApp(); command('i'); command('s'); const auto request = pendingMessage;
+    freshApp(); idleForTest(); requestSleepForTest(); const auto request = pendingMessage;
     assert(request.type == Type::SleepRequest && request.messageId == request.ackForMessageId);
     receive(incoming(Type::Ack, request.messageId));
     assert(transaction().active && transaction().phase == SleepPhase::WAIT_READY);
@@ -534,17 +590,17 @@ void testTransport()
     receive(incoming(Type::SleepAck, request.messageId));
     assert(localState() == LocalState::SLEEPING && peerState() == PeerState::SLEEPING);
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
     assert(Serial.log.find("sleepId=" + std::to_string(request.messageId) + " | role=COORDINATOR") != std::string::npos);
     receive(incoming(Type::SleepAck, request.messageId));
     for (int i = 0; i < 100; ++i) loop();
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
 
     // Missing peer: exactly three sends of the same REQUEST ID, then no loop.
-    freshApp(); command('i'); command('s'); auto began = ackWaitStart; auto id = pendingMessage.messageId;
+    freshApp(); idleForTest(); requestSleepForTest(); auto began = ackWaitStart; auto id = pendingMessage.messageId;
     hostNow = began + 299; loop(); assert(countWire(Type::SleepRequest) == 1);
     hostNow = began + 300; loop(); assert(retryCount == 1);
     hostNow = began + 600; loop(); assert(retryCount == 2);
@@ -556,7 +612,7 @@ void testTransport()
     assert(armAttempts == 0);
 
     // Duplicates coalesce with in-flight responses, never restart their budget.
-    freshApp(); command('i'); const auto peerRequest = incoming(Type::SleepRequest, 20);
+    freshApp(); idleForTest(); const auto peerRequest = incoming(Type::SleepRequest, 20);
     receive(peerRequest); assert(pendingMessage.type == Type::SleepReady);
     began = ackWaitStart; id = pendingMessage.messageId;
     receive(peerRequest);
@@ -576,7 +632,7 @@ void testTransport()
     assert(armAttempts == 0);
     receive(incoming(Type::Ack, finalAck.messageId)); assert(!waitingForAck && peerState() == PeerState::SLEEPING);
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
     assert(Serial.log.find("sleepId=20 | role=PARTICIPANT") != std::string::npos);
     receive(peerCommit); assert(countWire(Type::SleepAck) == 3);
@@ -584,11 +640,11 @@ void testTransport()
     receive(incoming(Type::Ack, pendingMessage.messageId));
     for (int i = 0; i < 100; ++i) loop();
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
 
     // Real loop collision retires the losing request, even with equal IDs.
-    freshApp(); command('i'); command('s'); id = pendingMessage.messageId;
+    freshApp(); idleForTest(); requestSleepForTest(); id = pendingMessage.messageId;
     receive(incoming(Type::SleepRequest, id));
     if (LOCAL_DEVICE == Device::Bubu)
         assert(transaction().role == SleepRole::COORDINATOR && pendingMessage.type == Type::SleepRequest);
@@ -597,7 +653,7 @@ void testTransport()
     assert(countWire(Type::SleepCancel) == 0);
 
     // Callback still copies only: state changes occur when loop drains the queue.
-    freshApp(); command('i'); auto message = incoming(Type::SleepRequest, 30);
+    freshApp(); idleForTest(); auto message = incoming(Type::SleepRequest, 30);
     queueReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message));
     assert(!transaction().active && wire.empty()); loop(); assert(transaction().active);
     // Background Heartbeat and its duplicate preserve negotiation; real local Activity cancels.
@@ -609,13 +665,13 @@ void testTransport()
     receive(incoming(Type::SleepCommit, 30)); assert(localState() == LocalState::ACTIVE);
 
     // Cancel removes a queued unsent COMMIT and an old in-flight REQUEST.
-    freshApp(); command('d'); command('i'); command('s');
-    assert(controlCount == 1 && !waitingForAck); command('a');
+    freshApp(); deferControls(); idleForTest(); requestSleepForTest();
+    assert(controlCount == 1 && !waitingForAck); activityForTest();
     assert(controlCount == 0 && localState() == LocalState::ACTIVE);
     for (int i = 0; i < 600; ++i) loop(); assert(countWire(Type::SleepRequest) == 0);
-    freshApp(); command('i'); command('s'); id = pendingMessage.messageId; command('d');
+    freshApp(); idleForTest(); requestSleepForTest(); id = pendingMessage.messageId; deferControls();
     receive(incoming(Type::SleepReady, id)); assert(controlCount == 1 && !waitingForAck);
-    command('a'); for (int i = 0; i < 600; ++i) loop(); assert(countWire(Type::SleepCommit) == 0);
+    activityForTest(); for (int i = 0; i < 600; ++i) loop(); assert(countWire(Type::SleepCommit) == 0);
 
     // Existing EVENT retry budget/ID/ACK matching remains unchanged.
     freshApp(); startHeartbeatEvent(); id = pendingMessage.messageId; began = ackWaitStart;
@@ -625,17 +681,17 @@ void testTransport()
     for (const auto& packet : wire) if (packet.type == Type::Event) assert(packet.messageId == id);
     receive(incoming(Type::Ack, id)); assert(!waitingForAck);
     // Automatic EVENTs are suppressed in negotiation and simulated SLEEPING.
-    freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = 0;
-    PowerManager::forceIdle(0); PowerManager::requestSleep(nextMessageId++, 0); loop();
+    freshApp(); suppressPeriodicForTest = false; nextEventTime = 0;
+    PowerManager::idleAfterInactivity(0); PowerManager::requestSleep(nextMessageId++, 0); loop();
     assert(countWire(Type::Event) == 0);
     id = transaction().sleepId; receive(incoming(Type::SleepReady, id)); receive(incoming(Type::SleepAck, id));
     for (int i = 0; i < 600; ++i) loop(); assert(countWire(Type::Event) == 0);
     // A rejected first send cannot close the participant before a later accepted retry.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20)); radioAccepts = false;
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20)); radioAccepts = false;
     receive(incoming(Type::SleepCommit, 20, 21)); assert(transaction().active);
     radioAccepts = true; hostNow = ackWaitStart + 300; loop(); assert(localState() == LocalState::SLEEPING);
     // Even a delayed direct retry checks the absolute deadline before sending.
-    freshApp(); command('i'); command('s'); id = transaction().sleepId;
+    freshApp(); idleForTest(); requestSleepForTest(); id = transaction().sleepId;
     receive(incoming(Type::SleepReady, id)); auto commits = countWire(Type::SleepCommit);
     hostNow = transaction().hardDeadline; transmitPendingMessage(true);
     assert(countWire(Type::SleepCommit) == commits && !transaction().active && !waitingForAck);
@@ -643,7 +699,7 @@ void testTransport()
     receive(incoming(Type::Ack, wire.back().messageId)); // Late CANCEL receipt, not sleep evidence.
     assert(peerState() == PeerState::UNKNOWN);
     // Losing all receipts for the final SLEEP_ACK is bounded and reported UNKNOWN.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
     receive(incoming(Type::SleepCommit, 20, 21)); began = ackWaitStart;
     hostNow = began + 300; loop(); hostNow = began + 600; loop(); hostNow = began + 900; loop();
     assert(countWire(Type::SleepAck) == 3 && !waitingForAck && !transaction().active);
@@ -654,12 +710,12 @@ void testDelayedCollision()
 {
     // Replay both sides of the same timed hardware exchange, each against its
     // peer's scheduled packets. Both start as coordinators before any REQUEST
-    // is delivered. Use the real loop/outbox and the unchanged d=1000ms delay.
-    freshApp(); delayControlsForTest = true;
+    // is delivered. Use the real loop/outbox and the harness-injected 1000ms queue delay.
+    freshApp(); deferControlsForTest = true;
     const uint16_t ownId = LOCAL_DEVICE == Device::Bubu ? 40 : 33;
     hostNow = LOCAL_DEVICE == Device::Bubu ? 100 : 0;
     nextMessageId = ownId;
-    PowerManager::forceIdle(hostNow);
+    PowerManager::idleAfterInactivity(hostNow);
     assert(PowerManager::requestSleep(nextMessageId++, hostNow));
     assert(transaction().role == SleepRole::COORDINATOR);
     const uint32_t hard = transaction().hardDeadline;
@@ -711,19 +767,19 @@ void testDelayedCollision()
     assert(Serial.log.find(std::string("SLEEP EXECUTION READY | sleepId=40 | role=") + role) != std::string::npos);
     for (int i = 0; i < 100; ++i) loop();
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
 }
 
 void testFinalSendBounds()
 {
-    // READY is already delivered. Delay final SLEEP_ACK using the actual bench
-    // setting; COMMIT must create one new phase budget, not a new transaction.
+    // READY is already delivered. Delay final SLEEP_ACK using the harness callback
+    // delay; COMMIT must create one new phase budget, not a new transaction.
     const auto prepare = [](uint32_t commitAt)
     {
-        freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+        freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
         receive(incoming(Type::Ack, pendingMessage.messageId));
-        delayControlsForTest = true;
+        deferControlsForTest = true;
         const uint32_t hard = transaction().hardDeadline;
         hostNow = commitAt; receive(incoming(Type::SleepCommit, 20, 21));
         assert(transaction().phase == SleepPhase::WAIT_SLEEP_ACK_TX && transaction().active);
@@ -790,7 +846,7 @@ void testFinalSendBounds()
         prepare(500);
         hostNow = 800;
         if (remoteCancel) receive(incoming(Type::SleepCancel, 20));
-        else command('a');
+        else activityForTest();
         const auto expected = remoteCancel ? LocalState::IDLE : LocalState::ACTIVE;
         assert(!transaction().active && localState() == expected && controlCount == 0);
         receive(incoming(Type::SleepCommit, 20, 21)); // Stale after cancellation.
@@ -806,7 +862,7 @@ void testSleepDecisionInterface()
     SleepDecision decision{};
     for (bool participant : {false, true})
     {
-        freshPower(); forceIdle(0);
+        freshPower(); idleAfterInactivity(0);
         assert(!takeSleepDecision(decision));
         if (participant)
         {
@@ -834,7 +890,7 @@ void testSleepDecisionInterface()
     }
 
     // Stale controls and cancellation never create a decision.
-    freshPower(); forceIdle(0);
+    freshPower(); idleAfterInactivity(0);
     for (auto type : {Type::SleepReady, Type::SleepCommit, Type::SleepAck, Type::SleepCancel})
     {
         handleControl(control(type, 99), 0);
@@ -847,14 +903,14 @@ void testSleepDecisionInterface()
     // A pending decision cannot survive activity wake or initialization.
     for (bool reinitialize : {false, true})
     {
-        freshPower(); forceIdle(0); requestSleep(27, 0);
+        freshPower(); idleAfterInactivity(0); requestSleep(27, 0);
         handleControl(control(Type::SleepReady, 27), 10);
         handleControl(control(Type::SleepAck, 27), 20);
         if (reinitialize) PowerManager::begin(Device::Bubu, captureIntent);
         else { injectActivity(30); update(280); }
         assert(!takeSleepDecision(decision));
         // The latch is per completion, not a once-per-boot flag.
-        forceIdle(300); assert(requestSleep(28, 300));
+        idleAfterInactivity(300); assert(requestSleep(28, 300));
         handleControl(control(Type::SleepReady, 28), 310);
         handleControl(control(Type::SleepAck, 28), 320);
         assert(takeSleepDecision(decision) && decision.sleepId == 28);
@@ -866,7 +922,7 @@ void testExecutionDrain()
 {
     // Final ACK retries block physical sleep. Exhaustion now aborts execution
     // instead of physically sleeping without the participant receipt.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
     receive(incoming(Type::SleepCommit, 20, 21));
     const auto began = ackWaitStart;
     const auto finalId = pendingMessage.messageId;
@@ -882,20 +938,20 @@ void testExecutionDrain()
     for (const auto& packet : wire)
         if (packet.type == Type::SleepAck) assert(packet.messageId == finalId);
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
-    assert(benchSleepCalls == 0);
+    assert(coordinatedAttempts == 0);
     assert(armAttempts == 0);
     for (int i = 0; i < 100; ++i) loop();
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 0);
-    assert(benchSleepCalls == 0);
+    assert(coordinatedAttempts == 0);
     assert(armAttempts == 0);
 
     assert(localState() == LocalState::IDLE && physicalSleeps == 0 && coordinatedAttempts == 0);
 
     // Receipt followed by duplicate COMMIT in the same RX batch can leave a
     // required replay queued but not yet eligible for TX. Queue also must drain.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
     const auto commit = incoming(Type::SleepCommit, 20, 21);
-    receive(commit); delayControlsForTest = true;
+    receive(commit); deferControlsForTest = true;
     const auto receipt = incoming(Type::Ack, pendingMessage.messageId);
     for (const auto& packet : {receipt, commit})
         queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
@@ -909,15 +965,15 @@ void testExecutionDrain()
     assert(armAttempts == 0);
     receive(incoming(Type::Ack, pendingMessage.messageId));
     assert(occurrences(Serial.log, "SLEEP EXECUTION READY |") == 1);
-    assert(benchSleepCalls == 0 && coordinatedAttempts == 1 && physicalSleeps == 1);
+    assert(coordinatedAttempts == 1 && physicalSleeps == 1);
     assert(armAttempts == 1);
 
     // Activity after semantic completion but before transport drain revokes
     // the unconsumed decision, even if a late receipt/COMMIT follows.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
     receive(commit); const auto pendingId = pendingMessage.messageId;
     assert(localState() == LocalState::SLEEPING && waitingForAck);
-    command('a');
+    activityForTest();
     receive(incoming(Type::Ack, pendingId)); receive(commit);
     for (int i = 0; i < 100; ++i) loop();
     assert(localState() == LocalState::ACTIVE);
@@ -936,7 +992,7 @@ void testArmFailure()
     {
         for (bool participant : {false, true})
         {
-            freshApp(); armResult = failure; command('i');
+            freshApp(); armResult = failure; idleForTest();
             uint16_t id = 20;
             if (participant)
             {
@@ -947,7 +1003,7 @@ void testArmFailure()
             }
             else
             {
-                command('s'); id = transaction().sleepId;
+                requestSleepForTest(); id = transaction().sleepId;
                 receive(incoming(Type::SleepReady, id));
                 receive(incoming(Type::SleepAck, id));
             }
@@ -962,8 +1018,7 @@ void testArmFailure()
             assert(localState() == LocalState::IDLE && peerState() == PeerState::SLEEPING);
             assert(!transaction().active && cooldownLeftMs(hostNow) == 0);
             assert(coordinatedAttempts == 1 && physicalSleeps == 0);
-            command('p'); // Serial command remains usable after failure.
-            command('a'); hostNow += 250; loop();
+            activityForTest(); hostNow += 250; loop();
             assert(localState() == LocalState::ACTIVE);
             // ESP-NOW remains usable after either role's arm failure.
             startHeartbeatEvent(); receive(incoming(Type::Ack, pendingMessage.messageId));
@@ -1009,7 +1064,7 @@ void testRtcHistoryRestart()
     startHeartbeatEvent(); assert(pendingMessage.messageId == 0 && nextMessageId == 1);
     receive(incoming(Type::Ack, 0));
     Protocol::Message event{1, Type::Event, 0xFFFF, PEER_DEVICE, Protocol::EventType::Heartbeat, 0};
-    command('i'); command('s');
+    idleForTest(); requestSleepForTest();
     receive(event);
     assert(transaction().active && occurrences(Serial.log, "RX DUPLICATE") == 1);
     assert(occurrences(Serial.log, "RX NEW EVENT") == 0 && wire.back().ackForMessageId == 0xFFFF);
@@ -1021,7 +1076,7 @@ void testRtcHistoryRestart()
     // live work. Only history is encoded; none of that work survives restart.
     freshApp(); startHeartbeatEvent(); hostNow = ackWaitStart + 300; loop();
     assert(waitingForAck && retryCount == 1);
-    PowerManager::forceIdle(hostNow);
+    PowerManager::idleAfterInactivity(hostNow);
     assert(PowerManager::requestSleep(nextMessageId++, hostNow));
     queueReceivedData(reinterpret_cast<const uint8_t*>(&event), sizeof(event));
     assert(transaction().active && controlCount == 1 && !receiveQueue->items.empty());
@@ -1039,7 +1094,7 @@ void testRtcHistoryRestart()
 
     // Completed participant: save before consuming SleepDecision. Persist the
     // REQUEST watermark, not the decision or completed COMMIT replay authority.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 0xFFFF));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 0xFFFF));
     const auto commit = incoming(Type::SleepCommit, 0xFFFF, 21);
     PowerManager::handleControl(commit, hostNow, false); sendNextControl();
     assert(localState() == LocalState::SLEEPING && waitingForAck);
@@ -1047,7 +1102,7 @@ void testRtcHistoryRestart()
     saveRtcHistory(); simulateHistoryRestart();
     const auto history = PowerManager::exportHistory();
     assert(history.havePeerRequest && history.newestPeerRequest == 0xFFFF);
-    command('i');
+    idleForTest();
     receive(incoming(Type::SleepRequest, 0xFFFF));
     receive(incoming(Type::SleepRequest, 0xFFFE));
     receive(commit); receive(incoming(Type::SleepAck, 0xFFFF));
@@ -1055,9 +1110,9 @@ void testRtcHistoryRestart()
     assert(armAttempts == 0 && localState() == LocalState::IDLE);
     receive(incoming(Type::SleepRequest, 0)); // Existing half-range arithmetic accepts rollover.
     assert(transaction().active && transaction().sleepId == 0);
-    command('a'); assert(cooldownLeftMs(hostNow) > 0);
+    activityForTest(); assert(cooldownLeftMs(hostNow) > 0);
     saveRtcHistory(); simulateHistoryRestart(); // No old cooldown or timestamps.
-    command('i'); receive(incoming(Type::SleepRequest, 0));
+    idleForTest(); receive(incoming(Type::SleepRequest, 0));
     assert(!transaction().active); // Cancellation's watermark is retained too.
     receive(incoming(Type::SleepRequest, 1)); assert(transaction().active);
 
@@ -1106,52 +1161,44 @@ void testBootRouting()
         assert(nextMessageId == (validRtc ? 124 : 1));
         if (validRtc) assert(PowerManager::exportHistory().newestPeerRequest == 40);
         for (int i = 0; i < 20; ++i) loop();
-        command('p'); assert(wakeRecoveries == 1 && armInitializations == 0);
+        typeSerialForTest("p"); assert(wakeRecoveries == 1 && armInitializations == 0);
     }
-    // x cannot interrupt ACK/retry, an unsent control, received work or negotiation.
-    freshApp(); startHeartbeatEvent(); command('x'); assert(benchSleepCalls == 0);
-    freshApp(); command('d'); command('i'); command('s'); command('x'); assert(benchSleepCalls == 0);
-    freshApp(); command('i'); command('s'); receive(incoming(Type::Ack, pendingMessage.messageId));
-    command('x'); assert(benchSleepCalls == 0); // Waiting READY, transport already drained.
-    freshApp(); queueReceivedData(reinterpret_cast<const uint8_t*>(&injectedPacket), sizeof(injectedPacket));
-    command('x'); assert(benchSleepCalls == 0);
-    freshApp(); command('x');
-    assert(benchSleepCalls == 1 && !transaction().active && countWire(Type::SleepRequest) == 0);
-    assert(localState() == LocalState::ACTIVE && peerState() == PeerState::UNKNOWN);
-    puts("PASS: cold/deep startup routing, RTC before wake EVENT dedup, fresh runtime, one recovery, x transport/FSM guards");
+    assert(Serial.log.find("Sleep handshake bench") == std::string::npos);
+    assert(Serial.log.find("Power tests:") == std::string::npos);
+    puts("PASS: cold/deep startup routing, RTC before wake EVENT dedup, fresh runtime, one recovery, no command banner");
 }
 
-void testManualWakeTx()
+void testPeerWakeRequestGuards()
 {
-    freshApp(); protocolReady = false; command('w');
+    freshApp(); protocolReady = false; wakePeerForTest();
     assert(wakeEvents.empty() && nextMessageId == 1);
-    freshApp(); startHeartbeatEvent(); const auto id = nextMessageId; command('w');
+    freshApp(); startHeartbeatEvent(); const auto id = nextMessageId; wakePeerForTest();
     assert(wakeEvents.empty() && nextMessageId == id);
-    freshApp(); command('d'); command('i'); command('s'); command('w');
+    freshApp(); deferControls(); idleForTest(); requestSleepForTest(); wakePeerForTest();
     assert(wakeEvents.empty());
-    freshApp(); command('i'); command('s'); receive(incoming(Type::Ack, pendingMessage.messageId));
-    assert(!waitingForAck && transaction().active); command('w'); assert(wakeEvents.empty());
-    // A queued control blocks w even without an active FSM transaction.
-    freshApp(); assert(queueSleepControl(Type::SleepReady, 40)); command('w'); assert(wakeEvents.empty());
+    freshApp(); idleForTest(); requestSleepForTest(); receive(incoming(Type::Ack, pendingMessage.messageId));
+    assert(!waitingForAck && transaction().active); wakePeerForTest(); assert(wakeEvents.empty());
+    // A queued control blocks peer wake even without an active FSM transaction.
+    freshApp(); assert(queueSleepControl(Type::SleepReady, 40)); wakePeerForTest(); assert(wakeEvents.empty());
     freshApp(); queueReceivedData(reinterpret_cast<const uint8_t*>(&injectedPacket), sizeof(injectedPacket));
-    command('w'); assert(wakeEvents.empty());
+    wakePeerForTest(); assert(wakeEvents.empty());
     freshApp(); nextMessageId = 0xFFFF;
-    command('w'); assert(wakeEvents.size() == 1 && nextMessageId == 0);
+    wakePeerForTest(); assert(wakeEvents.size() == 1 && nextMessageId == 0);
     assert(wakeEvents[0].messageId == 0xFFFF && wakeEvents[0].type == Type::Event &&
            wakeEvents[0].version == Protocol::VERSION && wakeEvents[0].sender == LOCAL_DEVICE &&
            wakeEvents[0].event == Protocol::EventType::Heartbeat && wakeEvents[0].ackForMessageId == 0);
     assert(Serial.log.find("GIVE_UP | retries=2") != std::string::npos);
     for (unsigned i = 0; i < 20; ++i) loop();
     assert(wakeEvents.size() == 1 && nextMessageId == 0 && wire.empty() && !transaction().active);
-    command('w'); assert(wakeEvents.size() == 2 && wakeEvents[1].messageId == 0 && nextMessageId == 1);
+    wakePeerForTest(); assert(wakeEvents.size() == 2 && wakeEvents[1].messageId == 0 && nextMessageId == 1);
     // Existing ESP-NOW EVENT path still uses that same allocator afterwards.
     startHeartbeatEvent(); assert(pendingMessage.messageId == 1 && nextMessageId == 2);
-    puts("PASS: manual w runtime/transport/FSM guards, one allocator increment, rollover, no automatic wake TX");
+    puts("PASS: peer wake helper runtime/transport/FSM guards, one allocator increment, rollover, no automatic wake TX");
 }
 
 void completedAwaitingCallbacks(bool participant)
 {
-    freshApp(); command('i');
+    freshApp(); idleForTest();
     if (participant)
     {
         receive(incoming(Type::SleepRequest, 20));
@@ -1162,7 +1209,7 @@ void completedAwaitingCallbacks(bool participant)
     }
     else
     {
-        command('s'); const auto id = transaction().sleepId;
+        requestSleepForTest(); const auto id = transaction().sleepId;
         receive(incoming(Type::SleepReady, id));
         mockedTxInFlight = 1; // Includes final fire-and-forget receipt ACK.
         receive(incoming(Type::SleepAck, id));
@@ -1187,7 +1234,7 @@ void testCoordinatedExecution()
         assert(coordinatedAttempts == 1);
     }
     // Callbacks finishing FIRST is insufficient: final packet receipt is required.
-    freshApp(); command('i'); receive(incoming(Type::SleepRequest, 20));
+    freshApp(); idleForTest(); receive(incoming(Type::SleepRequest, 20));
     receive(incoming(Type::SleepCommit, 20, 21));
     assert(mockedTxInFlight == 0 && waitingForAck); loop();
     assert(physicalSleeps == 0);
@@ -1236,7 +1283,7 @@ void testCoordinatedExecution()
         assert(coordinatedAttempts == 1 && physicalSleeps == 0);
     }
     // Rejected final receipt must not turn into physical sleep with zero callbacks.
-    freshApp(); command('i'); command('s'); const auto id = transaction().sleepId;
+    freshApp(); idleForTest(); requestSleepForTest(); const auto id = transaction().sleepId;
     receive(incoming(Type::SleepReady, id)); radioAccepts = false;
     receive(incoming(Type::SleepAck, id));
     assert(localState() == LocalState::IDLE && peerState() == PeerState::SLEEPING && physicalSleeps == 0);
@@ -1244,7 +1291,7 @@ void testCoordinatedExecution()
     // The failure notification cannot cancel an ACTIVE/negotiating FSM.
     freshPower(); notifySleepExecutionFailed(0);
     assert(localState() == LocalState::ACTIVE && cooldownLeftMs(0) == 0);
-    forceIdle(0); requestSleep(27, 0); notifySleepExecutionFailed(10);
+    idleAfterInactivity(0); requestSleep(27, 0); notifySleepExecutionFailed(10);
     assert(transaction().active && localState() == LocalState::SLEEP_NEGOTIATING);
     handleControl(control(Type::SleepReady, 27), 10);
     handleControl(control(Type::SleepAck, 27), 20);
@@ -1256,16 +1303,16 @@ void testCoordinatedExecution()
     assert(cooldownLeftMs(100) == 2921); // Duplicate notification cannot renew cooldown.
     assert(!requestSleep(28, 22));
     update(3021); assert(!transaction().active && !takeSleepDecision(decision));
-    // Manual x uses the same strengthened callback gate. w remains independent.
-    freshApp(); mockedTxInFlight = 1; command('x'); assert(benchSleepCalls == 0);
-    mockedTxInFlight = 0; command('x'); assert(benchSleepCalls == 1);
+    // Automatic execution waits for outstanding radio callbacks.
+    completedAwaitingCallbacks(false); loop(); assert(coordinatedAttempts == 0);
+    mockedTxInFlight = 0; loop(); assert(coordinatedAttempts == 1 && physicalSleeps == 1);
 
     // Timer wake restores history only, with the actual setup routing and new
     // runtime defaults. UNKNOWN stays silent while one bootstrap check starts.
     freshApp();
     RtcState::save({123, true, 70, {true, 40}});
     protocolReady = false; pendingMessage = {}; ackWaitStart = 0;
-    pauseAutomaticHeartbeats = false;
+    suppressPeriodicForTest = false;
     injectedBoot.deep = true; injectedBoot.cause = CC1101WakeRecovery::Cause::Timer;
     delete receiveQueue; receiveQueue = nullptr;
     setup();
@@ -1293,8 +1340,8 @@ void testAwakeWakeService()
     freshApp();
     awakeAckBusy = true;
     assert(std::string(sleepTransportBlockedReason()) == "CC1101_RUNTIME_BUSY");
-    command('w'); assert(wakeEvents.empty());
-    command('x'); assert(benchSleepCalls == 0);
+    wakePeerForTest(); assert(wakeEvents.empty());
+    typeSerialForTest("x"); assert(coordinatedAttempts == 0);
     // The radio's in-flight ACK must not prevent ordinary ESP-NOW receipt work.
     startHeartbeatEvent();
     const auto id = pendingMessage.messageId;
@@ -1302,7 +1349,7 @@ void testAwakeWakeService()
     assert(!waitingForAck && peerState() == PeerState::ONLINE && awakeServices >= 3);
     awakeAckBusy = false;
     assert(sleepTransportBlockedReason() == nullptr);
-    command('w'); assert(wakeEvents.size() == 1);
+    wakePeerForTest(); assert(wakeEvents.size() == 1);
     completedAwaitingCallbacks(false);
     mockedTxInFlight = 0; awakeAckBusy = true;
     loop(); assert(physicalSleeps == 0 && coordinatedAttempts == 0);
@@ -1372,9 +1419,9 @@ void testMotionSleepEntry()
         for (unsigned i = 0; i < 20; ++i) loop();
         assert(motionPreparations == 1 && wakeEvents.empty());
     }
-    freshApp(); motionPrepareOk = false;
-    command('x');
-    assert(benchSleepCalls == 0 && motionCancels == 1 && localState() == LocalState::ACTIVE);
+    completedAwaitingCallbacks(false); mockedTxInFlight = 0; motionPrepareOk = false;
+    loop();
+    assert(coordinatedAttempts == 0 && motionCancels == 1 && localState() == LocalState::IDLE);
 
     // All deep sources restore RTC and inspect retained CC before Motion.
     for (uint64_t mask : {0ULL, 8ULL, 16ULL, 24ULL})
@@ -1469,7 +1516,7 @@ void testAwakeMotionDiagnostics()
     for (bool negotiating : {false, true}) for (bool sensorOk : {false, true})
     {
         freshApp();
-        if (negotiating) { command('i'); command('s'); }
+        if (negotiating) { idleForTest(); requestSleepForTest(); }
         motionInitOk = sensorOk;
         const auto local = localState();
         const auto peer = peerState();
@@ -1506,7 +1553,7 @@ void testAwakeMotionDiagnostics()
         assert(transaction().role == sleep.role && transaction().phase == sleep.phase);
         assert(transaction().startedAt == sleep.startedAt && transaction().phaseDeadline == sleep.phaseDeadline);
         assert(transaction().hardDeadline == sleep.hardDeadline && cooldownLeftMs(hostNow) == 0);
-        assert(nextMessageId == id && nextEventTime == heartbeatAt && pauseAutomaticHeartbeats);
+        assert(nextMessageId == id && nextEventTime == heartbeatAt && suppressPeriodicForTest);
         assert(wire.size() == sent && wakeEvents.empty() && controlCount == queued);
         assert(waitingForAck == waiting && retryCount == retries);
         assert(memcmp(&pendingMessage, &pending, sizeof(pending)) == 0);
@@ -1517,14 +1564,14 @@ void testAwakeMotionDiagnostics()
     // A normally scheduled heartbeat still runs, identically with or without motion.
     for (auto event : {MotionEvent::None, MotionEvent::Activity, MotionEvent::Inactivity})
     {
-        freshKnownApp(); pauseAutomaticHeartbeats = false; nextEventTime = 10;
+        freshKnownApp(); suppressPeriodicForTest = false; nextEventTime = 10;
         motionPendingEvent = event;
         loop(); // Not due yet: movement must not pull the schedule forward.
         assert(wire.empty() && nextEventTime == 10 && nextMessageId == 1);
         motionPendingEvent = event;
         loop();
         assert(wire.size() == 1 && wire[0].type == Type::Event && wire[0].messageId == 1);
-        assert(waitingForAck && nextMessageId == 2 && nextEventTime == 10 && !pauseAutomaticHeartbeats);
+        assert(waitingForAck && nextMessageId == 2 && nextEventTime == 10 && !suppressPeriodicForTest);
         assert(localState() == LocalState::ACTIVE && peerState() == PeerState::UNKNOWN && wakeEvents.empty());
     }
     freshApp(); protocolReady = false; motionPendingEvent = MotionEvent::Activity;
@@ -1615,8 +1662,8 @@ void testMovementBoundaries()
         }
         else
         {
-            command('i');
-            if (state == LocalState::SLEEP_NEGOTIATING) command('s');
+            idleForTest();
+            if (state == LocalState::SLEEP_NEGOTIATING) requestSleepForTest();
         }
         assert(localState() == state);
         movementState = stale;
@@ -1645,9 +1692,9 @@ void testMovementBoundaries()
         freshApp(); movementStep(0, MotionEvent::Activity);
         movementStep(10, MotionEvent::Inactivity);
         motionPrepareOk = !preparationFails; entryFails = !preparationFails;
-        command('x');
+        failedSleepEntryForTest();
         assert(motionPreparations == 1 && motionCancels == 1 && physicalSleeps == 0);
-        assert(localState() == LocalState::ACTIVE && movementState == MovementState::READY);
+        assert(localState() == LocalState::IDLE && movementState == MovementState::READY);
         assert(settleStartedAt == 0);
         movementStep(10 + SETTLE_MS + 1);
         assert(Serial.log.find("MOVEMENT | SETTLED") == std::string::npos);
@@ -1672,7 +1719,7 @@ void testMovementIsolation()
         std::string baselineState;
         for (bool moving : {false, true})
         {
-            freshKnownApp(); pauseAutomaticHeartbeats = !heartbeats; nextEventTime = 50;
+            freshKnownApp(); suppressPeriodicForTest = !heartbeats; nextEventTime = 50;
             ackWaitStart = 0; pendingMessage = {}; // Identical initial transport history for both runs.
             std::string states;
             for (uint32_t time : {0U, 10U, 50U, 350U, 650U, 950U, SETTLE_MS + 10U, SETTLE_MS + 20U})
@@ -1759,7 +1806,7 @@ void testRssiDiagnostics()
                 assert(memcmp(&wire[i], &baselineWire[i], sizeof(Protocol::Message)) == 0);
         }
     }
-    freshApp(); command('i'); command('s');
+    freshApp(); idleForTest(); requestSleepForTest();
     const auto sleep = transaction();
     const auto id = nextMessageId, pendingId = pendingMessage.messageId;
     const auto sent = wire.size(), queued = controlCount;
@@ -1933,7 +1980,7 @@ void testProximityCancellation()
             completedAwaitingCallbacks(false);
             if (state == LocalState::WAKING) injectActivity(hostNow);
         }
-        else { command('i'); if (state == LocalState::SLEEP_NEGOTIATING) command('s'); }
+        else { idleForTest(); if (state == LocalState::SLEEP_NEGOTIATING) requestSleepForTest(); }
         proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = hostNow;
         proximitySampleCount = 1; proximitySamples[0] = {1, -60};
         loop(); assertProximityReset(); assert(localState() == state);
@@ -1943,10 +1990,10 @@ void testProximityCancellation()
     {
         freshApp(); settleForCheck(2000);
         motionPrepareOk = !prepareFails;
-        command('x'); assertProximityReset();
+        failedSleepEntryForTest(); assertProximityReset();
         assert(motionPreparations == 1 && motionCancels == 1 && physicalSleeps == 0);
-        assert(benchSleepCalls == (prepareFails ? 0U : 1U)); // Bench mock returns without sleeping.
-        assert(localState() == LocalState::ACTIVE && Serial.log.find("CANCELLED | reason=SLEEP") != std::string::npos);
+        assert(coordinatedAttempts == (prepareFails ? 0U : 1U));
+        assert(localState() == LocalState::IDLE && Serial.log.find("CANCELLED | reason=SLEEP") != std::string::npos);
     }
     freshApp(); completedAwaitingCallbacks(false);
     proximityUpdateState = ProximityUpdateState::CHECKING; checkStartedAt = hostNow;
@@ -1964,7 +2011,7 @@ void testProximityIsolation()
     {
         freshKnownApp(); ackWaitStart = 0; pendingMessage = {};
         if (measuring) settleForCheck(2000);
-        hostNow = 2020; pauseAutomaticHeartbeats = false; nextEventTime = 2050;
+        hostNow = 2020; suppressPeriodicForTest = false; nextEventTime = 2050;
         std::string state;
         for (uint32_t now : {2050U, 2070U, 2100U, 2110U, 2120U, 2200U, 6200U, 6500U, 6800U, 7100U})
         {
@@ -2003,20 +2050,20 @@ void receiveVia(const Protocol::Message& packet, Transport transport)
 void testApplicationTransports()
 {
     freshKnownApp(); assert(selectedTransport == Transport::ESP_NOW);
-    command('c'); assert(selectedTransport == Transport::CC1101);
-    command('e'); assert(selectedTransport == Transport::ESP_NOW);
-    command('p'); assert(Serial.log.find("selected=ESP-NOW pending=NONE") != std::string::npos);
+    selectTransportForTest(Transport::CC1101); assert(selectedTransport == Transport::CC1101);
+    selectTransportForTest(Transport::ESP_NOW); assert(selectedTransport == Transport::ESP_NOW);
+    typeSerialForTest("p"); assert(Serial.log.find("APP TRANSPORT | selected=") == std::string::npos);
     for (unsigned guard = 0; guard < 6; ++guard)
     {
         freshKnownApp();
         if (guard == 0) startHeartbeatEvent();
-        if (guard == 1) { command('i'); command('s'); }
+        if (guard == 1) { idleForTest(); requestSleepForTest(); }
         if (guard == 2) awakeAckBusy = true;
         if (guard == 3) mockedTxInFlight = 1;
         if (guard == 4) protocolReady = false;
         if (guard == 5) completedAwaitingCallbacks(false);
-        command('c'); assert(selectedTransport == Transport::ESP_NOW);
-        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
+        typeSerialForTest("c"); assert(selectedTransport == Transport::ESP_NOW);
+        assert(Serial.log.find("APP TRANSPORT | REFUSED") == std::string::npos);
     }
     for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
     {
@@ -2025,7 +2072,7 @@ void testApplicationTransports()
         assert(waitingForAck && pendingTransport == transport);
         auto& sent = transport == Transport::ESP_NOW ? wire : ccWire;
         assert(sent.size() == 1 && memcmp(&sent[0], &original, 8) == 0);
-        command(transport == Transport::ESP_NOW ? 'c' : 'e');
+        typeSerialForTest(transport == Transport::ESP_NOW ? "c" : "e");
         assert(selectedTransport == transport && waitingForAck);
         const auto other = transport == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
         receiveVia(incoming(Type::Ack, original.messageId), other);
@@ -2041,7 +2088,7 @@ void testApplicationTransports()
                                " | via=" + transportName(transport)) != std::string::npos);
 
         // One shared retry machine; even a forced selector change cannot reroute
-        // an in-flight packet (the public command already refuses that change).
+        // an in-flight packet (automatic policy defers until the drained boundary).
         freshKnownApp(); selectedTransport = transport; startHeartbeatEvent();
         const auto retryPacket = pendingMessage;
         selectedTransport = other;
@@ -2069,7 +2116,7 @@ void testApplicationTransports()
     }
     // Bidirectional independent EVENTs: receiving/re-ACKing the peer's EVENT
     // cannot replace our own pending packet. First peer receipt is lost.
-    freshKnownApp(); command('c'); startHeartbeatEvent(); const auto ours = pendingMessage;
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); startHeartbeatEvent(); const auto ours = pendingMessage;
     const auto peerEvent = proximityObservation(99, -50, 0).message;
     receiveVia(peerEvent, Transport::CC1101);
     receiveVia(peerEvent, Transport::CC1101);
@@ -2081,18 +2128,18 @@ void testApplicationTransports()
     receiveVia(incoming(Type::Ack, ours.messageId), Transport::CC1101);
     assert(!waitingForAck && retryCount == 0);
 
-    // Receipt TX blocks a due heartbeat, mode change, synchronous w, and sleep.
-    freshKnownApp(); command('c'); ccHoldTx = true;
-    pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+    // Receipt TX blocks a due heartbeat, automatic mode change, peer wake, and sleep.
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); ccHoldTx = true;
+    suppressPeriodicForTest = false; nextEventTime = hostNow;
     receiveVia(peerEvent, Transport::CC1101);
     assert(awakeAckBusy && ccWire.size() == 1 && ccWire[0].type == Type::Ack && !waitingForAck);
-    command('e'); command('w'); command('x');
-    assert(selectedTransport == Transport::CC1101 && wakeEvents.empty() && benchSleepCalls == 0);
+    typeSerialForTest("ewx"); wakePeerForTest();
+    assert(selectedTransport == Transport::CC1101 && wakeEvents.empty() && coordinatedAttempts == 0);
     awakeAckBusy = false; ccHoldTx = false; loop();
     assert(waitingForAck && ccWire.size() == 2 && ccWire.back().type == Type::Event);
 
     // Every sleep control stays on ESP-NOW, independent of the app selector.
-    freshKnownApp(); command('c'); command('i'); command('s');
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); idleForTest(); requestSleepForTest();
     const auto request = pendingMessage;
     assert(request.type == Type::SleepRequest && pendingTransport == Transport::ESP_NOW && ccWire.empty());
     receiveVia(incoming(Type::Ack, request.messageId), Transport::CC1101); assert(waitingForAck);
@@ -2103,16 +2150,16 @@ void testApplicationTransports()
     receive(incoming(Type::Ack, commit.messageId));
     receive(incoming(Type::SleepAck, request.messageId));
     assert(physicalSleeps == 1 && ccWire.empty());
-    freshKnownApp(); command('c'); command('i'); command('s'); command('a');
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); idleForTest(); requestSleepForTest(); activityForTest();
     assert(countWire(Type::SleepCancel) == 1 && ccWire.empty());
-    freshKnownApp(); command('c'); command('i'); receive(incoming(Type::SleepRequest, 40, 40));
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); idleForTest(); receive(incoming(Type::SleepRequest, 40, 40));
     assert(pendingMessage.type == Type::SleepReady && pendingTransport == Transport::ESP_NOW);
     receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepCommit, 40));
     assert(pendingMessage.type == Type::SleepAck && pendingTransport == Transport::ESP_NOW && ccWire.empty());
     receive(incoming(Type::Ack, pendingMessage.messageId)); assert(physicalSleeps == 1);
 
     // CC mode keeps normal ESP-NOW RX/ACK alive, but samples only matched probe replies.
-    freshKnownApp(); command('c'); settleForCheck(2000);
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); settleForCheck(2000);
     assert(wire.size() == 1 && wire[0].type == Type::ProximityProbe);
     receive(peerEvent); assert(wire.size() == 2 && wire.back().type == Type::Ack);
     rssiObservations.push_back(proximityObservation(100, -20, 2010));
@@ -2131,13 +2178,13 @@ void testApplicationTransports()
     assertProximityReset(); assert(Serial.log.find("median=-51 dBm") != std::string::npos);
     assert(countWire(Type::ProximityProbe) == 3 && !waitingForAck);
     assert(selectedTransport == Transport::CC1101 && ccWire.empty());
-    command('c'); // Preserve the bench route after the completed CLOSE measurement.
-    command('x'); assert(benchSleepCalls == 1 && motionCancels == 1);
+    selectTransportForTest(Transport::CC1101); // Set the fixture route after the completed CLOSE measurement.
+    failedSleepEntryForTest(); assert(coordinatedAttempts == 1 && motionCancels == 1);
     startHeartbeatEvent(); assert(ccWire.size() == 1); // Aborted bench entry resumes runtime.
-    freshKnownApp(); command('c'); ccAccepts = false; startHeartbeatEvent();
+    freshKnownApp(); selectTransportForTest(Transport::CC1101); ccAccepts = false; startHeartbeatEvent();
     for (unsigned i = 0; i < 3; ++i) { hostNow = ackWaitStart + 300; loop(); }
     assert(!waitingForAck && ccWire.empty() && peerState() == PeerState::OFFLINE);
-    puts("PASS: manual transports, route-pinned retries, matching ACK before expiry, cross-radio dedup and receipt priority");
+    puts("PASS: both transports, route-pinned retries, matching ACK before expiry, cross-radio dedup and receipt priority");
     puts("PASS: simultaneous independent EVENTs, lost ACK/retry/re-ACK, sleep guards/ESP-NOW controls, RSSI/Motion in CC mode");
 }
 
@@ -2201,7 +2248,7 @@ void testProximityProbes()
             completedAwaitingCallbacks(false);
             if (state == LocalState::WAKING) injectActivity(hostNow);
         }
-        else if (state != LocalState::ACTIVE) { command('i'); if (state == LocalState::SLEEP_NEGOTIATING) command('s'); }
+        else if (state != LocalState::ACTIVE) { idleForTest(); if (state == LocalState::SLEEP_NEGOTIATING) requestSleepForTest(); }
         assert(localState() == state);
         selectedTransport = Transport::CC1101;
         const auto peer = peerState(); const auto sent = wire.size(); const auto id = nextMessageId;
@@ -2298,7 +2345,7 @@ void testProximityClassification()
             if (test.prior != Class::UNKNOWN)
                 completeClassifiedMeasurement(test.prior == Class::FAR ? -85 : -50);
             assert(proximityClassification == test.prior);
-            selectApplicationTransport(transport); // Exercise each sampling mode independently of prior policy.
+            selectTransportForTest(transport); // Exercise each sampling mode independently of prior policy.
             completeClassifiedMeasurement(test.median);
             assert(proximityClassification == test.expected);
         }
@@ -2308,7 +2355,7 @@ void testProximityClassification()
         {
             freshApp(); selectedTransport = transport;
             if (prior != Class::UNKNOWN) completeClassifiedMeasurement(prior == Class::FAR ? -85 : -50);
-            selectApplicationTransport(transport); // Consume prior policy; failures must not request new policy.
+            selectTransportForTest(transport); // Consume prior policy; failures must not request new policy.
             const auto logs = occurrences(Serial.log, "PROXIMITY | median=");
             if (timeout && samples == 0) radioAccepts = false; // Failed probes also retain the prior state.
             settleForCheck(hostNow + 2000);
@@ -2382,19 +2429,19 @@ void testAutomaticHeartbeatCadence()
     static_assert(FIRST_EVENT_DELAY_MS == 1000, "startup heartbeat delay changed");
     using Class = ProximityClassification;
     struct Case { Class classification; uint32_t interval; };
-    const Case cases[]{{Class::CLOSE, 2500}, {Class::FAR, 4000}};
+    const Case cases[]{{Class::CLOSE, 2500}, {Class::FAR, 6000}};
     for (const auto& test : cases)
     for (auto transport : {Transport::ESP_NOW, Transport::CC1101})
     for (bool acknowledged : {false, true})
     {
         freshApp(); notePeerSeen(); selectedTransport = transport;
         proximityClassification = test.classification;
-        pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        suppressPeriodicForTest = false; nextEventTime = FIRST_EVENT_DELAY_MS;
         hostNow = 999; loop();
         assert(!waitingForAck && wire.empty() && ccWire.empty() && led.requests == 0);
         hostNow = 1000; loop();
         const auto original = pendingMessage;
-        assert(waitingForAck && pendingTransport == transport && ackWaitStart == 1000 && led.requests == unsigned(test.classification == ProximityClassification::CLOSE));
+        assert(waitingForAck && pendingTransport == transport && ackWaitStart == 1000 && led.requests == 1);
         const uint32_t completedAt = acknowledged ? 1100 : 1900;
         if (acknowledged)
         {
@@ -2409,31 +2456,37 @@ void testAutomaticHeartbeatCadence()
                 assert(waitingForAck && retryCount == retry - 1);
                 hostNow = retryAt; loop();
                 assert(waitingForAck && retryCount == retry && ackWaitStart == retryAt);
-                assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0 && led.requests == unsigned(test.classification == ProximityClassification::CLOSE));
+                assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0 && led.requests == 1);
             }
             hostNow = completedAt; loop();
             assert(selectedTransport == Transport::CC1101); // Includes real ESP-NOW failure fallback.
         }
-        assert(!waitingForAck && retryCount == 0 && led.requests == unsigned(test.classification == ProximityClassification::CLOSE));
+        assert(!waitingForAck && retryCount == 0 && led.requests == 1);
         assert(proximityClassification == test.classification && nextEventTime == completedAt + test.interval);
         assert(Serial.log.find("PROXIMITY CHECK | START") == std::string::npos);
         const auto due = nextEventTime;
+        if (test.classification == Class::FAR)
+        {
+            hostNow = 6999; loop(); assert(led.requests == 1 && !waitingForAck);
+            hostNow = 7000; loop(); assert(led.requests == 2 && !waitingForAck);
+            assert(nextEventTime == due); // The visual tick does not reschedule radio traffic.
+        }
         hostNow = due - 1; loop();
-        assert(!waitingForAck && led.requests == unsigned(test.classification == ProximityClassification::CLOSE) && nextEventTime == due);
+        assert(!waitingForAck && led.requests == (test.classification == Class::FAR ? 2U : 1U) && nextEventTime == due);
         assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
         hostNow = due; loop();
-        assert(waitingForAck && ackWaitStart == due && led.requests == 2 * unsigned(test.classification == ProximityClassification::CLOSE));
+        assert(waitingForAck && ackWaitStart == due && led.requests == 2);
         assert(pendingMessage.type == Type::Event && pendingMessage.messageId != original.messageId);
         assert(pendingTransport == selectedTransport);
     }
-    puts("PASS: known automatic heartbeat CLOSE=2500ms, FAR=4000ms on either radio after ACK/exhaustion; exact next-EVENT boundary, first delay=1000ms, CLOSE fallback keeps 2500ms, no cadence-driven probes");
+    puts("PASS: radio EVENT intervals remain CLOSE=2500ms/FAR=6000ms after ACK/exhaustion; FAR visual repeats at 7000ms independently; first delay=1000ms, CLOSE fallback keeps 2500ms, no cadence-driven probes");
 }
 
 void testAutomaticSelection()
 {
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
     {
-        freshApp(); command(initial == Transport::ESP_NOW ? 'e' : 'c');
+        freshApp(); selectTransportForTest(initial);
         for (unsigned i = 0; i < 20; ++i) loop();
         assert(proximityClassification == ProximityClassification::UNKNOWN && selectedTransport == initial);
         assert(!automaticSelectionPending && Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
@@ -2446,7 +2499,7 @@ void testAutomaticSelection()
         const auto pending = pendingMessage; const auto pendingRoute = pendingTransport;
         const auto ackStart = ackWaitStart; const auto id = nextMessageId;
         // IDLE is also a safe application state, without starting negotiation.
-        if (initial == Transport::CC1101) PowerManager::forceIdle(hostNow);
+        if (initial == Transport::CC1101) PowerManager::idleAfterInactivity(hostNow);
         loop();
         assert(selectedTransport == target && !automaticSelectionPending);
         assert(pendingTransport == pendingRoute && memcmp(&pendingMessage, &pending, sizeof(pending)) == 0);
@@ -2457,7 +2510,7 @@ void testAutomaticSelection()
         assert(occurrences(Serial.log, expected) == 1);
         for (unsigned i = 0; i < 20; ++i) loop();
         assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
-        pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+        suppressPeriodicForTest = false; nextEventTime = hostNow;
         loop(); // Service runs before a due automatic EVENT, which snapshots the applied selection.
         assert(waitingForAck && pendingTransport == target);
         const auto& sent = target == Transport::ESP_NOW ? wire : ccWire;
@@ -2498,7 +2551,7 @@ void testAutomaticSelectionRetries()
         completePolicyMeasurement(target == Transport::CC1101 ? -85 : -50);
         assert(proximityClassification == (target == Transport::CC1101 ?
             ProximityClassification::FAR : ProximityClassification::CLOSE));
-        assert(nextEventTime == scheduled && led.requests == unsigned(classified && initial == Transport::ESP_NOW));
+        assert(nextEventTime == scheduled && led.requests == unsigned(classified));
         assert(waitingForAck && pendingTransport == initial && retryCount == 0 && ackWaitStart == began);
         assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
         receiveVia(incoming(Type::Ack, original.messageId), target); // Wrong radio cannot finish the EVENT.
@@ -2511,7 +2564,7 @@ void testAutomaticSelectionRetries()
             assert(retryCount == retry && ackWaitStart == due && pendingTransport == initial);
             assert(selectedTransport == initial && automaticSelectionPending);
             assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
-            assert(nextEventTime == scheduled && led.requests == unsigned(classified && initial == Transport::ESP_NOW));
+            assert(nextEventTime == scheduled && led.requests == unsigned(classified));
         }
         const auto& sent = initial == Transport::ESP_NOW ? wire : ccWire;
         unsigned events = 0;
@@ -2525,14 +2578,14 @@ void testAutomaticSelectionRetries()
         const auto completedAt = acknowledged ? hostNow : ackWaitStart + ACK_TIMEOUT_MS;
         if (acknowledged) receiveVia(incoming(Type::Ack, original.messageId), initial);
         else { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
-        assert(nextEventTime == completedAt + (target == Transport::CC1101 ? 4000U : 2500U));
-        assert(led.requests == unsigned(classified && initial == Transport::ESP_NOW));
+        assert(nextEventTime == completedAt + (target == Transport::CC1101 ? 6000U : 2500U));
+        assert(led.requests == unsigned(classified));
         const bool fallback = !acknowledged && initial == Transport::ESP_NOW;
         assert(!waitingForAck && retryCount == 0 && automaticSelectionPending == !fallback && selectedTransport == initial);
         assert(espNowFallbackPending == fallback);
         assert(pendingTransport == initial && memcmp(&pendingMessage, &original, sizeof(original)) == 0);
         assert(peerState() == (acknowledged ? PeerState::ONLINE : PeerState::OFFLINE));
-        mockedTxInFlight = 0; pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+        mockedTxInFlight = 0; suppressPeriodicForTest = false; nextEventTime = hostNow;
         loop();
         assert(selectedTransport == target && pendingTransport == target && waitingForAck);
         assert(pendingMessage.messageId != original.messageId && !automaticSelectionPending);
@@ -2552,7 +2605,7 @@ void testAutomaticSelectionRetries()
         assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
     }
     puts("PASS: both pending EVENT routes and exact retries/ACK deadlines survive policy changes; ACK/drain or exhaustion/drain precedes selection");
-    puts("PASS: FAR -> CLOSE and CLOSE -> FAR use 2500/4000ms at the next ACK/exhaustion without rescheduling the in-flight EVENT or replaying its LED");
+    puts("PASS: FAR -> CLOSE and CLOSE -> FAR use 2500/6000ms at the next ACK/exhaustion without rescheduling the in-flight EVENT or replaying its LED");
 }
 
 void testAutomaticSelectionGuards()
@@ -2576,7 +2629,7 @@ void testAutomaticSelectionGuards()
             case 0: protocolReady = false; break;
             case 1: startHeartbeatEvent(); break;
             case 2: controlCount = 1; break;
-            case 3: PowerManager::forceIdle(hostNow); PowerManager::requestSleep(nextMessageId++, hostNow); break;
+            case 3: PowerManager::idleAfterInactivity(hostNow); PowerManager::requestSleep(nextMessageId++, hostNow); break;
             case 4: sleepDrainWaiting = true; break;
             case 5: awakeAckBusy = true; break;
             case 6: mockedTxInFlight = 1; break;
@@ -2612,32 +2665,28 @@ void testAutomaticSelectionGuards()
     puts("PASS: classifier and fallback share every awake/drained/CHECKING guard, wait silently and apply once");
 }
 
-void testAutomaticSelectionManual()
+void testAutomaticSelectionIgnoresSerial()
 {
     for (auto initial : {Transport::ESP_NOW, Transport::CC1101})
     {
         freshApp(); selectedTransport = initial;
-        const int8_t median = initial == Transport::ESP_NOW ? -50 : -85;
-        completePolicyMeasurement(median);
-        const auto manual = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
-        command(manual == Transport::CC1101 ? 'c' : 'e');
-        assert(selectedTransport == manual && !automaticSelectionPending);
-        for (unsigned i = 0; i < 20; ++i) loop();
-        assert(selectedTransport == manual && Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
-        completePolicyMeasurement(median); // Same label, but fresh evidence overrides the successful manual choice.
-        loop(); assert(selectedTransport == initial && !automaticSelectionPending);
-        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
+        completePolicyMeasurement(initial == Transport::ESP_NOW ? -50 : -85);
+        typeSerialForTest(initial == Transport::ESP_NOW ? "c" : "e");
+        assert(selectedTransport == initial && !automaticSelectionPending);
+        assert(Serial.log.find("APP TRANSPORT | selected=") == std::string::npos);
 
         freshApp(); selectedTransport = initial;
         completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
+        const auto target = initial == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW;
         startHeartbeatEvent(); const auto event = pendingMessage;
-        command(manual == Transport::CC1101 ? 'c' : 'e');
+        typeSerialForTest(target == Transport::CC1101 ? "c" : "e");
         assert(selectedTransport == initial && automaticSelectionPending && waitingForAck);
-        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
+        assert(memcmp(&event, &pendingMessage, sizeof(event)) == 0);
         receiveVia(incoming(Type::Ack, event.messageId), initial);
-        assert(selectedTransport == manual && !automaticSelectionPending);
+        assert(selectedTransport == target && !automaticSelectionPending);
+        assert(occurrences(Serial.log, "APP TRANSPORT AUTO") == 1);
     }
-    puts("PASS: successful e/c consumes pending policy until the next completed median; refused e/c preserves it");
+    puts("PASS: e/c cannot override classifier evidence or consume pending policy; in-flight route stays pinned until ACK");
 }
 
 void testAutomaticSelectionSleep()
@@ -2652,7 +2701,7 @@ void testAutomaticSelectionSleep()
         if (fallback) requestFallbackFromEvent();
         else completePolicyMeasurement(initial == Transport::ESP_NOW ? -85 : -50);
         mockedTxInFlight = 1; // Hold the previous TX while requesting sleep.
-        command('i'); command('s');
+        idleForTest(); requestSleepForTest();
         const auto id = transaction().sleepId;
         const auto phaseDeadline = transaction().phaseDeadline, hardDeadline = transaction().hardDeadline;
         mockedTxInFlight = 0;
@@ -2705,7 +2754,7 @@ void testEspNowFallback()
         if (classification != Class::UNKNOWN)
         {
             completePolicyMeasurement(classification == Class::CLOSE ? -50 : -85);
-            command('e'); // Includes the FAR-but-manually-ESP-NOW case.
+            selectTransportForTest(Transport::ESP_NOW); // Includes the FAR with an ESP-NOW fixture route.
         }
         radioAccepts = accepted;
         const auto failed = requestFallbackFromEvent();
@@ -2730,14 +2779,14 @@ void testEspNowFallback()
         assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == 1); // No failure ping-pong.
     }
     // A reliable sleep control also uses ESP-NOW, but its exhaustion must not request fallback.
-    freshApp(); command('i'); command('s');
+    freshApp(); idleForTest(); requestSleepForTest();
     for (unsigned i = 0; i <= MAX_RETRIES; ++i) { hostNow = ackWaitStart + ACK_TIMEOUT_MS; loop(); }
     assert(!espNowFallbackPending && selectedTransport == Transport::ESP_NOW);
     assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
     puts("PASS: UNKNOWN/CLOSE/FAR preserved across ESP-NOW GIVE_UP, identical three attempts, callback drain, one fallback, new CC1101 EVENT only; no CC1101/sleep-control fallback");
 }
 
-void testFallbackPrecedenceAndManual()
+void testFallbackPrecedenceAndSerial()
 {
     for (int8_t median : {int8_t(-50), int8_t(-85)})
     {
@@ -2760,7 +2809,7 @@ void testFallbackPrecedenceAndManual()
 
     for (bool alreadyCc1101 : {false, true})
     {
-        freshApp(); completePolicyMeasurement(-50); command('e'); requestFallbackFromEvent();
+        freshApp(); completePolicyMeasurement(-50); selectTransportForTest(Transport::ESP_NOW); requestFallbackFromEvent();
         automaticSelectionPending = true; // Defensive conflicting flags: fallback wins, without later bouncing to CLOSE's ESP-NOW.
         if (alreadyCc1101) selectedTransport = Transport::CC1101;
         serviceAutomaticTransportSelection(); assert(espNowFallbackPending && automaticSelectionPending);
@@ -2769,18 +2818,16 @@ void testFallbackPrecedenceAndManual()
         assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == (alreadyCc1101 ? 0U : 1U));
         assert(Serial.log.find("APP TRANSPORT AUTO") == std::string::npos);
     }
-    for (char manual : {'e', 'c'})
+    for (const char* text : {"e", "c"})
     {
         freshApp(); requestFallbackFromEvent(); automaticSelectionPending = true;
-        command(manual); // TX still outstanding: refusal must preserve both flags.
+        typeSerialForTest(text);
         assert(espNowFallbackPending && automaticSelectionPending && selectedTransport == Transport::ESP_NOW);
-        assert(Serial.log.find("APP TRANSPORT | REFUSED") != std::string::npos);
-        mockedTxInFlight = 0; command(manual);
-        assert(!espNowFallbackPending && !automaticSelectionPending);
-        assert(selectedTransport == (manual == 'e' ? Transport::ESP_NOW : Transport::CC1101));
-        assert(Serial.log.find("APP TRANSPORT FALLBACK") == std::string::npos);
+        mockedTxInFlight = 0; typeSerialForTest(text);
+        assert(!espNowFallbackPending && !automaticSelectionPending && selectedTransport == Transport::CC1101);
+        assert(occurrences(Serial.log, "APP TRANSPORT FALLBACK") == 1);
     }
-    puts("PASS: fresh valid median supersedes fallback, newer ESP-NOW exhaustion supersedes classifier intent, defensive fallback priority and manual success/refusal semantics");
+    puts("PASS: fresh median supersedes fallback, newer exhaustion supersedes classifier intent, fallback wins conflicts; e/c cannot override fallback");
 }
 
 void completePeerReturnMeasurement(int8_t median)
@@ -2813,7 +2860,7 @@ void testFallbackRecovery()
     assert(proximityClassification == ProximityClassification::CLOSE);
     assert(displayFrames.back().radio == "CC1101" && displayFrames.back().peer == "OFFLINE");
     assert(displayFrames.back().distance == "CLOSE" && pendingTransport == Transport::ESP_NOW);
-    pauseAutomaticHeartbeats = false; hostNow = nextEventTime; loop();
+    suppressPeriodicForTest = false; hostNow = nextEventTime; loop();
     const auto recovery = pendingMessage;
     assert(waitingForAck && pendingTransport == Transport::CC1101 && recovery.messageId != failed.messageId);
     assert(ccWire.size() == 1 && memcmp(&ccWire.back(), &recovery, sizeof(recovery)) == 0);
@@ -2823,7 +2870,7 @@ void testFallbackRecovery()
     assert(proximityUpdateState == ProximityUpdateState::CHECKING && countWire(Type::ProximityProbe) == 1);
     // The outstanding probe defers OLED updates until a normal safe boundary.
     assert(displayFrames.back().radio == "CC1101" && displayFrames.back().peer == "OFFLINE");
-    pauseAutomaticHeartbeats = true;
+    suppressPeriodicForTest = true;
     completePeerReturnMeasurement(-50); // The matched CC1101 ACK starts this check without movement.
     assert(countWire(Type::ProximityProbe) == 3 && proximityClassification == ProximityClassification::CLOSE);
     assert(selectedTransport == Transport::ESP_NOW && !automaticSelectionPending && !espNowFallbackPending);
@@ -2926,11 +2973,11 @@ void testPeerReturnIsolation()
         startHeartbeatEvent(); receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
         assert((proximityUpdateState == ProximityUpdateState::CHECKING) == (!offline || radio == Transport::CC1101));
     }
-    freshApp(); selectedTransport = Transport::CC1101; notePeerUnreachable(); command('i');
+    freshApp(); selectedTransport = Transport::CC1101; notePeerUnreachable(); idleForTest();
     receiveVia(proximityObservation(24, -47, hostNow).message, Transport::CC1101);
     assert(peerState() == PeerState::ONLINE && localState() == LocalState::IDLE);
     assert(proximityUpdateState == ProximityUpdateState::READY); // Existing ACTIVE guard remains authoritative.
-    freshApp(); selectedTransport = Transport::CC1101; command('i'); command('s');
+    freshApp(); selectedTransport = Transport::CC1101; idleForTest(); requestSleepForTest();
     receive(incoming(Type::Ack, pendingMessage.messageId)); // Matching sleep-control receipt is not application evidence.
     assert(localState() == LocalState::SLEEP_NEGOTIATING && proximityUpdateState == ProximityUpdateState::READY);
     puts("PASS: no restart for already-ONLINE EVENTs/ACKs; probes, sleep controls/receipts, wrong/unrelated/malformed ACKs and malformed EVENTs cannot trigger; ACTIVE/CC1101 guards retained");
@@ -2944,7 +2991,7 @@ void testPeerReturnTimeout()
         freshApp();
         if (prior != ProximityClassification::UNKNOWN)
             completePolicyMeasurement(prior == ProximityClassification::CLOSE ? -50 : -85);
-        command('c'); notePeerUnreachable();
+        selectTransportForTest(Transport::CC1101); notePeerUnreachable();
         receiveVia(proximityObservation(30, -47, hostNow).message, Transport::CC1101);
         const auto began = checkStartedAt;
         const auto starts = occurrences(Serial.log, "PROXIMITY CHECK | START");
@@ -3011,7 +3058,7 @@ void testInitialProximityCadence()
     for (unsigned trigger = 0; trigger < 3; ++trigger) // Movement, peer contact, cold startup.
     for (int8_t rssi : {int8_t(-50), int8_t(-85)})
     {
-        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        freshApp(); suppressPeriodicForTest = false; nextEventTime = FIRST_EVENT_DELAY_MS;
         uint32_t start = 20000; // The old first-EVENT deadline is already stale.
         if (trigger == 2)
         {
@@ -3095,7 +3142,7 @@ void testInitialProximityCadence()
             assert(peerState() == PeerState::UNKNOWN && Serial.log.find("MOVEMENT |") == std::string::npos);
         }
         const bool far = rssi <= ENTER_FAR_DBM;
-        const uint32_t interval = far ? 4000 : 2500;
+        const uint32_t interval = far ? 6000 : 2500;
         assert(proximityClassification == (far ? ProximityClassification::FAR : ProximityClassification::CLOSE));
         assert(nextEventTime == completedAt + interval);
         hostNow = nextEventTime - 1; loop();
@@ -3104,17 +3151,17 @@ void testInitialProximityCadence()
         assert(displayFrames.back().distance == (far ? "FAR" : "CLOSE"));
         assert(displayFrames.back().radio == (far ? "CC1101" : "ESP-NOW"));
         hostNow = nextEventTime; loop();
-        assert(waitingForAck && pendingMessage.type == Type::Event && led.requests == unsigned(!far));
+        assert(waitingForAck && pendingMessage.type == Type::Event && led.requests == 1);
         assert(ackWaitStart == completedAt + interval && pendingTransport == selectedTransport);
         assert(countWire(Type::ProximityProbe) == 3); // Completion does not start background probing.
     }
-    puts("PASS: UNKNOWN obtains three fresh correlated probe/reply RSSI samples within 12s without heartbeat EVENTs, LED, ACK transactions or peer mutation; first CLOSE/FAR EVENT waits 2500/4000ms after classification");
+    puts("PASS: UNKNOWN obtains three fresh correlated probe/reply RSSI samples within 12s without heartbeat EVENTs, LED, ACK transactions or peer mutation; first CLOSE/FAR EVENT waits 2500/6000ms after classification");
     puts("PASS: cold startup with peer UNKNOWN starts one check; both conceptually simultaneous UNKNOWN endpoints exchange three distinct probe replies without movement or heartbeat traffic");
 }
 
 void testUnknownHeartbeatSilence()
 {
-    freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+    freshApp(); suppressPeriodicForTest = false; nextEventTime = FIRST_EVENT_DELAY_MS;
     for (uint32_t now : {0U, 999U, 1000U, 4000U, 12000U, 24000U})
     {
         hostNow = now; loop();
@@ -3148,7 +3195,7 @@ void testUnknownHeartbeatSilence()
         loop(); // Apply fallback after the expired transaction cancels its UNKNOWN check.
         assert(!waitingForAck && selectedTransport == Transport::CC1101);
         const auto sent = wire.size(), ccSent = ccWire.size();
-        pauseAutomaticHeartbeats = false;
+        suppressPeriodicForTest = false;
         hostNow += 20000; loop();
         assert(!waitingForAck && wire.size() == sent && ccWire.size() == ccSent && led.requests == 0);
     }
@@ -3163,21 +3210,22 @@ void testKnownHeartbeatRechecks()
     {
         freshApp(); notePeerSeen(); proximityClassification = prior;
         selectedTransport = prior == ProximityClassification::FAR ? Transport::CC1101 : Transport::ESP_NOW;
-        const uint32_t interval = prior == ProximityClassification::FAR ? 4000 : 2500;
-        pauseAutomaticHeartbeats = false; nextEventTime = 100;
+        const uint32_t interval = prior == ProximityClassification::FAR ? 6000 : 2500;
+        suppressPeriodicForTest = false; nextEventTime = 100;
         startProximityCheck(0);
         hostNow = 100; loop();
         assert(proximityUpdateState == ProximityUpdateState::CHECKING && proximityClassification == prior);
-        assert(waitingForAck && led.requests == unsigned(prior == ProximityClassification::CLOSE));
+        assert(waitingForAck && led.requests == 1);
         hostNow = 150; receiveVia(incoming(Type::Ack, pendingMessage.messageId), pendingTransport);
-        assert(nextEventTime == 150 + interval && !waitingForAck && led.requests == unsigned(prior == ProximityClassification::CLOSE));
-        pauseAutomaticHeartbeats = true; // Isolate a failed measurement from unrelated ACK exhaustion.
+        assert(nextEventTime == 150 + interval && !waitingForAck && led.requests == 1);
+        suppressPeriodicForTest = true; // Isolate a failed measurement from unrelated ACK exhaustion.
         for (unsigned i = 0; i < samples; ++i) classificationSample(800 + i, -60);
         if (cancel) movementStep(hostNow + 10, MotionEvent::Activity);
         else { hostNow = CHECK_TIMEOUT_MS; loop(); }
         assertProximityReset();
         assert(proximityClassification == prior && automaticHeartbeatIntervalMs() == interval);
-        assert(nextEventTime == 150 + interval && led.requests == unsigned(prior == ProximityClassification::CLOSE));
+        assert(nextEventTime == 150 + interval);
+        assert(led.requests == (prior == ProximityClassification::FAR && !cancel ? 2U : 1U));
     }
     puts("PASS: CLOSE/FAR keep their heartbeat and cadence while CHECKING; zero/partial timeout or movement cancellation preserves known classification and scheduling");
 }
@@ -3186,7 +3234,7 @@ void testInitialProximityTimeout()
 {
     for (unsigned samples : {0U, 2U})
     {
-        freshApp(); pauseAutomaticHeartbeats = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        freshApp(); suppressPeriodicForTest = false; nextEventTime = FIRST_EVENT_DELAY_MS;
         const auto event = proximityObservation(90, -50, hostNow).message;
         receive(event);
         const auto began = checkStartedAt;
@@ -3219,7 +3267,7 @@ void testInitialProximityStartup()
     for (bool recovered : {false, true})
     for (bool runtimeOk : {false, true})
     {
-        freshApp(); protocolReady = false; pauseAutomaticHeartbeats = false;
+        freshApp(); protocolReady = false; suppressPeriodicForTest = false;
         delete receiveQueue; receiveQueue = nullptr;
         injectedBoot.deep = deep;
         RtcState::save({123, false, 0, {false, 0}});
@@ -3285,7 +3333,7 @@ void testInitialProximityStartup()
             startProximityCheck(1);
             proximitySampleCount = 1; proximitySamples[0] = {900, -50};
         };
-        else atRadioStart = [] { PowerManager::forceIdle(hostNow); };
+        else atRadioStart = [] { PowerManager::idleAfterInactivity(hostNow); };
         setup();
         assert(protocolReady && led.requests == 0 && wire.empty());
         if (checking)
@@ -3340,7 +3388,7 @@ void testInitialProximityIsolation()
             receiveVia(proximityObservation(90, -50, hostNow).message, radio);
             assert(peerState() == PeerState::ONLINE && proximityClassification == prior); assertProximityReset();
         }
-        freshApp(); command('i');
+        freshApp(); idleForTest();
         receiveVia(proximityObservation(90, -50, hostNow).message, radio);
         assert(peerState() == PeerState::ONLINE && localState() == LocalState::IDLE); assertProximityReset();
     }
@@ -3406,7 +3454,7 @@ void testDisplayTransitions()
     assert(displayFrames.size() == 5);
     completePolicyMeasurement(-85); loop();
     assert(displayFrames.back().distance == "FAR" && displayFrames.back().radio == "CC1101");
-    command('i'); assert(displayFrames.back().state == "IDLE");
+    idleForTest(); assert(displayFrames.back().state == "IDLE");
     const auto count = displayFrames.size();
     for (unsigned i = 0; i < 100; ++i) loop();
     assert(displayFrames.size() == count);
@@ -3505,7 +3553,7 @@ void testDisplayGuards()
             case 0: protocolReady = false; break;
             case 1: startHeartbeatEvent(); break;
             case 2: controlCount = 1; break;
-            case 3: forceIdle(hostNow); requestSleep(nextMessageId++, hostNow); break;
+            case 3: idleAfterInactivity(hostNow); requestSleep(nextMessageId++, hostNow); break;
             case 4: sleepDrainWaiting = true; break;
             case 5: awakeAckBusy = true; break;
             case 6: mockedTxInFlight = 1; break;
@@ -3561,10 +3609,10 @@ void testDisplayGuards()
 
 void testDisplaySleep()
 {
-    freshApp(); command('i');
+    freshApp(); idleForTest();
     assert(deepSleepFrames.empty());
     const auto idleFrames = displayFrames.size();
-    command('s');
+    requestSleepForTest();
     for (unsigned i = 0; i < 10; ++i) loop();
     assert(localState() == LocalState::SLEEP_NEGOTIATING && displayFrames.size() == idleFrames);
     assert(deepSleepFrames.empty());
@@ -3710,18 +3758,10 @@ void testLedEvents(ProximityClassification classification)
     for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
     {
         freshKnownApp(classification); selectedTransport = radio; startHeartbeatEvent();
-        if (classification == ProximityClassification::CLOSE)
-        {
-            ledStep(0, 0); ledStep(65, 90);
-            receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
-            assert(!waitingForAck && led.busy());
-            ledStep(130, 180); // Matching ACK cannot restart the CLOSE background pulse.
-        }
-        else
-        {
-            receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
-            assert(!waitingForAck && !led.busy() && led.requests == 0);
-        }
+        ledStep(0, 0); ledStep(65, 90);
+        receiveVia(incoming(Type::Ack, pendingMessage.messageId), radio);
+        assert(!waitingForAck && led.busy());
+        ledStep(130, 180); // Matching ACK cannot restart the background pulse.
         for (unsigned invalid = 0; invalid < 7; ++invalid)
         {
             freshKnownApp(classification); auto packet = proximityObservation(70, -50, hostNow).message;
@@ -3740,26 +3780,6 @@ void testLedEvents(ProximityClassification classification)
 
 void testLedLocalHeartbeat(ProximityClassification classification)
 {
-    if (classification == ProximityClassification::FAR)
-    {
-        for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
-        for (bool accepted : {false, true})
-        {
-            freshKnownApp(classification); selectedTransport = radio; radioAccepts = ccAccepts = accepted;
-            startHeartbeatEvent(); const auto original = pendingMessage;
-            for (uint32_t at : {0U, 300U, 600U, 900U})
-            {
-                hostNow = at; loop();
-                assert(led.requests == 0 && !led.busy() && hostPixel().shown == 0);
-                assert(memcmp(&pendingMessage, &original, sizeof(original)) == 0);
-            }
-            const auto& packets = radio == Transport::ESP_NOW ? wire : ccSubmitAttempts;
-            assert(packets.size() == 3 && !waitingForAck);
-        }
-        puts("PASS: FAR background EVENT retains bounded same-ID attempts on either radio without CLOSE visual output");
-        return;
-    }
-
     for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
     for (bool accepted : {false, true})
     {
@@ -3787,10 +3807,11 @@ void testLedLocalHeartbeat(ProximityClassification classification)
         for (const auto& packet : packets) assert(memcmp(&packet, &expected, sizeof(expected)) == 0);
         assert(selectedTransport == Transport::CC1101); // Existing fallback, without replaying the exhausted EVENT.
         assert(radio == Transport::CC1101 ? wire.empty() : ccWire.empty());
-        ledStep(1000, 0, false);
-        startHeartbeatEvent(); // Only a fresh transaction on the selected route starts another pulse.
+        const uint32_t nextPulse = classification == ProximityClassification::FAR ? 6000 : 1000;
+        ledStep(nextPulse, 0, false);
+        startHeartbeatEvent(); // A fresh transaction after the FAR guard may start another pulse.
         assert(pendingMessage.messageId == 0 && pendingTransport == Transport::CC1101 && led.busy() && led.requests == 2);
-        ledStep(1000, 0); ledStep(1065, 90);
+        ledStep(nextPulse, 0); ledStep(nextPulse + 65, 90);
     }
     for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
     {
@@ -3801,8 +3822,17 @@ void testLedLocalHeartbeat(ProximityClassification classification)
         assert(led.requests == 1);
         ledStep(130, 180); ledStep(195, 90); // ACK cannot restart the sender's pulse.
         startHeartbeatEvent();
-        assert(pendingMessage.messageId != sharedEvent.messageId && led.requests == 2);
-        ledStep(195, 0); ledStep(260, 90); ledStep(325, 180); // Fresh local EVENT restarts an active pulse.
+        assert(pendingMessage.messageId != sharedEvent.messageId);
+        if (classification == ProximityClassification::CLOSE)
+        {
+            assert(led.requests == 2);
+            ledStep(195, 0); ledStep(260, 90); ledStep(325, 180); // CLOSE retains its restart behavior.
+        }
+        else
+        {
+            assert(led.requests == 1);
+            ledStep(260, 0); ledStep(515, 255); ledStep(700, 0, false); // FAR cannot restart early.
+        }
 
         // Model the opposite endpoint's identity; the same EVENT ID/payload is
         // delivered through its real receive path (both identities run this suite).
@@ -3818,7 +3848,230 @@ void testLedLocalHeartbeat(ProximityClassification classification)
         for (const auto& receipt : receipts)
             assert(receipt.type == Type::Ack && receipt.ackForMessageId == sharedEvent.messageId);
     }
-    puts("PASS: new local EVENT starts one pulse even on rejected TX; identical 300/600ms retries and 900ms exhaustion/fallback never restart it; only fresh EVENT restarts; peer mirrors same ID/payload and re-ACKs duplicates");
+    puts("PASS: new local EVENT starts one pulse even on rejected TX; identical 300/600ms retries and 900ms exhaustion/fallback never restart it; fresh CLOSE EVENT restarts, FAR waits 6000ms; peer mirrors same ID/payload and re-ACKs duplicates");
+}
+
+void testFarLoopCadence()
+{
+    using Event = Protocol::EventType;
+    for (auto outgoing : {Transport::ESP_NOW, Transport::CC1101})
+    for (auto incomingRadio : {Transport::ESP_NOW, Transport::CC1101})
+    for (int ackDelay : {100, 700, -1})
+    // No peer traffic, simultaneous, peer first, and an offset peer clock.
+    for (int peerOffset : {-1, 1000, 500, 2500})
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); selectedTransport = outgoing;
+        suppressPeriodicForTest = false; nextEventTime = FIRST_EVENT_DELAY_MS;
+        std::vector<uint32_t> pulses, sends;
+        uint16_t ownId = 0, peerId = 70;
+        uint32_t sentAt = 0;
+        Protocol::Message peerEvent{};
+        auto enqueue = [&](const Protocol::Message& packet, Transport radio) {
+            if (radio == Transport::CC1101) ccIncoming.push_back(packet);
+            else queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        };
+        const uint32_t firstPulse = peerOffset == 500 ? 500 : 1000;
+        for (uint32_t at = 0; at <= 26000; at += 10)
+        {
+            hostNow = at;
+            if (peerOffset >= 0 && at >= uint32_t(peerOffset))
+            {
+                const auto peerElapsed = (at - uint32_t(peerOffset)) % 6000;
+                if (peerElapsed == 0)
+                {
+                    peerEvent = {Protocol::VERSION, Type::Event, peerId++, PEER_DEVICE, Event::Heartbeat, 0};
+                    enqueue(peerEvent, incomingRadio);
+                }
+                if (peerElapsed == 300 || peerElapsed == 600)
+                    enqueue(peerEvent, incomingRadio); // Same-ID peer retries.
+                if (peerElapsed == 400)
+                    enqueue(peerEvent, incomingRadio == Transport::ESP_NOW ? Transport::CC1101 : Transport::ESP_NOW);
+            }
+            if (waitingForAck && ackDelay >= 0 && at - sentAt == uint32_t(ackDelay))
+                enqueue(incoming(Type::Ack, ownId), pendingTransport);
+            const auto before = led.requests;
+            loop(); // Unmodified production schedule, RX, retries and real LED update.
+            if (led.requests != before)
+            {
+                assert(led.requests == before + 1 && led.userRequests == 0);
+                pulses.push_back(at);
+                assert(at == firstPulse + (pulses.size() - 1) * 6000);
+            }
+            const unsigned expected = at < firstPulse ? 0 : 1 + (at - firstPulse) / 6000;
+            assert(led.requests == expected); // Requires repetition, not merely a rate cap.
+            if (waitingForAck && pendingMessage.messageId != ownId)
+            {
+                ownId = pendingMessage.messageId; sentAt = at; sends.push_back(at);
+                assert(pendingMessage.event == Event::Heartbeat && retryCount == 0);
+            }
+            if (at >= firstPulse)
+            {
+                const auto elapsed = (at - firstPulse) % 6000;
+                // Requests start on the next 10ms loop; keep the real red waveform.
+                if (elapsed == 140) assert(hostPixel().shown == uint32_t(180) << 16);
+                if (elapsed == 520) assert(hostPixel().shown == uint32_t(248) << 16);
+                if (elapsed >= 710) assert(!led.busy() && hostPixel().shown == 0);
+            }
+        }
+        assert(pulses.size() == 5 && sends.size() >= 4);
+        const uint32_t messageInterval = 6000 + (ackDelay < 0 ? 900 : ackDelay);
+        assert(sends.front() == 1000);
+        for (size_t i = 1; i < sends.size(); ++i)
+        {
+            // CC1101 drains one queued packet per loop; an ACK behind a peer
+            // EVENT can add one 10ms loop to the unchanged completion-based clock.
+            const auto interval = sends[i] - sends[i - 1];
+            assert(interval >= messageInterval && interval <= messageInterval + (peerOffset < 0 ? 0 : 10));
+        }
+    }
+    puts("PASS: real-loop FAR pulses at 6s intervals over five cycles with 100/700ms ACKs or exhaustion, offset/simultaneous peer traffic and cross-radio duplicates; wire cadence and red waveform retained");
+}
+
+void testFarLoopGuardsAndRollover()
+{
+    using Event = Protocol::EventType;
+    const Protocol::Message background{Protocol::VERSION, Type::Event, 70, PEER_DEVICE, Event::Heartbeat, 0};
+    // Hold radio scheduling out of the rollover fixture: host unsigned long is
+    // 64-bit, unlike millis on the MCU. Run the actual loop/LED with uint32 time.
+    for (uint32_t start : {0U, UINT32_MAX - 3000U})
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen();
+        hostNow = start; receive(background);
+        for (uint32_t elapsed = 10; elapsed <= 18000; elapsed += 10)
+        {
+            hostNow = start + elapsed;
+            if (elapsed % 6000 == 0)
+                queueReceivedData(reinterpret_cast<const uint8_t*>(&background), sizeof(background));
+            loop();
+            assert(led.requests == 1 + elapsed / 6000 && led.userRequests == 0);
+            if (elapsed % 6000 == 140) assert(hostPixel().shown == uint32_t(180) << 16);
+        }
+        // A stalled loop services one overdue pulse; no catch-up burst or restart.
+        hostNow = start + 37000; loop(); assert(led.requests == 5);
+        loop(); assert(led.requests == 5);
+        hostNow = start + 42999; loop(); assert(led.requests == 5);
+        hostNow = start + 43000; loop(); assert(led.requests == 6);
+    }
+    for (auto route : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); selectedTransport = route;
+        receiveVia(background, route);
+        auto user = background; user.messageId = 71; user.event = Event::UserHeartbeat;
+        hostNow = 5900; receiveVia(user, route);
+        const unsigned requests = led.requests;
+        for (uint32_t at = 5910; at < 6610; at += 10)
+        {
+            hostNow = at;
+            if (at == 6000) receiveVia(background, route);
+            else if (at == 6300) receiveVia(user, route);
+            else loop();
+            assert(led.requests == requests && led.userRequests == 1 && led.userHeartbeatActive());
+        }
+        hostNow = 6610; loop(); // Resume one due FAR pulse only after user ownership ends.
+        assert(led.requests == requests + 1 && !led.userHeartbeatActive());
+        hostNow = 12609; loop(); assert(led.requests == requests + 1);
+        hostNow = 12610; loop(); assert(led.requests == requests + 2);
+
+        // Debounced physical intent wins the outbox at the same FAR deadline.
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); selectedTransport = route;
+        receiveVia(background, route);
+        suppressPeriodicForTest = false; nextEventTime = 6000;
+        buttonLevel = LOW;
+        hostNow = 5970; loop(); hostNow = 6000; loop();
+        assert(waitingForAck && pendingMessage.event == Event::UserHeartbeat && ackWaitStart == 6000);
+        assert(led.requests == 2 && led.userRequests == 0); // Only the normally due sender background.
+    }
+    for (unsigned guard = 0; guard < 4; ++guard)
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); receive(background);
+        hostNow = 10; loop(); hostNow = 710; loop();
+        assert(!led.busy());
+        if (guard == 0) proximityClassification = ProximityClassification::UNKNOWN;
+        if (guard == 1) proximityClassification = ProximityClassification::CLOSE;
+        if (guard == 2) protocolReady = false;
+        if (guard == 3)
+        {
+            hostNow = 5900; idleForTest(); requestSleepForTest();
+            assert(transaction().active && !backgroundHeartbeatAllowed());
+        }
+        hostNow = 6000; loop();
+        assert(led.requests == 1 && !led.busy() && hostPixel().shown == 0);
+    }
+    puts("PASS: FAR loop cadence survives uint32 rollover, skips catch-up bursts, yields to receiver user pulse and physical-button outbox priority; UNKNOWN/CLOSE/runtime/sleep guards stop FAR repetition");
+}
+
+void testFarBackgroundOverlap()
+{
+    using Event = Protocol::EventType;
+    for (auto outgoing : {Transport::ESP_NOW, Transport::CC1101})
+    for (auto incomingRadio : {Transport::ESP_NOW, Transport::CC1101})
+    for (bool incomingFirst : {false, true})
+    for (uint32_t start : {0U, UINT32_MAX - 3000U})
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); selectedTransport = outgoing;
+        uint16_t peerId = 70;
+        auto deliver = [&](const Protocol::Message& message, Transport radio) {
+            handleReceivedData(reinterpret_cast<const uint8_t*>(&message), sizeof(message), radio);
+        };
+        for (unsigned cycle = 0; cycle < 3; ++cycle)
+        {
+            const uint32_t at = start + cycle * 6000U;
+            hostNow = at;
+            Protocol::Message background{Protocol::VERSION, Type::Event, peerId++, PEER_DEVICE, Event::Heartbeat, 0};
+            if (incomingFirst) deliver(background, incomingRadio);
+            startHeartbeatEvent();
+            if (!incomingFirst) deliver(background, incomingRadio);
+            const auto own = pendingMessage;
+            assert(led.requests == cycle + 1 && led.userRequests == 0);
+            ledStep(at, 0); ledStep(at + 65, 90);
+            // A fresh peer event during a fade cannot restart it; ACK is still sent.
+            background.messageId = peerId++;
+            deliver(background, incomingRadio);
+            const auto& receipts = incomingRadio == Transport::ESP_NOW ? wire : ccWire;
+            assert(receipts.back().type == Type::Ack && receipts.back().ackForMessageId == background.messageId);
+            ledStep(at + 130, 180); ledStep(at + 195, 90); ledStep(at + 260, 0);
+            hostNow = at + 300; handleAckTimeout();
+            assert(retryCount == 1 && memcmp(&pendingMessage, &own, sizeof(own)) == 0);
+            ledStep(at + 330, 0); ledStep(at + 334, 5); ledStep(at + 515, 255);
+            hostNow = at + 600; handleAckTimeout();
+            assert(retryCount == 2 && memcmp(&pendingMessage, &own, sizeof(own)) == 0);
+            deliver(incoming(Type::Ack, own.messageId), outgoing);
+            assert(!waitingForAck && led.requests == cycle + 1);
+            ledStep(at + 608, 127); ledStep(at + 700, 0, false);
+            // New background events after the animation also wait for the same deadline.
+            for (uint32_t offset : {701U, 3000U, 5999U})
+            {
+                hostNow = at + offset; background.messageId = peerId++;
+                deliver(background, incomingRadio);
+                deliver(background, outgoing); // Same/cross-radio duplicate still receives its ACK.
+                assert(led.requests == cycle + 1 && !led.busy() && hostPixel().shown == 0);
+            }
+            // Even at the deadline a duplicate cannot consume the next pulse.
+            hostNow = at + 6000U; deliver(background, incomingRadio);
+            assert(led.requests == cycle + 1 && !led.busy());
+        }
+    }
+    // The real loop processes an incoming event and a due local event in one batch.
+    for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
+    {
+        freshKnownApp(ProximityClassification::FAR); notePeerSeen(); selectedTransport = radio;
+        suppressPeriodicForTest = false; nextEventTime = 0;
+        receiveVia({Protocol::VERSION, Type::Event, 70, PEER_DEVICE, Event::Heartbeat, 0}, radio);
+        assert(waitingForAck && pendingMessage.event == Event::Heartbeat && led.requests == 1);
+        loop(); assert(led.requests == 1 && led.busy());
+    }
+    // Existing power guards cancel background output and reject both trigger paths.
+    freshKnownApp(ProximityClassification::FAR);
+    startHeartbeatEvent(); ledStep(0, 0); ledStep(65, 90);
+    receive(incoming(Type::Ack, pendingMessage.messageId));
+    idleForTest(); assert(backgroundHeartbeatAllowed());
+    requestSleepForTest(); assert(transaction().active && !backgroundHeartbeatAllowed());
+    loop(); assert(!led.busy() && hostPixel().shown == 0);
+    const auto requests = led.requests;
+    receive({Protocol::VERSION, Type::Event, 70, PEER_DEVICE, Event::Heartbeat, 0});
+    startHeartbeatEvent();
+    assert(led.requests == requests && !led.busy() && transaction().active);
+    puts("PASS: FAR TX/RX share 6000ms across both radios and rollover; simultaneous/overlapping/new background events, retries, ACKs and duplicates cannot restart or add pulses; exact 700ms CLOSE waveform and power guards preserved");
 }
 
 void testLedProtocolIsolation(ProximityClassification classification)
@@ -3891,22 +4144,17 @@ void testLedMovementAndSleep(ProximityClassification classification)
         assert(led.busy() && hostPixel().shown == uint32_t(255) << 16);
         movementStep(nextStart + 700); assert(!led.busy() && hostPixel().shown == 0);
     }
-    for (bool coordinated : {false, true})
     {
         freshKnownApp(classification);
         receive({Protocol::VERSION, Type::Event, 70, PEER_DEVICE, Protocol::EventType::UserHeartbeat, 0});
         const auto start = hostNow; ledStep(start, 0); ledStep(start + 65, 90);
-        if (coordinated)
-        {
-            command('i'); command('s'); const auto id = transaction().sleepId;
-            receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepReady, id));
-            receive(incoming(Type::Ack, pendingMessage.messageId));
-            mockedTxInFlight = 1; receive(incoming(Type::SleepAck, id));
-            assert(localState() == LocalState::SLEEPING && led.busy() && physicalSleeps == 0);
-            mockedTxInFlight = 0; assert(sleepTransportBlockedReason() == nullptr);
-            loop(); assert(physicalSleeps == 1);
-        }
-        else { command('x'); assert(benchSleepCalls == 1); }
+        idleForTest(); requestSleepForTest(); const auto id = transaction().sleepId;
+        receive(incoming(Type::Ack, pendingMessage.messageId)); receive(incoming(Type::SleepReady, id));
+        receive(incoming(Type::Ack, pendingMessage.messageId));
+        mockedTxInFlight = 1; receive(incoming(Type::SleepAck, id));
+        assert(localState() == LocalState::SLEEPING && led.busy() && physicalSleeps == 0);
+        mockedTxInFlight = 0; assert(sleepTransportBlockedReason() == nullptr);
+        loop(); assert(physicalSleeps == 1);
         assert(!led.busy() && hostPixel().shown == 0);
         ledStep(start + 515, 0, false);
     }
@@ -3921,7 +4169,7 @@ void testLedMovementAndSleep(ProximityClassification classification)
         setup();
         assert(protocolReady && hostPixel().begins == ledBeginsAtBoot + 1 && !led.busy() && hostPixel().shown == 0);
     }
-    puts("PASS: MOVING/WAITING/CHECKING and OLED/probe work do not pause/cancel LED; manual/coordinated sleep forces OFF immediately; cold/deep startup resets animation");
+    puts("PASS: MOVING/WAITING/CHECKING and OLED/probe work do not pause/cancel LED; coordinated sleep forces OFF immediately; cold/deep startup resets animation");
 }
 
 void freshAutomaticRuntime(uint32_t now = 0)
@@ -3980,7 +4228,7 @@ void testAutomaticSleepBackgroundTraffic()
     for (auto radio : {Transport::ESP_NOW, Transport::CC1101})
     {
         freshAutomaticRuntime(); proximityClassification = ProximityClassification::CLOSE;
-        selectedTransport = radio; pauseAutomaticHeartbeats = false; nextEventTime = 1000;
+        selectedTransport = radio; suppressPeriodicForTest = false; nextEventTime = 1000;
         uint16_t peerId = 10000, firstEvent = 0;
         bool sawRetry = false;
         for (uint32_t now = 0; now <= 35000; now += 50)
@@ -4059,9 +4307,9 @@ void testAutomaticSleepDeferral()
                 const auto packet = incoming(Type::ProximityProbe, 0, 99);
                 queueReceivedData(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet)); break;
             }
-            case 11: forceIdle(hostNow); assert(requestSleep(nextMessageId++, hostNow)); break;
+            case 11: idleAfterInactivity(hostNow); assert(requestSleep(nextMessageId++, hostNow)); break;
             case 12:
-                forceIdle(hostNow); assert(requestSleep(nextMessageId++, hostNow));
+                idleAfterInactivity(hostNow); assert(requestSleep(nextMessageId++, hostNow));
                 PowerManager::injectActivity(hostNow); break;
             case 13: receiveQueue = nullptr; break;
         }
@@ -4154,7 +4402,7 @@ void testAutomaticSleepAdmission()
 {
     static_assert(AUTOMATIC_SLEEP_PEER_GRACE_MS == 3000, "participant inactivity grace changed");
     // Diagnostic IDLE alone cannot waive the recipient's own inactivity requirement.
-    freshAutomaticRuntime(); command('i'); hostNow = 31999;
+    freshAutomaticRuntime(); idleForTest(); hostNow = 31999;
     receive(incoming(Type::SleepRequest, 90));
     assert(localState() == LocalState::IDLE && !transaction().active && automaticSleepArmed);
     assert(countWire(Type::SleepCancel) == 1 && countWire(Type::SleepReady) == 0);
@@ -4194,7 +4442,7 @@ void testAutomaticSleepAdmission()
         if (busy == 9) controlCount = 1;
         if (busy == 10)
         {
-            forceIdle(hostNow); assert(requestSleep(nextMessageId++, hostNow));
+            idleAfterInactivity(hostNow); assert(requestSleep(nextMessageId++, hostNow));
             PowerManager::injectActivity(hostNow);
         }
         if (busy == 11) protocolReady = false;
@@ -4339,7 +4587,7 @@ void testAutomaticSleepMotionPriority()
         if (phase == 3 || phase == 5)
         {
             receive(incoming(Type::Ack, pendingMessage.messageId));
-            delayControlsForTest = phase == 3;
+            deferControlsForTest = phase == 3;
             if (phase == 5) mockedTxInFlight = 1;
             receive(incoming(Type::SleepCommit, id, 101));
         }
@@ -4374,7 +4622,7 @@ void testAutomaticSleepMotionPriority()
     puts("PASS: real Motion cancels WAIT_READY/WAIT_COMMIT/WAIT_ACK/WAIT_SLEEP_ACK_TX, revokes committed drain decisions through existing WAKING semantics, and wins both before queued SLEEP_ACK and after radio service just before physical execution");
 }
 
-void testAutomaticSleepCollisionAndManual()
+void testAutomaticSleepCollision()
 {
     freshAutomaticRuntime(); hostNow = 35000;
     nextMessageId = LOCAL_DEVICE == Device::Bubu ? 40 : 33;
@@ -4394,12 +4642,11 @@ void testAutomaticSleepCollisionAndManual()
         receive(incoming(Type::SleepCommit, 40, 41)); receive(incoming(Type::Ack, pendingMessage.messageId));
     }
     assert(physicalSleeps == 1);
-    freshAutomaticRuntime(); command('i'); command('s');
+    freshAutomaticRuntime(); idleForTest(); requestSleepForTest();
     assert(transaction().active && countWire(Type::SleepRequest) == 1 && !automaticSleepArmed);
-    command('a'); assert(localState() == LocalState::ACTIVE && automaticSleepArmed);
+    activityForTest(); assert(localState() == LocalState::ACTIVE && automaticSleepArmed);
     assert(lastMeaningfulActivity == hostNow - 10);
-    freshAutomaticRuntime(); command('x'); assert(benchSleepCalls == 1 && countWire(Type::SleepRequest) == 0);
-    puts("PASS: simultaneous automatic coordinators retain DeviceId arbitration and hard limit, both roles reach physical entry; manual i/s/a and diagnostic x remain available");
+    puts("PASS: simultaneous automatic coordinators retain DeviceId arbitration and hard limit, both roles reach physical entry; local activity rearms admission");
 }
 
 void buttonStep(uint32_t now, int level)
@@ -4585,7 +4832,7 @@ void testButtonWakeHandoff()
         const auto activity = lastMeaningfulActivity;
         assert(automaticSleepArmed && activity == buttonChangedAt && wakeEvents.empty());
         assert(buttonHeartbeatPending && buttonWakeIntentHeld && led.requests == 0);
-        pauseAutomaticHeartbeats = false; nextEventTime = hostNow;
+        suppressPeriodicForTest = false; nextEventTime = hostNow;
         movementState = MovementState::MOVING; // Button handoff cannot depend on settling/classification.
         wakeTxElapsedMs = 900; loop();
         assert(wakeEvents.size() == 1 && buttonEventPackets() == 1 && !buttonWakeIntentHeld);
@@ -4606,7 +4853,7 @@ void testButtonWakeHandoff()
             assert(memcmp(&packet, &user, sizeof(user)) == 0);
         receiveVia(incoming(Type::Ack, user.messageId), Transport::CC1101);
         assert(!waitingForAck && led.requests == 0 && lastMeaningfulActivity == activity);
-        pauseAutomaticHeartbeats = true;
+        suppressPeriodicForTest = true;
         for (unsigned i = 0; i < 100; ++i) serviceButtonHeartbeat();
         assert(wakeEvents.size() == 1 && occurrences(Serial.log, "BUTTON | PRESSED") == 0);
         buttonRelease(hostNow + 50); resetMovement();
@@ -4752,7 +4999,7 @@ void testRetainedUserAnimation()
 
 void testButtonActivityAndSleep()
 {
-    freshKnownApp(); command('i'); buttonPress(1000);
+    freshKnownApp(); idleForTest(); buttonPress(1000);
     assert(localState() == LocalState::ACTIVE && lastMeaningfulActivity == 1030 && automaticSleepArmed);
     hostNow = 1050; receive(incoming(Type::Ack, pendingMessage.messageId));
     buttonStep(1030 + 34999, LOW); assert(countWire(Type::SleepRequest) == 0);
@@ -4764,8 +5011,8 @@ void testButtonActivityAndSleep()
     assert(countWire(Type::SleepRequest) == 1 && !automaticSleepArmed);
     for (bool participant : {false, true})
     {
-        freshKnownApp(); command('i');
-        if (participant) receive(incoming(Type::SleepRequest, 20)); else command('s');
+        freshKnownApp(); idleForTest();
+        if (participant) receive(incoming(Type::SleepRequest, 20)); else requestSleepForTest();
         assert(transaction().active);
         buttonPress(100);
         assert(localState() == LocalState::ACTIVE && !transaction().active);
@@ -4837,7 +5084,7 @@ void testButtonPendingGuards()
             case 0: protocolReady = false; break;
             case 1: startHeartbeatEvent(); break;
             case 2: controlCount = 1; break;
-            case 3: forceIdle(hostNow); assert(requestSleep(nextMessageId++, hostNow)); controlCount = 0; break;
+            case 3: idleAfterInactivity(hostNow); assert(requestSleep(nextMessageId++, hostNow)); controlCount = 0; break;
             case 4: sleepDrainWaiting = true; break;
             case 5: awakeAckBusy = true; break;
             case 6: mockedTxInFlight = 1; break;
@@ -4921,14 +5168,14 @@ void testButtonTransportsAndPriority()
         for (const auto& ack : receipts) assert(ack.type == Type::Ack && ack.ackForMessageId == received.messageId);
         assert(lastMeaningfulActivity == activity && !automaticSleepArmed && !buttonHeartbeatPending);
     }
-    freshKnownApp(); pauseAutomaticHeartbeats = false; nextEventTime = 130; buttonPress(100);
+    freshKnownApp(); suppressPeriodicForTest = false; nextEventTime = 130; buttonPress(100);
     assert(buttonEventPackets() == 1 && occurrences(Serial.log, "BUTTON HEARTBEAT | SEND") == 1);
     hostNow = 150; receive(incoming(Type::Ack, pendingMessage.messageId));
     assert(nextEventTime == 2650);
     buttonStep(2649, LOW); assert(buttonEventPackets() == 1);
     buttonStep(2650, LOW); assert(buttonEventPackets() == 2 && led.requests == 1 && led.userRequests == 0);
     assert(lastMeaningfulActivity == 130 && occurrences(Serial.log, "BUTTON HEARTBEAT | SEND") == 1);
-    freshKnownApp(); pauseAutomaticHeartbeats = false; nextEventTime = 130; awakeAckBusy = true;
+    freshKnownApp(); suppressPeriodicForTest = false; nextEventTime = 130; awakeAckBusy = true;
     buttonPress(100); assert(buttonHeartbeatPending && buttonEventPackets() == 0);
     awakeAckBusy = false; buttonStep(150, LOW);
     assert(!buttonHeartbeatPending && buttonEventPackets() == 1 && led.requests == 0);
@@ -4948,7 +5195,7 @@ void testButtonUnknown()
         // but may only send after its callback drains, without replacing any packet.
         serviceProximityProbe(1); const auto probes = countWire(Type::ProximityProbe);
         mockedTxInFlight = 1;
-        pauseAutomaticHeartbeats = false; nextEventTime = 130;
+        suppressPeriodicForTest = false; nextEventTime = 130;
         buttonPress(100);
         assert(buttonHeartbeatPending && buttonEventPackets() == 0);
         assert(proximityClassification == classification && selectedTransport == initialRoute);
@@ -5015,11 +5262,12 @@ void testButtonLedOwnership()
     static_assert(sizeof(Protocol::Message) == 8, "user intent changed packet size");
     static_assert(unsigned(Event::Heartbeat) == 1 && unsigned(Event::UserHeartbeat) == 2, "wire enum changed");
     for (auto route : {Transport::ESP_NOW, Transport::CC1101})
+    for (auto classification : {ProximityClassification::CLOSE, ProximityClassification::FAR})
     {
-        // Sender: a button cannot restart its existing CLOSE pulse, and normal
-        // periodic EVENTs still request background output after the shared ACK cadence.
-        freshKnownApp(); notePeerSeen(); selectedTransport = route;
-        pauseAutomaticHeartbeats = false; nextEventTime = 0; loop();
+        // Sender: a button cannot restart its existing background pulse. FAR's
+        // visual clock continues independently of the button's receipt ACK.
+        freshKnownApp(classification); notePeerSeen(); selectedTransport = route;
+        suppressPeriodicForTest = false; nextEventTime = 0; loop();
         assert(led.requests == 1 && led.userRequests == 0 && pendingMessage.event == Event::Heartbeat);
         hostNow = 10; receiveVia(incoming(Type::Ack, pendingMessage.messageId), route);
         hostNow = 75; loop(); assert(hostPixel().shown == uint32_t(90) << 16);
@@ -5030,18 +5278,23 @@ void testButtonLedOwnership()
         assert(hostPixel().shown == uint32_t(180) << 16 && led.requests == 1);
         hostNow = 525; loop(); assert(hostPixel().shown == uint32_t(255) << 16);
         hostNow = 710; loop(); assert(!led.busy());
+        if (classification == ProximityClassification::FAR)
+        {
+            hostNow = 6000; loop();
+            assert(led.requests == 2 && led.userRequests == 0 && !waitingForAck);
+        }
         hostNow = nextEventTime; loop();
         assert(led.requests == 2 && led.userRequests == 0 && pendingMessage.event == Event::Heartbeat);
 
         // Receiver: both its scheduled local output and ordinary peer background
         // requests yield while packets/ACKs keep flowing. No user EVENT is echoed.
-        freshKnownApp(); notePeerSeen(); selectedTransport = route;
-        pauseAutomaticHeartbeats = false; nextEventTime = 0; loop();
+        freshKnownApp(classification); notePeerSeen(); selectedTransport = route;
+        suppressPeriodicForTest = false; nextEventTime = 0; loop();
         hostNow = 10; receiveVia(incoming(Type::Ack, pendingMessage.messageId), route);
         Protocol::Message user{Protocol::VERSION, Type::Event, 70, PEER_DEVICE, Event::UserHeartbeat, 0};
         hostNow = 75; receiveVia(user, route);
         assert(buttonEventPackets() == 1 && led.userRequests == 1 && led.userHeartbeatActive());
-        assert(proximityClassification == ProximityClassification::CLOSE && selectedTransport == route);
+        assert(proximityClassification == classification && selectedTransport == route);
         const auto start = hostNow; ledStep(start, 0); ledStep(start + 65, 90);
         nextEventTime = start + 115; hostNow = nextEventTime; loop();
         assert(pendingMessage.event == Event::Heartbeat && waitingForAck && led.userRequests == 1);
@@ -5055,7 +5308,14 @@ void testButtonLedOwnership()
         assert(led.userRequests == 1 && recentUserEventCount == 1);
         ledStep(start + 260, 0); ledStep(start + 515, 255); ledStep(start + 700, 0, false);
         assert(!led.userHeartbeatActive() && buttonEventPackets() == 2); // Only the two scheduled background EVENTs.
-        hostNow = nextEventTime - 1; loop(); assert(!led.busy());
+        if (classification == ProximityClassification::FAR)
+        {
+            const auto before = led.requests;
+            hostNow = 5999; loop(); assert(!led.busy() && led.requests == before);
+            hostNow = 6000; loop(); assert(led.busy() && led.requests == before + 1);
+            hostNow = nextEventTime - 1; loop(); assert(led.requests == before + 1);
+        }
+        else { hostNow = nextEventTime - 1; loop(); assert(!led.busy()); }
         hostNow = nextEventTime; loop(); assert(led.busy() && !led.userHeartbeatActive());
         assert(pendingMessage.event == Event::Heartbeat && led.userRequests == 1);
 
@@ -5063,15 +5323,15 @@ void testButtonLedOwnership()
         for (auto distance : {ProximityClassification::CLOSE, ProximityClassification::FAR, ProximityClassification::UNKNOWN})
         for (bool negotiate : {false, true})
         {
-            freshKnownApp(); notePeerSeen(); selectedTransport = route;
+            freshKnownApp(classification); notePeerSeen(); selectedTransport = route;
             led.requestHeartbeat(); ledStep(0, 0); hostNow = 65; receiveVia(user, route);
             const auto pulse = hostNow; ledStep(pulse, 0);
-            if (negotiate) { command('i'); command('s'); assert(transaction().active); }
+            if (negotiate) { idleForTest(); requestSleepForTest(); assert(transaction().active); }
             proximityClassification = distance;
             ledStep(pulse + 515, 255); ledStep(pulse + 700, 0, false);
             const auto requests = led.requests;
             hostNow = pulse + 710; receiveVia(background, route);
-            const bool allowed = distance == ProximityClassification::CLOSE && !negotiate;
+            const bool allowed = distance != ProximityClassification::UNKNOWN && !negotiate;
             assert(led.requests == requests + unsigned(allowed) && led.busy() == allowed);
             assert(led.userRequests == 1 && !led.userHeartbeatActive());
             assert(proximityClassification == distance && selectedTransport == route);
@@ -5079,7 +5339,7 @@ void testButtonLedOwnership()
 
         // Communications, retries, debounced input and motion keep running under
         // user ownership. A different user request uses the one-slot restart policy.
-        freshKnownApp(); notePeerSeen(); selectedTransport = route;
+        freshKnownApp(classification); notePeerSeen(); selectedTransport = route;
         receiveVia(user, route); const auto pulse = hostNow; ledStep(pulse, 0);
         buttonPress(100); const auto own = pendingMessage;
         assert(lastMeaningfulActivity == 130 && own.event == Event::UserHeartbeat && led.userRequests == 1);
@@ -5120,12 +5380,97 @@ void testButtonLedOwnership()
         hostNow = start + 900; receive(user);
         assert(led.userRequests == 1 && recentUserEventCount == 1); // ID/time rollover, interleaved retry.
     }
-    puts("PASS: explicit eight-byte user EVENT; button adds no sender pulse and CLOSE continues; receiver priority survives local/remote background traffic; current CLOSE/power eligibility controls resume; ACKs/retries/duplicates have no pulse or echo; input/motion/radio run, distinct users restart one slot, eight-ID cache stays bounded");
+    puts("PASS: explicit eight-byte user EVENT; button adds no sender pulse and CLOSE/FAR continue; receiver priority survives local/remote background traffic; current CLOSE/FAR/power eligibility controls resume; ACKs/retries/duplicates have no pulse or echo; input/motion/radio run, distinct users restart one slot, eight-ID cache stays bounded");
+}
+
+// Compare the real loop's outputs and state with/without each former command.
+// These cases do not use the harness's periodic-scheduling isolation.
+std::string serialInertnessRun(unsigned scenario, char input)
+{
+    freshKnownApp(); hostNow = 100; pendingMessage = {}; ackWaitStart = 0;
+    switch (scenario)
+    {
+        case 0: proximityClassification = ProximityClassification::UNKNOWN; break;
+        case 1: nextEventTime = hostNow; break; // Due CLOSE heartbeat must not be paused.
+        case 2:
+            proximityClassification = ProximityClassification::FAR;
+            selectedTransport = Transport::CC1101; nextEventTime = hostNow; break;
+        case 3: PowerManager::idleAfterInactivity(hostNow); break;
+        case 4: startHeartbeatEvent(); break; // Unchanged ACK/retry/fallback budget.
+        case 5: // Power deadline still advances without consuming serial input.
+            PowerManager::idleAfterInactivity(hostNow);
+            assert(PowerManager::requestSleep(nextMessageId++, hostNow)); break;
+        case 6: completedAwaitingCallbacks(false); break;
+        case 7: motionPendingEvent = MotionEvent::Activity; break;
+        case 8:
+            startProximityCheck(hostNow);
+            assert(proximityUpdateState == ProximityUpdateState::CHECKING); break;
+        case 9:
+            bootInfo.deep = true; bootInfo.cause = CC1101WakeRecovery::Cause::Gpio;
+            bootInfo.gpioMask = 0x20; awakeAckBusy = true; beginButton(); break;
+        case 10: buttonLevel = LOW; break; // Physical press still delivers one intent.
+        case 11:
+            completedAwaitingCallbacks(false); PowerManager::injectActivity(hostNow);
+            protocolReady = false; break;
+    }
+    if (input) Serial.input.push_back(input);
+    const auto start = hostNow;
+    std::string trace;
+    const auto record = [&](unsigned long value) { trace += std::to_string(value) + ","; };
+    const auto packet = [&](const Protocol::Message& value) {
+        trace.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    for (uint32_t elapsed : {0U, 30U, 300U, 600U, 900U, 5100U})
+    {
+        hostNow = start + elapsed;
+        if (scenario == 6 && elapsed == 600) mockedTxInFlight = 0;
+        try { firmwareLoop(); } catch (const PhysicalSleepEntered&) {}
+        record(hostNow); record(static_cast<unsigned>(localState())); record(static_cast<unsigned>(peerState()));
+        record(static_cast<unsigned>(selectedTransport)); record(static_cast<unsigned>(pendingTransport));
+        record(static_cast<unsigned>(movementState)); record(static_cast<unsigned>(proximityClassification));
+        record(static_cast<unsigned>(proximityUpdateState)); record(proximitySampleCount); record(probeOutstanding);
+        record(waitingForAck); record(retryCount); record(ackWaitStart); record(nextMessageId); record(nextEventTime);
+        record(controlCount); record(transaction().active); record(transaction().sleepId);
+        record(static_cast<unsigned>(transaction().phase)); record(transaction().phaseDeadline);
+        record(transaction().hardDeadline); record(cooldownLeftMs(hostNow));
+        record(lastMeaningfulActivity); record(automaticSleepArmed); record(sleepDrainWaiting);
+        record(buttonHeartbeatPending); record(buttonWakeIntentHeld); record(buttonStablePressed);
+        record(automaticSelectionPending); record(espNowFallbackPending); record(haveLastPeerEvent); record(lastPeerEventId);
+        record(led.requests); record(led.userRequests); record(hostPixel().shown);
+        record(motionEventPolls); record(coordinatedAttempts); record(physicalSleeps); record(armAttempts);
+        packet(pendingMessage);
+        for (size_t i = 0; i < controlCount; ++i) { packet(controlQueue[i].message); record(controlQueue[i].notBefore); }
+        record(wire.size()); for (const auto& value : wire) packet(value);
+        record(ccWire.size()); for (const auto& value : ccWire) packet(value);
+        record(wakeEvents.size()); for (const auto& value : wakeEvents) packet(value);
+    }
+    assert(Serial.input.size() == (input ? 1U : 0U));
+    assert(Serial.log.find("Power tests:") == std::string::npos);
+    assert(Serial.log.find("Sleep handshake bench") == std::string::npos);
+    if (scenario == 5) assert(!transaction().active && localState() == LocalState::IDLE);
+    if (scenario == 11) assert(localState() == LocalState::ACTIVE);
+    return trace + Serial.log;
+}
+void testSerialInputIsInert()
+{
+    for (unsigned scenario = 0; scenario < 12; ++scenario)
+    {
+        const auto baseline = serialInertnessRun(scenario, 0);
+        for (char input : std::string("ecpxwisahd?\r\n"))
+        {
+            const auto actual = serialInertnessRun(scenario, input);
+            if (actual != baseline)
+                fprintf(stderr, "Serial inertness mismatch: scenario=%u input=%u\n", scenario, unsigned(input));
+            assert(actual == baseline);
+        }
+    }
+    puts("PASS: all former serial commands/line endings leave real-loop state, radio packets, IDs, retries, power deadlines, animation and physical button/motion behavior identical; input is never consumed");
 }
 
 int main()
 {
     static_assert(sizeof(Protocol::Message) == 8, "wire size changed");
+    testSerialInputIsInert();
     testButtonDebounce(); testButtonDeepSleepWakeIntent(); testButtonActivityAndSleep(); testButtonPendingGuards();
     testButtonWakeHandoff(); testButtonWakeFailures(); testRetainedUserAnimation();
     testButtonTransportsAndPriority(); testButtonUnknown(); testButtonLedOwnership();
@@ -5136,12 +5481,12 @@ int main()
 #endif
     testAutomaticSleepClock(); testAutomaticSleepBackgroundTraffic(); testAutomaticSleepDeferral();
     testAutomaticSleepFailures(); testAutomaticSleepAdmission(); testAutomaticSleepMotionPriority();
-    testAutomaticSleepCollisionAndManual(); testAutomaticSleepStaggeredClocks();
+    testAutomaticSleepCollision(); testAutomaticSleepStaggeredClocks();
     testInitialProximityCadence(); // UNKNOWN must classify without application heartbeat traffic.
     testUnknownHeartbeatSilence(); testKnownHeartbeatRechecks();
     testFsm(); testTransport(); testDelayedCollision(); testFinalSendBounds();
     testSleepDecisionInterface(); testExecutionDrain(); testArmFailure();
-    testRtcHistoryRestart(); testBootRouting(); testManualWakeTx(); testCoordinatedExecution();
+    testRtcHistoryRestart(); testBootRouting(); testPeerWakeRequestGuards(); testCoordinatedExecution();
     testMotionInitialization();
     testMotionSleepEntry();
     testMotionPeerWake();
@@ -5154,12 +5499,15 @@ int main()
     testProximityClassification();
     testAutomaticHeartbeatCadence();
     testAutomaticSelection(); testAutomaticSelectionRetries(); testAutomaticSelectionGuards();
-    testAutomaticSelectionManual(); testAutomaticSelectionSleep();
-    testEspNowFallback(); testFallbackPrecedenceAndManual(); testFallbackRecovery();
+    testAutomaticSelectionIgnoresSerial(); testAutomaticSelectionSleep();
+    testEspNowFallback(); testFallbackPrecedenceAndSerial(); testFallbackRecovery();
     testPeerReturnEvents(); testPeerReturnIsolation(); testPeerReturnTimeout();
     testInitialProximityContact(); testInitialProximityTimeout(); testInitialProximityStartup(); testInitialProximityIsolation();
     testDisplayStartup(); testDisplayTransitions(); testDisplayMotion(); testDisplayGuards(); testDisplaySleep();
     testLedAnimation();
+    testFarLoopCadence();
+    testFarLoopGuardsAndRollover();
+    testFarBackgroundOverlap();
     for (auto classification : {ProximityClassification::CLOSE, ProximityClassification::FAR})
     {
         testLedEvents(classification);

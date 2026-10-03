@@ -52,7 +52,6 @@ namespace PowerManager
     using ControlSender = bool (*)(Protocol::MessageType type, uint16_t sleepId);
     void begin(Protocol::DeviceId device, ControlSender sender);
     void update(uint32_t now);
-    void forceIdle(uint32_t now);
     // The loop has established product eligibility; do not interrupt another state.
     void idleAfterInactivity(uint32_t now);
     void injectActivity(uint32_t now);

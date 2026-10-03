@@ -414,7 +414,7 @@ namespace
     constexpr unsigned long EVENT_INTERVAL_MS =
         2500;
 
-    constexpr unsigned long FAR_EVENT_INTERVAL_MS = 4000;
+    constexpr unsigned long FAR_EVENT_INTERVAL_MS = 6000;
 
     unsigned long automaticHeartbeatIntervalMs()
     {
@@ -494,8 +494,6 @@ namespace
     constexpr size_t CONTROL_QUEUE_LENGTH = 4;
     QueuedControl controlQueue[CONTROL_QUEUE_LENGTH];
     size_t controlCount = 0;
-    bool pauseAutomaticHeartbeats = false;
-    bool delayControlsForTest = false;
 
 
     // ======================================================
@@ -762,7 +760,7 @@ namespace
                           sleepId, message.messageId, accepted);
             return accepted;
         }
-        controlQueue[controlCount++] = {message, uint32_t(millis()) + (delayControlsForTest ? 1000U : 0U)};
+        controlQueue[controlCount++] = {message, uint32_t(millis())};
         return true;
     }
 
@@ -789,8 +787,28 @@ namespace
 
     bool backgroundHeartbeatAllowed()
     {
-        return proximityClassification == ProximityClassification::CLOSE &&
+        return proximityClassification != ProximityClassification::UNKNOWN &&
             PowerManager::automaticHeartbeatAllowed();
+    }
+
+    bool haveFarBackgroundHeartbeat = false;
+    uint32_t lastFarBackgroundHeartbeatAt = 0;
+
+    void requestBackgroundHeartbeat()
+    {
+        if (!backgroundHeartbeatAllowed()) return;
+        if (proximityClassification == ProximityClassification::FAR)
+        {
+            if (led.userHeartbeatActive()) return;
+            const uint32_t now = uint32_t(millis());
+            // Share one FAR cadence across outgoing and incoming background events.
+            // Suppressed requests neither restart the pulse nor postpone the next one.
+            if (haveFarBackgroundHeartbeat &&
+                uint32_t(now - lastFarBackgroundHeartbeatAt) < FAR_EVENT_INTERVAL_MS) return;
+            haveFarBackgroundHeartbeat = true;
+            lastFarBackgroundHeartbeatAt = now;
+        }
+        led.requestHeartbeat();
     }
 
     void startHeartbeatEvent(Transport transport = selectedTransport,
@@ -828,10 +846,10 @@ namespace
         waitingForAck =
             true;
 
-        // Button intent animates only its receiver. Background retains CLOSE output.
+        // Button intent animates only its receiver.
         // Retries only call transmitPendingMessage(), so cannot replay either request.
-        if (event == Protocol::EventType::Heartbeat && backgroundHeartbeatAllowed())
-            led.requestHeartbeat();
+        if (event == Protocol::EventType::Heartbeat)
+            requestBackgroundHeartbeat();
 
         transmitPendingMessage(
             false
@@ -1005,8 +1023,8 @@ namespace
             Serial.printf("PARTNER LED | USER HEARTBEAT | id=%u | via=%s\n",
                           message.messageId, transportName(transport));
         }
-        else if (sendReceipt && message.event == Protocol::EventType::Heartbeat && backgroundHeartbeatAllowed())
-            led.requestHeartbeat();
+        else if (sendReceipt && message.event == Protocol::EventType::Heartbeat)
+            requestBackgroundHeartbeat();
 
 
         // --------------------------------------------------
@@ -1417,22 +1435,21 @@ namespace
         displayedStatus = {};
     }
 
-    void enterPhysicalSleep(bool coordinated)
+    void enterPhysicalSleep()
     {
         led.off(); // Sleep wins immediately; animation is never a drain condition.
         resetMovement(); // An aborted attempt must not retain an old settle timer.
         cancelProximityCheck("SLEEP");
-        const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
         if (motion.prepareForSleep())
         {
             Serial.println("MOTION SLEEP ARM | READY | GPIO3 LOW | activity only | INT_ENABLE=0x10 POWER_CTL=0x08");
-            CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepEntryBlockedReason, coordinated,
+            CC1101WakeRecovery::enterDeepSleep(saveRtcHistory, sleepEntryBlockedReason,
                                                showDeepSleepStatus);
         }
         else
         {
             RtcState::invalidate();
-            Serial.printf("%s | ABORTED | reason=MOTION_NOT_READY_OR_INT1_HIGH\n", label);
+            Serial.println("COORDINATED DEEP SLEEP | ABORTED | reason=MOTION_NOT_READY_OR_INT1_HIGH");
         }
         // Successful deep sleep reboots. Every return restores awake sensing.
         Serial.printf("MOTION SLEEP ARM | CANCELLED | awake_restore=%s\n",
@@ -1476,13 +1493,13 @@ namespace
         Serial.printf("SLEEP EXECUTION READY | sleepId=%u | role=%s\n",
                       decision.sleepId, PowerManager::toString(decision.role));
         Serial.println("SLEEP TRANSPORT DRAINED");
-        enterPhysicalSleep(true);
+        enterPhysicalSleep();
         // Successful deep sleep reboots. A return always means entry failed.
         PowerManager::notifySleepExecutionFailed(millis());
         sleepDrainWaiting = false;
     }
 
-    // Shared manual/boot wake request. The transmitter owns the entire bounded
+    // Shared motion/button wake request. The transmitter owns the entire bounded
     // retry episode; this layer allocates exactly one EVENT after runtime guards.
     void serviceDeferredWakeEvents();
 
@@ -1563,7 +1580,7 @@ namespace
             automaticSelectionPending = false;
             return;
         }
-        // Same awake/drained boundary as manual selection, without refusal logs.
+        // Apply only at the awake/drained boundary.
         // Also keep each proximity measurement on one sampling mode.
         if (applicationTransportPolicyBlocked()) return;
         selectedTransport = target;
@@ -1617,21 +1634,6 @@ namespace
         Serial.printf("BUTTON HEARTBEAT | SEND | via=%s | proximity=%s\n", transportName(transport),
                       proximityClassification == ProximityClassification::UNKNOWN ? "UNKNOWN" : "KNOWN");
         startHeartbeatEvent(transport, Protocol::EventType::UserHeartbeat);
-    }
-
-    void selectApplicationTransport(Transport transport)
-    {
-        // Single loop owner: no command can run inside synchronous wake TX or
-        // physical entry. These guards also cover pending callbacks/RX and drain.
-        if (sleepTransportBlockedReason() || sleepDrainWaiting || !PowerManager::automaticHeartbeatAllowed())
-        {
-            Serial.println("APP TRANSPORT | REFUSED | require awake, drained transport and no sleep transaction");
-            return;
-        }
-        selectedTransport = transport;
-        automaticSelectionPending = false; // Manual choice lasts until the next completed measurement.
-        espNowFallbackPending = false;
-        Serial.printf("APP TRANSPORT | selected=%s\n", transportName(selectedTransport));
     }
 
     const char* displayPeerName(PowerManager::PeerState peer)
@@ -1689,71 +1691,11 @@ namespace
         displayedStatus = current;
     }
 
-    void servicePowerTest()
-    {
-        const uint32_t now = millis();
-        PowerManager::update(now);
-        // Bound serial work too: one character per loop, no waiting for input.
-        if (Serial.available() == 0)
-            return;
-
-        switch (Serial.read())
-        {
-            case 'e': selectApplicationTransport(Transport::ESP_NOW); break;
-            case 'c': selectApplicationTransport(Transport::CC1101); break;
-            case 'p':
-                if (bootInfo.deep) CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);
-                break;
-            case 'x':
-                if (sleepTransportBlockedReason() || !PowerManager::automaticHeartbeatAllowed())
-                    Serial.println("BENCH DEEP SLEEP | REFUSED | require ACTIVE/IDLE and drained transport/RX queue");
-                else
-                    enterPhysicalSleep(false);
-                break;
-            case 'w': requestPeerWake(); break;
-            case 'i': PowerManager::forceIdle(now); break;
-            case 's':
-                if (!protocolReady || waitingForAck || controlCount != 0)
-                    Serial.println("POWER: start refused; wait for transport to drain (p shows pending TX)");
-                else
-                {
-                    if (PowerManager::requestSleep(nextMessageId++, now)) automaticSleepArmed = false;
-                }
-                break;
-            case 'a': noteLocalActivity(now); break; // Explicit local user activity injection.
-            case 'h':
-                pauseAutomaticHeartbeats = !pauseAutomaticHeartbeats;
-                Serial.printf("BENCH: automatic heartbeats %s; pending TX/ACKs still run\n",
-                              pauseAutomaticHeartbeats ? "PAUSED" : "ENABLED");
-                break;
-            case 'd':
-                delayControlsForTest = !delayControlsForTest;
-                Serial.printf("BENCH: initial control delay=%u ms; ACKs/retries/deadlines unchanged\n",
-                              delayControlsForTest ? 1000U : 0U);
-                break;
-            case '?':
-                Serial.println("Power tests: p=status i=IDLE s=handshake a=activity/cancel "
-                               "h=toggle auto heartbeats d=toggle 1s control delay x=BENCH deep sleep "
-                               "w=BENCH CC1101 wake EVENT e=ESP-NOW app c=CC1101 app; successful handshake enters deep sleep");
-                break;
-            default: return; // Includes serial line endings.
-        }
-        Serial.printf("APP TRANSPORT | selected=%s pending=%s cc1101_busy=%d\n",
-                      transportName(selectedTransport), waitingForAck ? transportName(pendingTransport) : "NONE",
-                      CC1101WakeRecovery::awakeBusy());
-        PowerManager::printStatus(now);
-        Serial.printf("TRANSPORT: pending=%d id=%u queued=%u auto_heartbeats=%s control_delay_ms=%u\n",
-                      waitingForAck, waitingForAck ? pendingMessage.messageId : 0,
-                      static_cast<unsigned>(controlCount), pauseAutomaticHeartbeats ? "PAUSED" : "ENABLED",
-                      delayControlsForTest ? 1000U : 0U);
-    }
 }
 
 
-// Only manual bench entry calls save; only real deep-wake startup calls restore.
-// Save belongs at the future final sleep boundary, after all packet IDs have
-// been allocated. Do not save at today's arm check and keep using that snapshot
-// while the CPU continues to send packets.
+// Save at the final coordinated-sleep boundary, after all packet IDs have been
+// allocated; only real deep-wake startup restores this checkpoint.
 void saveRtcHistory()
 {
     RtcState::save({nextMessageId, haveLastPeerEvent, lastPeerEventId,
@@ -1858,7 +1800,6 @@ void setup()
     }
     beginButton();
 
-    Serial.println("Sleep handshake bench: ? for commands. Handshake keeps CPU awake; x is BENCH-only deep sleep.");
     PowerManager::printStatus(millis());
 
     receiveQueue = xQueueCreate(RX_QUEUE_LENGTH, sizeof(Protocol::Message));
@@ -1921,7 +1862,7 @@ void setup()
 
 void loop()
 {
-    led.update(uint32_t(millis()), backgroundHeartbeatAllowed()); // Current state, no saved CLOSE output.
+    led.update(uint32_t(millis()), backgroundHeartbeatAllowed()); // Current distance and power state.
     checkProximityEligibility(); // Observe boundaries even if power changes back to ACTIVE below.
     // Clear stale tracking even if a power transition returns to ACTIVE below.
     if (PowerManager::localState() != PowerManager::LocalState::ACTIVE)
@@ -1930,7 +1871,7 @@ void loop()
     serviceButton(); // Only a debounced press counts as meaningful local activity.
     // Activity/deadlines take effect before any queued control can advance the
     // FSM. Receipt ACKs in the RX batch still run before transport timeouts.
-    servicePowerTest();
+    PowerManager::update(uint32_t(millis()));
     if (!protocolReady)
     {
         failButtonWake("RUNTIME_NOT_READY");
@@ -1981,7 +1922,6 @@ void loop()
 
     if (
         !buttonHeartbeatPending &&
-        !pauseAutomaticHeartbeats &&
         proximityClassification != ProximityClassification::UNKNOWN &&
         PowerManager::automaticHeartbeatAllowed() &&
         controlCount == 0 &&
@@ -1995,6 +1935,12 @@ void loop()
     {
         startHeartbeatEvent();
     }
+
+    // Once a background EVENT starts FAR output, service its shared visual clock
+    // even between packets. ACK/retry completion and an offset peer must not
+    // stretch the six-second rhythm. User animation and power guards still win.
+    if (proximityClassification == ProximityClassification::FAR && haveFarBackgroundHeartbeat)
+        requestBackgroundHeartbeat();
 
     serviceProximityProbe(uint32_t(millis()));
 

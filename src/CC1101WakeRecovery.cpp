@@ -383,10 +383,10 @@ namespace CC1101WakeRecovery
         Serial.printf("WAKE ACK | sent=%d | RX_READY=%d\n", report.ackSent, report.rxReady);
     }
 
-    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated,
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(),
                         void (*beforeSleep)())
     {
-        const char* label = coordinated ? "COORDINATED DEEP SLEEP" : "BENCH DEEP SLEEP";
+        const char* label = "COORDINATED DEEP SLEEP";
         RtcState::invalidate();
         const auto arm = CC1101SleepArm::prepareForSleep();
         Serial.printf("CC1101 SLEEP ARM | %s | reason=%s | MARCSTATE=0x%02X RXBYTES=0x%02X GDO0=%d\n",
@@ -407,7 +407,6 @@ namespace CC1101WakeRecovery
                 result = esp_deep_sleep_enable_gpio_wakeup(highWakeMask, ESP_GPIO_WAKEUP_GPIO_HIGH);
             if (result == ESP_OK)
                 result = esp_deep_sleep_enable_gpio_wakeup(lowWakeMask, ESP_GPIO_WAKEUP_GPIO_LOW);
-            if (result == ESP_OK && !coordinated) result = esp_sleep_enable_timer_wakeup(30ULL * 1000000);
             if (result == ESP_OK)
             {
                 digitalWrite(CS, HIGH);
@@ -417,9 +416,8 @@ namespace CC1101WakeRecovery
             reason = "SETUP_FAILED";
             if (result == ESP_OK)
             {
-                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH + GPIO5 LOW | mask=0x38 | timer=%s\n", label,
-                              coordinated ? "OFF" : "30s INTEGRATION SAFETY TIMER");
-                Serial.printf("%s | ENTERING | USB may disconnect; p reprints wake report\n", label);
+                Serial.printf("%s | ARMED | GPIO4+GPIO3 HIGH + GPIO5 LOW | mask=0x38 | timer=OFF\n", label);
+                Serial.printf("%s | ENTERING | USB may disconnect\n", label);
                 Serial.flush();
                 // Recheck AFTER arm inspection, wake-source setup and logging.
                 reason = blockedReason();

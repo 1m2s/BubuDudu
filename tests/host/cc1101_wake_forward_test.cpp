@@ -130,7 +130,7 @@ void fresh(bool buttonWake = true)
     selectedTransport = Transport::CC1101; proximityClassification = ProximityClassification::UNKNOWN;
     sleepDrainWaiting = false; resetMovement(); resetProximityCheck();
     espNowFallbackPending = automaticSelectionPending = false;
-    pauseAutomaticHeartbeats = true; nextEventTime = 100000;
+    nextEventTime = 100000;
     motionReady = true; displayReady = false;
     hostPixel() = {}; led.begin(); led.userRequests = 0; espPackets.clear();
     PowerManager::begin(LOCAL_DEVICE, queueSleepControl);

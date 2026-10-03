@@ -22,8 +22,8 @@ namespace RtcState
     bool load(History& out);
     void invalidate();
 
-    // Manual bench entry saves AFTER the last ID is
-    // allocated, immediately before sleeping. The handshake still stays awake.
+    // Coordinated entry saves AFTER the last ID is allocated, immediately
+    // before sleeping. Negotiation and transport drain keep the CPU awake.
     // Startup gates load on a real deep-wake reset cause, invalidates
     // on cold boot, and recovers the retained CC1101 FIFO BEFORE begin() can reset
     // the radio. No live execution state is restored.

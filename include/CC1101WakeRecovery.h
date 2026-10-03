@@ -45,13 +45,13 @@ namespace CC1101WakeRecovery
     bool awakeBusy(); // TX/restoration or asserted packet latch; no competing owner.
     bool awakeStopped(); // Runtime failure cutoff; not proof of physical RX readiness.
     void printReport(const BootInfo& boot, bool historyRestored, const Report& report);
-    // Shared manual/coordinated physical entry. Guard returns nullptr when
+    // Coordinated physical entry. Guard returns nullptr when
     // drained, otherwise a diagnostic reason. Success does not return; ANY
     // return is a refusal/abort. Saves only at the final entry boundary.
     // Caller prepares Motion first; guard must also reject asserted GPIO3.
-    // Product sleep uses GPIO wake only; bench entry retains the 30s safety timer.
+    // Product sleep uses GPIO wake only, with the timer disabled.
     // Optional presentation callback runs only after successful arm/setup/final
     // checks; guards are checked again after its framebuffer transfer.
-    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(), bool coordinated,
+    void enterDeepSleep(void (*saveHistory)(), const char* (*blockedReason)(),
                         void (*beforeSleep)() = nullptr);
 }

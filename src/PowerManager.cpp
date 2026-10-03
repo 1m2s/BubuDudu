@@ -180,17 +180,6 @@ namespace PowerManager
         // Expiry alone never starts another transaction; initiation belongs to the loop's policy.
     }
 
-    void forceIdle(uint32_t now)
-    {
-        update(now);
-        if (local != LocalState::ACTIVE && local != LocalState::IDLE)
-        {
-            Serial.println("POWER: IDLE refused; use a to cancel/wake first");
-            return;
-        }
-        setLocal(LocalState::IDLE, "DEV_FORCE_IDLE");
-    }
-
     bool requestSleep(uint16_t requestId, uint32_t now)
     {
         update(now);

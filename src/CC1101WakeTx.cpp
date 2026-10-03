@@ -83,7 +83,7 @@ namespace CC1101WakeTx
                 }
             }
             if (recoveryUsed) return RxResult::Failed;
-            recoveryUsed = true; // One budget for the entire command, not per retry.
+            recoveryUsed = true; // One budget for the entire wake episode, not per retry.
             Serial.println("CC1101 WAKE TX | RX_RECOVERY | attempt=1");
             started = micros();
             if (!inspect(status, started)) return RxResult::Failed;
@@ -107,7 +107,7 @@ namespace CC1101WakeTx
             if (!inspect(status, started)) return TxResult::Failed;
             if (pending(status)) return TxResult::Busy;
             // Minimum proven ece6879 / retained-wake ACK TX sequence. Keep the
-            // verified boot recovery independent of this manual sender.
+            // verified boot recovery independent of this wake sender.
             if (!strobe(SFTX, started) || !select(started)) return TxResult::Failed;
             SPI.transfer(0x3E); SPI.transfer(0x60); releaseBus(); // PATABLE
             if (!select(started)) return TxResult::Failed;

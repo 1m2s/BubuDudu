@@ -388,7 +388,7 @@ void testApplicationRuntime()
     assert(submitAwake(outbound) == SubmitResult::Accepted);
     hostUs += 10000; serviceApplication(); assert(!awakeBusy() && SPI.registers[0x35] == 0x0D);
     // Rejected physical entry leaves the same runtime radio usable, no reset.
-    fresh(); WakePlatform::failSetup = true; enterDeepSleep(save, guard, false);
+    fresh(); WakePlatform::failSetup = true; enterDeepSleep(save, guard);
     assert(submitAwake(outbound) == SubmitResult::Accepted);
     hostUs += 10000; serviceApplication(); assert(SPI.registers[0x35] == 0x0D);
     for (auto command : SPI.commands) assert(command != 0x30);
@@ -425,7 +425,7 @@ void testMixedWakeConfiguration()
     }
 
     fresh(); WakePlatform::failGpioWakeCall = 2;
-    enterDeepSleep(save, guard, true, finalFrame);
+    enterDeepSleep(save, guard, finalFrame);
     assert(WakePlatform::gpioWakeCalls == 2 && WakePlatform::sleepCalls == 0 && saves == 0);
     assert(!WakePlatform::sources && !WakePlatform::timerEnabled && !WakePlatform::held);
     assert(WakePlatform::enabledGpioMask == 0x18 && WakePlatform::highWakeMask == 0x18);
@@ -433,7 +433,7 @@ void testMixedWakeConfiguration()
     // Retry after an aborted entry in the SAME runtime: masks were not reset by ALL.
     WakePlatform::failGpioWakeCall = 0; guardCalls = 0;
     bool entered = false;
-    try { enterDeepSleep(save, guard, true, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
+    try { enterDeepSleep(save, guard, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
     assert(entered && WakePlatform::enabledGpioMask == 0x38 && WakePlatform::highWakeMask == 0x18);
     assert(WakePlatform::hardwareHighMask == 0x18 && !WakePlatform::timerEnabled);
     puts("PASS: installed C3 SDK accumulation/per-pin polarity/ALL clearing modeled; mixed 0x38 wake, checked GPIO5 failure, same-runtime re-arm, GPIO5-only and coincident GPIO4/5 evidence");
@@ -513,73 +513,70 @@ int main()
 
     fresh(); WakePlatform::held = false; WakePlatform::deepHeld = false;
     highDuringSave = true;
-    enterDeepSleep(save, guard, false);
+    enterDeepSleep(save, guard);
     RtcState::History history{};
     assert(saves == 1 && !RtcState::load(history));
     assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
     assert(Serial.log.find("ABORTED") != std::string::npos);
     fresh(); WakePlatform::failSetup = true;
-    enterDeepSleep(save, guard, false); assert(saves == 0 && !WakePlatform::held && !WakePlatform::sources);
+    enterDeepSleep(save, guard); assert(saves == 0 && !WakePlatform::held && !WakePlatform::sources);
     fresh();
     bool entered = false;
-    try { enterDeepSleep(save, guard, false); } catch (const WakePlatform::Entered&) { entered = true; }
+    try { enterDeepSleep(save, guard); } catch (const WakePlatform::Entered&) { entered = true; }
     assert(entered && saves == 1 && RtcState::load(history));
     assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources && csLevel == HIGH);
-    for (bool coordinated : {false, true})
+    fresh(); motionHighDuringSave = true;
+    enterDeepSleep(save, guard, finalFrame);
+    assert(saves == 1 && !RtcState::load(history));
+    assert(finalFrames == 0 && WakePlatform::sleepCalls == 0);
+    assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
+    assert(Serial.log.find("reason=MOTION_INT1_HIGH") != std::string::npos);
+    for (unsigned blocked : {1U, 2U, 3U, 4U})
     {
-        fresh(); motionHighDuringSave = true;
-        enterDeepSleep(save, guard, coordinated, finalFrame);
-        assert(saves == 1 && !RtcState::load(history));
-        assert(finalFrames == 0 && WakePlatform::sleepCalls == 0);
+        fresh(); blockAtGuard = blocked;
+        enterDeepSleep(save, guard, finalFrame);
+        assert(saves == unsigned(blocked >= 3) && !RtcState::load(history));
+        assert(finalFrames == unsigned(blocked == 4) && WakePlatform::sleepCalls == 0);
         assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
-        assert(Serial.log.find("reason=MOTION_INT1_HIGH") != std::string::npos);
-        for (unsigned blocked : {1U, 2U, 3U, 4U})
-        {
-            fresh(); blockAtGuard = blocked;
-            enterDeepSleep(save, guard, coordinated, finalFrame);
-            assert(saves == unsigned(blocked >= 3) && !RtcState::load(history));
-            assert(finalFrames == unsigned(blocked == 4) && WakePlatform::sleepCalls == 0);
-            assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
-            assert(Serial.log.find("reason=TX_IN_FLIGHT") != std::string::npos);
-            for (auto command : SPI.commands) assert(command & 0x80);
-        }
-        for (unsigned failure = 0; failure < 6; ++failure)
-        {
-            fresh();
-            if (failure == 0) SPI.registers[0x02] = 6; // Arm failure.
-            if (failure == 1) WakePlatform::failSetup = true;
-            if (failure == 2) highDuringSave = true;
-            if (failure == 3) WakePlatform::returnFromSleep = true;
-            if (failure == 4) highDuringFrame = true;
-            if (failure == 5) motionDuringFrame = true;
-            enterDeepSleep(save, guard, coordinated, finalFrame);
-            assert(saves == unsigned(failure >= 2) && !RtcState::load(history));
-            assert(finalFrames == unsigned(failure >= 3));
-            assert(WakePlatform::sleepCalls == unsigned(failure == 3));
-            assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
-            if (failure == 2) assert(Serial.log.find("reason=GDO_HIGH") != std::string::npos);
-            if (failure == 3) assert(Serial.log.find("reason=DEEP_SLEEP_RETURNED") != std::string::npos);
-            if (failure == 4) assert(Serial.log.find("reason=GDO_HIGH") != std::string::npos);
-            if (failure == 5) assert(Serial.log.find("reason=MOTION_INT1_HIGH") != std::string::npos);
-            for (auto command : SPI.commands) assert(command & 0x80);
-        }
-        fresh(); entered = false;
-        WakePlatform::timerUs = 30000000; // A previously enabled timer must also be cleared.
-        WakePlatform::timerEnabled = true;
-        try { enterDeepSleep(save, guard, coordinated, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
-        assert(entered && saves == 1 && guardCalls == 4 && RtcState::load(history));
-        assert(finalFrames == 1 && WakePlatform::sleepCalls == 1);
-        assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources);
-        assert(WakePlatform::enabledGpioMask == 0x38 && WakePlatform::hardwareGpioMask == 0x38);
-        assert(WakePlatform::highWakeMask == 0x18 && WakePlatform::hardwareHighMask == 0x18);
-        assert(WakePlatform::gpioWakeCalls == 2);
-        assert(WakePlatform::timerCalls == (coordinated ? 0U : 1U));
-        assert(WakePlatform::timerUs == 30000000U); // ALL leaves stored duration, but disables its trigger.
-        assert(WakePlatform::timerEnabled == !coordinated);
-        assert((Serial.log.find("INTEGRATION SAFETY TIMER") != std::string::npos) == !coordinated);
-        assert((Serial.log.find("timer=OFF") != std::string::npos) == coordinated);
+        assert(Serial.log.find("reason=TX_IN_FLIGHT") != std::string::npos);
         for (auto command : SPI.commands) assert(command & 0x80);
     }
-    puts("PASS: retained FIFO before destructive strobes, bounds/format/RTC rejection, ACK/RX failures, timer, final-GDO abort and bench entry");
-    puts("PASS: shared entry draws final frame once after arm/setup/RTC/guards, checks Motion/RX again after drawing, cleans up failures/returns; product GPIO3/4 HIGH + GPIO5 LOW (0x38, no timer), bench retains 30s timer");
+    for (unsigned failure = 0; failure < 6; ++failure)
+    {
+        fresh();
+        if (failure == 0) SPI.registers[0x02] = 6; // Arm failure.
+        if (failure == 1) WakePlatform::failSetup = true;
+        if (failure == 2) highDuringSave = true;
+        if (failure == 3) WakePlatform::returnFromSleep = true;
+        if (failure == 4) highDuringFrame = true;
+        if (failure == 5) motionDuringFrame = true;
+        enterDeepSleep(save, guard, finalFrame);
+        assert(saves == unsigned(failure >= 2) && !RtcState::load(history));
+        assert(finalFrames == unsigned(failure >= 3));
+        assert(WakePlatform::sleepCalls == unsigned(failure == 3));
+        assert(!WakePlatform::held && !WakePlatform::deepHeld && !WakePlatform::sources);
+        if (failure == 2) assert(Serial.log.find("reason=GDO_HIGH") != std::string::npos);
+        if (failure == 3) assert(Serial.log.find("reason=DEEP_SLEEP_RETURNED") != std::string::npos);
+        if (failure == 4) assert(Serial.log.find("reason=GDO_HIGH") != std::string::npos);
+        if (failure == 5) assert(Serial.log.find("reason=MOTION_INT1_HIGH") != std::string::npos);
+        for (auto command : SPI.commands) assert(command & 0x80);
+    }
+    fresh(); entered = false;
+    WakePlatform::timerUs = 30000000; // A previously enabled timer must also be cleared.
+    WakePlatform::timerEnabled = true;
+    try { enterDeepSleep(save, guard, finalFrame); } catch (const WakePlatform::Entered&) { entered = true; }
+    assert(entered && saves == 1 && guardCalls == 4 && RtcState::load(history));
+    assert(finalFrames == 1 && WakePlatform::sleepCalls == 1);
+    assert(WakePlatform::held && WakePlatform::deepHeld && WakePlatform::sources);
+    assert(WakePlatform::enabledGpioMask == 0x38 && WakePlatform::hardwareGpioMask == 0x38);
+    assert(WakePlatform::highWakeMask == 0x18 && WakePlatform::hardwareHighMask == 0x18);
+    assert(WakePlatform::gpioWakeCalls == 2);
+    assert(WakePlatform::timerCalls == 0);
+    assert(WakePlatform::timerUs == 30000000U); // ALL leaves stored duration, but disables its trigger.
+    assert(!WakePlatform::timerEnabled);
+    assert(Serial.log.find("INTEGRATION SAFETY TIMER") == std::string::npos);
+    assert(Serial.log.find("timer=OFF") != std::string::npos);
+    for (auto command : SPI.commands) assert(command & 0x80);
+    puts("PASS: retained FIFO before destructive strobes, bounds/format/RTC rejection, ACK/RX failures, timer, final-GDO abort and coordinated entry");
+    puts("PASS: coordinated entry draws final frame once after arm/setup/RTC/guards, checks Motion/RX again after drawing, cleans up failures/returns; product GPIO3/4 HIGH + GPIO5 LOW (0x38, no timer)");
 }

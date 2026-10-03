@@ -1,7 +1,7 @@
 #pragma once
 #include "Protocol.h"
 
-// Manual, awake-board bench operation. No ID allocation or power policy here.
+// Peer wake for motion/button boot policy. No ID allocation or power policy here.
 namespace CC1101WakeTx
 {
     enum class Result { Acked, RadioUnavailable, Busy, TxFailed, AckTimeout, InvalidAck };
