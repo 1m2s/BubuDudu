@@ -9,6 +9,7 @@ ESPRESSIF_VID = 0x303A
 UPLOAD_TARGETS = {"upload", "uploadfs", "uploadfsota"}
 PORTS_INI = os.path.join(env.subst("$PROJECT_DIR"), ".pio", "ports.ini")
 MAIN_INI = os.path.join(env.subst("$PROJECT_DIR"), "platformio.ini")
+BUILD_ONLY = os.environ.get("BUBUDUDU_BUILD_ONLY") == "1"
 
 
 def log(msg):
@@ -129,7 +130,12 @@ def write_ports_file():
         log(f"updated {PORTS_INI}")
 
 
-write_ports_file()
+# CI has no boards. Skip even USB enumeration and ports.ini updates, and fail
+# closed if a hardware target is accidentally added to a build-only invocation.
+if BUILD_ONLY and set(COMMAND_LINE_TARGETS) & (UPLOAD_TARGETS | {"monitor_auto", "monitor"}):
+    fail("BUBUDUDU_BUILD_ONLY=1 forbids upload and monitor targets.")
+if not BUILD_ONLY:
+    write_ports_file()
 
 
 # ---- Upload: resolve the port before the upload step runs ----

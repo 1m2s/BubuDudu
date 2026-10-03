@@ -2,7 +2,9 @@ name: Firmware CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,39 +12,61 @@ permissions:
 jobs:
   test-and-build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      BUBUDUDU_BUILD_ONLY: '1'
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Run host tests for both device identities
+      - name: Check integration whitespace
         env:
-          CXX: clang++
-        run: bash tests/host/run.sh
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            base="$PR_BASE_SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && "$PUSH_BEFORE_SHA" != 0000000000000000000000000000000000000000 ]]; then
+            base="$PUSH_BEFORE_SHA"
+          else
+            base="$(git merge-base origin/main HEAD)"
+          fi
+          git diff --check "$base" HEAD
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.11.14'
+
+      - name: Run complete host suite with ASan and UBSan
+        env:
+          CXX: clang++-18
+        run: |
+          clang++-18 --version
+          bash tests/host/run.sh
 
       - name: Cache dependency downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # Keep installed platforms, libraries, build outputs, and ports.ini fresh.
+          # Do not cache ports, compiled firmware or installed dependency trees.
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: ${{ runner.os }}-${{ runner.arch }}-pio-6.2.0-py3.11-${{ hashFiles('platformio.ini', '.github/workflows/firmware-ci.yml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pio-6.2.0-py3.11.14-${{ hashFiles('platformio.ini', '.github/workflows/firmware-ci.yml') }}
 
-      - name: Install PlatformIO Core
-        run: python -m pip install 'platformio==6.2.0'
+      - name: Install verified build tools
+        run: |
+          python -m pip install 'platformio==6.2.0'
+          pio pkg install --global --tool 'platformio/tool-scons@4.41101.0'
 
       - name: Build Bubu firmware
-        # Build-only: no upload or monitor targets. Firmware dependencies remain
-        # unpinned in platformio.ini, so this is not a reproducible-build lock.
-        run: pio run -e bubu
+        run: pio run -e bubu -j 1
 
       - name: Build Dudu firmware after Bubu
-        run: pio run -e dudu
+        run: pio run -e dudu -j 1
+
+      - name: Verify builds leave tracked files unchanged
+        run: git diff --exit-code
