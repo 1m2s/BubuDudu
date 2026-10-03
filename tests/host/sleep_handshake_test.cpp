@@ -18,7 +18,7 @@ struct ObservedLED : LED
 };
 #define LED ObservedLED
 #define loop firmwareLoop
-#include "../../src/main.cpp"
+#include "fixtures/production_app.h"
 #undef loop
 #undef LED
 #include "../../src/LED.cpp"

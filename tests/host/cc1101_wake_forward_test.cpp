@@ -3,14 +3,9 @@
 #include "cc1101/SPI.h"
 #define IRAM_ATTR
 constexpr int INPUT_PULLUP = 3;
-#include "LED.h"
-struct ObservedLED : LED
-{
-    unsigned userRequests = 0;
-    void requestUserHeartbeat() { ++userRequests; LED::requestUserHeartbeat(); }
-};
+#include "fixtures/observed_led.h"
 #define LED ObservedLED
-#include "../../src/main.cpp"
+#include "fixtures/production_app.h"
 #undef LED
 #include "../../src/LED.cpp"
 #include "../../src/PowerManager.cpp"
