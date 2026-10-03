@@ -1,107 +1,50 @@
 # BubuDudu Requirements
 
-## 1. Device concept
+Current firmware status at main `3f6ae82`. “Implemented” describes the code;
+physical acceptance remains incomplete. [Architecture](ARCHITECTURE.md) explains
+runtime ownership, [testing](tests/host/README.md) preserves build/host commands,
+and [hardware acceptance](FINAL_FIRMWARE_TEST.md) records the remaining checks.
 
-Bubu and Dudu are two symmetric wireless companion devices.
+## Implemented behavior
 
-Each device must be capable of:
-- detecting local input
-- sending events
-- receiving events
-- displaying visual feedback
-- detecting motion
-- managing its own power state
+| Area | Current behavior |
+| --- | --- |
+| Device symmetry | Bubu and Dudu share one source tree. PlatformIO identity flags select local/peer configuration; either device can send and receive. |
+| Button interaction | A debounced press queues one UserHeartbeat. The receiver plays a priority 700 ms double pulse; the sender gets no additional user animation. Duplicate events are re-ACKed without repeating the action. |
+| Event delivery | The eight-byte protocol has message types, IDs, matching ACKs, a 300 ms timeout and at most two same-ID retries. Receive callbacks queue packets; the cooperative loop handles protocol state, peer status and simultaneous traffic. Delivery can fail after the bounded attempts. |
+| Radio selection | Application traffic uses ESP-NOW for eligible CLOSE state and CC1101 for FAR, with deferred CC1101 fallback after ESP-NOW event retries exhaust. Fresh eligible CLOSE evidence permits return to ESP-NOW. Pending packets keep their selected transport; sleep controls stay on ESP-NOW. |
+| Motion and proximity | ADXL345 activity/inactivity drives movement/settling and motion wake. Proximity uses fresh ESP-NOW RSSI observations and provisional CLOSE/FAR hysteresis. The last completed classification persists while a new check is pending; UNKNOWN remains possible. |
+| Power | Awake devices stay ACTIVE. After 35 seconds of meaningful local inactivity, sleep admission still requires motion, button, proximity, transport and cooldown guards. REQUEST → READY → COMMIT → SLEEP_ACK establishes semantic agreement; physical entry additionally requires drain and sensor/radio preparation. Product sleep has no timer wake. |
+| Wake and recovery | GPIO3 motion, GPIO4 CC1101 and GPIO5 button can wake the MCU. Startup preserves RTC protocol history and inspects retained radio packets. Motion/button-origin peer wake is bounded; button handoff requires a peer ACK and local RX readiness before user-event delivery. Failed sleep entry returns ACTIVE; its recovery measurement requires a new post-failure EVENT and matching ACK. |
+| Visual feedback | Loop-driven WS2812B animation is non-blocking. CLOSE/FAR background cadence is 2500/6000 ms, subject to current eligibility and user-animation priority. OLED frames contain identity, peer, distance classification, selected radio, status and motion, plus a sleep frame. |
 
-Neither device is permanently the sender or receiver.
+[Button behavior](BUTTON_HEARTBEAT.md) describes debounce, wake intent,
+receiver-only animation and the brief-pulse limitation at final sleep entry.
+[Interfaces](INTERFACES.md) records the current GPIO and bus assignments.
 
-## 2. Primary interaction
+## Remaining work and evidence
 
-When the user triggers an event on one device:
+- Resolve or characterize initial `NOT_IN_RX`, persistent CC1101 `Stopped`, rare
+  failed-sleep hardware recovery and OLED visibility. Host recovery tests and
+  attempted framebuffer transfers do not close these hardware questions.
+- Physically evaluate the trial awake Motion threshold of 0.625 g; the separate
+  sleep threshold remains 3 g. Calibrate proximity against repeatable conditions;
+  CLOSE/FAR is not measured distance.
+- Complete the paired-device acceptance sequence, including radio fallback,
+  button/wake behavior and exact deferred-traffic overlap. Preserve earlier
+  observations with their original dates and conditions.
+- Measure battery current, runtime and charging under load. No battery-life or
+  charging-performance claim follows from the existing assembly notes or simulation.
 
-Bubu → wireless message → Dudu → LED reaction
+## Historical plans
 
-or
+The original requirements proposed gesture recognition (double tap, shake and
+orientation), battery telemetry, additional OLED RSSI/message-ID/ACK fields,
+and a broader set of LED status animations. These remain ideas rather than
+completed capabilities. The implemented activity detector is not a gesture
+classifier. Optional MOSFET power gating is also unimplemented.
 
-Dudu → wireless message → Bubu → LED reaction
-
-The main visual reaction will eventually be a heartbeat-style LED animation.
-
-## 3. Primary wireless communication
-
-ESP-NOW will be the primary communication method.
-
-The application protocol must eventually support:
-- message types
-- message IDs
-- acknowledgements
-- timeout detection
-- limited retries
-- duplicate detection
-- peer availability
-- simultaneous bidirectional events
-
-## 4. Motion sensing
-
-The ADXL345 accelerometer will be used for:
-- activity detection
-- inactivity detection
-- waking the ESP32 from sleep
-- gesture detection
-
-Possible gestures include:
-- double tap
-- shake
-- movement
-- orientation changes
-
-## 5. Power management
-
-The device must support:
-
-Active → Sleep Negotiation → Sleep → Motion Wake → Active
-
-Awake devices remain ACTIVE while stationary; inactivity qualifies sleep admission.
-
-The ADXL345 must be capable of waking the ESP32 when movement occurs.
-
-## 6. Secondary wireless communication
-
-The CC1101 433 MHz radio will be added as a secondary communication system.
-
-ESP-NOW remains the primary radio.
-
-The secondary radio may later be used for fallback communication.
-
-## 7. Diagnostic display
-
-The OLED should eventually display useful system information such as:
-- device identity
-- peer online/offline state
-- RSSI
-- active radio
-- message ID
-- ACK status
-- power state
-- battery information
-
-## 8. LED interface
-
-WS2812B LEDs will provide the main visual interface.
-
-Animations must eventually be non-blocking.
-
-Important states may include:
-- heartbeat
-- connected
-- peer lost
-- searching
-- sleep
-- wake
-- fallback radio
-- gesture events
-
-## 9. Firmware architecture
-
-Bubu and Dudu must use one shared firmware codebase.
-
-Device identity and peer configuration must come from configuration rather than maintaining two separate programs.
+ESP-NOW delivery, CC1101 fallback, heartbeat animation and motion wake have moved
+from those original plans into firmware. The dated [DEVLOG](DEVLOG.md) and older
+branch documents retain the development sequence and historical hardware results;
+their future-tense plans do not redefine the current implementation.
