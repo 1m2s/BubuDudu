@@ -1,37 +1,13 @@
-# BubuDudu
+# BubuDudu — feature/adxl345-motion-wake
 
-BubuDudu is a pair of symmetric wireless companion devices built around the ESP32-C3.
+Historical checkpoint `4fe8171`. Motion wake added to coordinated physical deep sleep and retained CC1101 recovery. GPIO3 and GPIO4 wake sources are distinguished. Automatic peer wake after local motion is not yet connected in setup() at this checkpoint.
 
-Each device can detect user input and motion, communicate wirelessly with the other device, and provide visual feedback.
+## Things learnt
 
-The project is being developed as a complete embedded-systems project with emphasis on communication protocols, sensor integration, power management, hardware interfaces, testing, and maintainable firmware architecture.
+- Arm activity-only ADXL345 interrupts for sleep and restore the awake profile if entry is cancelled.
+- Inspect retained CC1101 traffic before sensor initialization, including after motion or combined-pin wake.
+- An asserted INT1 must block entry rather than cause an immediate sleep/wake cycle.
 
-## Planned Features
+[Boot and sleep ordering](src/main.cpp) · [Motion profiles](src/Motion.cpp) · [Host checks](tests/host/run.sh) · [Development log](DEVLOG.md)
 
-- Bidirectional ESP-NOW communication
-- Application-level acknowledgements and retries
-- Peer availability detection
-- ADXL345 motion sensing
-- Gesture detection
-- Deep-sleep power management
-- Motion-based wake
-- WS2812B heartbeat animations
-- OLED diagnostic interface
-- RSSI-based proximity experimentation
-- CC1101 433 MHz secondary radio
-- Battery-powered operation
-- Shared firmware for Bubu and Dudu
-
-## Development Approach
-
-The project follows a requirements-first development process:
-
-Requirements -> Architecture -> Interfaces -> Pin Map -> Protocol -> Firmware -> Testing
-
-Hardware and software decisions are documented and validated incrementally.
-
-## Current Status
-
-System requirements, architecture, and hardware interfaces have been defined.
-
-An initial theoretical ESP32-C3 pin map is currently being developed and validated on a dedicated design branch.
+[Current main](https://github.com/1m2s/BubuDudu/tree/main)
