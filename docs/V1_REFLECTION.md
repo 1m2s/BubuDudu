@@ -58,14 +58,34 @@ Keeping the tests strict helped too. A [Linux test failure](../DEVLOG.md#2026-10
 found a memory leak in the simulated reboot setup that local checks missed.
 Fixing the test setup was better than turning the check off.
 
+## Why physical validation came late
+
+For much of development, I did not have 18650 batteries or a suitable 5 V DC-DC
+boost module. Neither was available locally, and online delivery would not have
+arrived within the time I had available. This delayed the portable power setup
+needed for realistic, repeated tests of moving one device far away and bringing
+it back while the other stayed still.
+
+Firmware work continued while those physical tests were blocked. That is an
+important reason the software grew faster than its physical validation. The
+delayed tests included FAR/CLOSE transitions, radio fallback to CC1101 when
+ESP-NOW could not deliver, and recovery when the partner returned. Both devices
+ran from batteries on 3 October, shortly before I paused the project.
+There was not enough time left for repeated tests, fixes and retesting.
+
+My lesson is to treat the power supply and component availability as part of
+the test plan from the beginning. A portable device needs portable power early
+enough to test its intended use. If essential hardware is unavailable, I need
+to keep that validation gap visible and limit how much untested behavior I add.
+
 ## What I would approach differently
 
-I combined too many parts at once: two radios, motion, proximity, output and
-sleep. Next time I would add and test one change at a time.
+I would add and physically test one change at a time across the radios, motion,
+proximity, output and sleep, with time reserved for fixing what the tests reveal.
 
-The biggest missed case was simple: **one device moves away and returns while
-the other stays still**. Both need useful current state. I need clear rules for
-when to refresh a result, when it is too old and when to show UNKNOWN.
+The key case left insufficiently tested was simple: **one device moves away and
+returns while the other stays still**. Both need useful current state. I need
+clear rules for when to refresh a result, when it is too old and when to show UNKNOWN.
 The current timeout rule keeps old results, which can leave a device stuck.
 
 Passing computer tests did not mean the devices worked reliably. I need repeated
@@ -104,4 +124,7 @@ Both devices ran on batteries on 3 October. I measured about 3.9 V per cell and
 4. Make one small change, run the [software checks](../tests/host/README.md), then
    compare repeated device tests. Keep calibration and radio recovery as separate questions.
 
-Development stays paused until I have time. There is no promised v2 date.
+I now have ideas for improving stale proximity state and radio fallback/recovery,
+but they still need implementation and testing. With the university semester
+starting, I need to focus on my studies, so development stays paused. There is
+no promised v2 date.

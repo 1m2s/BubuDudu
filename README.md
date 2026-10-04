@@ -46,8 +46,12 @@ PWM exercises also connect to the heartbeat idea. [My reflection](docs/V1_REFLEC
 shows the links to the coursework and what I would improve.
 
 Development was AI-assisted. I am still improving my ability to explain and
-change the C++ code myself. Work ran from September to October 2026; there is
-no planned v2 date.
+change the C++ code myself. Work ran from September to October 2026.
+
+Unavailable 18650 batteries and a 5 V boost module delayed realistic distance,
+return and radio-fallback tests. That taught me to plan the power hardware needed
+for testing early. I have ideas for fixes, but am pausing to focus on the university
+semester. There is no planned v2 date. [Testing constraints and lessons](docs/V1_REFLECTION.md#why-physical-validation-came-late).
 
 ## Debugging and electronics
 

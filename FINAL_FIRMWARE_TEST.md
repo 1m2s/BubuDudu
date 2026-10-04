@@ -6,6 +6,20 @@ v1 is a partly working prototype. Development and device testing are paused.
 The full two-device test plan was not completed. The
 [README](README.md#which-code-was-tested) identifies the flashed code and software checks.
 
+## Why testing was delayed
+
+For much of development, 18650 batteries and a suitable 5 V DC-DC boost module
+were unavailable locally, and online delivery would not have arrived in time.
+Without that portable power setup, I could not carry out realistic, repeated
+distance-and-return tests, including FAR/CLOSE transitions, radio fallback and
+recovery. Both devices ran from batteries on 3 October, but there was little
+time left to investigate the failures and repeat the tests before the pause.
+
+I have ideas for fixes, but the university semester is starting and I need to
+prioritize my studies. The fallback and recovery behavior remains unvalidated
+in the full two-device test plan. The [reflection](docs/V1_REFLECTION.md#why-physical-validation-came-late)
+records the lesson about planning power hardware and physical tests early.
+
 ## Evidence levels
 
 | Label | Meaning |
