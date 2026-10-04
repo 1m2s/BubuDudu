@@ -1,5 +1,7 @@
 # BubuDudu
 
+![BubuDudu companion devices in action](docs/images/bubududu-demo.gif)
+
 | ▶ [Nearby wake](https://github.com/1m2s/BubuDudu/releases/download/v1/ClosePeerWake.mov) | ▶ [Wake farther apart](https://github.com/1m2s/BubuDudu/releases/download/v1/FarPeerWake.mov) | ▶ [Motion and button demo](https://github.com/1m2s/BubuDudu/releases/download/v1/MovingBehavior.mov) |
 | :---: | :---: | :---: |
 | Wake one device and its nearby partner. | Peer wake with the devices farther apart. | Movement, status changes and button interaction. |
