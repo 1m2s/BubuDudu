@@ -40,7 +40,7 @@ is incomplete. See [results and known problems](FINAL_FIRMWARE_TEST.md).
 I study Electrical Engineering & IT at RWU Ravensburg-Weingarten and am entering
 semester 4. This project builds on an embedded-systems course I completed from
 the University of Colorado Boulder, plus RWU's **Computer Technology** and
-**Digital Electronics** lectures and labs.
+**Digital Electronics** lectures and labs, and my university **Circuit Design** class.
 
 I applied binary data, registers, bit masks, interrupts, logic, state machines
 and timing to a working device. The Digital Electronics lab's LED patterns and
@@ -60,7 +60,11 @@ semester. There is no planned v2 date. [Testing constraints and lessons](docs/V1
 | Radio debugging | Battery-indicator idea |
 | --- | --- |
 | ![CC1101 SPI capture](docs/images/cc1101-spi-debug-capture.png) | ![Falstad battery-indicator simulation](docs/images/falstad-battery-indicator-simulation.png) |
-| SPI signals from early radio work. | Simulation only; this indicator was not built. |
+| SPI signals from early radio work. | Applying Circuit Design lessons in Falstad; simulation only, not built. |
+
+The battery-indicator idea was my attempt to apply what I learned in university
+Circuit Design: using resistors to scale a voltage, comparing it with reference
+voltages, and showing the result with LEDs. [What I tried](docs/V1_REFLECTION.md#electronics-that-remain-unfinished).
 
 [Image notes](docs/images/README.md) · [Simulation file](simulations/battery_indicator_v1.txt) ·
 [Development log](DEVLOG.md)

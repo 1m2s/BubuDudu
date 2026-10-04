@@ -29,6 +29,10 @@ SHA-256: `d303dc592e9d61729ed5b1ef71c42be195bb2716fbcfb85f7282e7fb35265ed7`
 
 ![Battery-indicator simulation](falstad-battery-indicator-simulation.png)
 
+A Falstad experiment applying ideas from my university Circuit Design class:
+scaling battery voltage with resistors, comparing it with reference voltages and
+using LEDs to indicate the result. [Course connection](../V1_REFLECTION.md#electronics-that-remain-unfinished).
+
 A circuit idea, not a built indicator. The screenshot and
 [saved circuit](../../simulations/battery_indicator_v1.txt) are separate experiment
 records. Final switching thresholds were unfinished.

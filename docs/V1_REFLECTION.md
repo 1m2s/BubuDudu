@@ -21,10 +21,12 @@ from input to packet, reply and LED output, including what happens when a step f
 | **Computer Technology — lab** | ARM assembly, reading/writing memory, flags, bit masks and Linux/Make tools. | Sensor settings, [wake-pin masks](../src/CC1101WakeRecovery.cpp) and understanding how source files become firmware. |
 | **Digital Electronics — lecture** | Boolean logic, truth tables, logic levels, sequential circuits and state machines. | Sleep conditions, HIGH/LOW inputs, [power states](../src/PowerManager.cpp) and [LED phases](../src/LED.cpp). |
 | **Digital Electronics — lab** | VHDL/FPGA logic, timed LED patterns including a heartbeat, and PWM dimming. | Planning pulse timing and brightness. BubuDudu sends colour values to a WS2812B through the NeoPixel library. |
+| **Circuit Design** | Falstad simulation, voltage dividers, amplifier circuits, filtering, sampling, comparators and reference voltages. | Trying voltage scaling, threshold comparisons and LED indication in the [battery-indicator simulation](../simulations/battery_indicator_v1.txt). |
 
-The labs used ARM assembly and FPGA/VHDL hardware design. BubuDudu uses C++ on
-a RISC-V ESP32-C3, so I applied the ideas on a different platform. Lab preparation
-and report writing also helped me separate expected results from what I observed.
+The Computer Technology and Digital Electronics labs used ARM assembly and
+FPGA/VHDL hardware design. BubuDudu uses C++ on a RISC-V ESP32-C3, so I applied
+the ideas on a different platform. Lab preparation and report writing also helped
+me separate expected results from what I observed.
 
 ### Course material references
 
@@ -35,6 +37,12 @@ These are document dates, not my course-completion dates:
 - *Rechnertechnologie: Labor*, 14 February 2024: sections 2.3–2.6 and chapters 3–5.
 - *Digital Electronics*, 30 September 2025: chapters 2–4 and 6–8.
 - *Digital Electronics: Lab Notes*, 22 October 2025: chapters 2–6.
+
+The Circuit Design connection also draws on course exercises covering sensor
+bridges, signal amplification, noise filtering, sampling and a 3-bit
+analog-to-digital converter (turning a voltage into one of eight digital levels).
+The comparator and reference-voltage exercises were especially relevant to my
+battery-indicator idea.
 
 ## Concepts I tried to put into practice
 
@@ -97,7 +105,13 @@ more layers of code are useful only when they solve a real problem.
 ![Battery-indicator simulation](images/falstad-battery-indicator-simulation.png)
 
 I explored a comparator battery indicator in [Falstad](../simulations/battery_indicator_v1.txt).
-It uses ideal components; I did not build it or finish the switching thresholds
+This was my attempt to apply what I had learned in my university Circuit Design
+class. The class used Falstad to explore how circuits measure and process signals.
+For BubuDudu, I tried resistor voltage dividers to scale the battery voltage,
+comparators to compare that voltage with reference levels, and LEDs to show the
+result. It gave me a project-specific reason to experiment with those ideas.
+
+The simulation uses ideal components; I did not build it or finish the switching thresholds
 that prevent flicker. MOSFET power switching is also unfinished. The
 [19 September notes](../DEVLOG.md#2026-09-19) preserve the experiment.
 
