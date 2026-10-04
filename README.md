@@ -64,6 +64,23 @@ visible OLED output or battery runtime.
 
 ## A view of the work
 
+### v1 demonstration videos
+
+Original MOV recordings are available as assets on the
+[v1 prototype pre-release](https://github.com/1m2s/BubuDudu/releases/tag/v1).
+
+| Recording | Demonstration described by the author |
+| --- | --- |
+| [ClosePeerWake.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/ClosePeerWake.mov) | Local wake and peer wake with the devices nearby. |
+| [FarPeerWake.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/FarPeerWake.mov) | Peer wake with the devices farther apart. |
+| [MovingBehavior.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/MovingBehavior.mov) | Moving, settling and checking status, plus button interaction. |
+
+These show selected v1 demonstrations; the proximity/transition limitations above
+remain open. “Far” is the recording's name, not a measured range.
+[Recording provenance and download sizes](docs/videos/README.md).
+
+### Debugging and simulation
+
 | Hardware debugging | Analog exploration |
 | --- | --- |
 | ![Historical SPI capture with decoded MOSI and MISO transfers](docs/images/cc1101-spi-debug-capture.png) | ![Falstad battery-indicator candidate with dividers, comparator stages and LEDs](docs/images/falstad-battery-indicator-simulation.png) |

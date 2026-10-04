@@ -4424,3 +4424,19 @@ This log-only follow-up uses commit subject
 firmware changes. The final commit's own push-triggered CI remains visible in
 [the live workflow history](https://github.com/1m2s/BubuDudu/actions/workflows/firmware-ci.yml).
 The saved restart point above stands; the development period is closed.
+
+### v1 recording publication follow-up
+
+The author subsequently supplied `ClosePeerWake.mov`, `FarPeerWake.mov` and
+`MovingBehavior.mov` and requested their upload to GitHub. The media publication
+uses the `v1` prototype pre-release, with the unchanged MOV files stored as release
+assets and linked from the README. [Recording provenance](docs/videos/README.md)
+records source locations, byte sizes and SHA-256 hashes. Original Downloads and
+Desktop copies are preserved; the videos are not added to Git source history.
+
+Descriptions identify nearby peer wake, separated peer wake, and motion/status
+plus button interaction, as reported by the author. This adds demonstration
+recordings without claiming full acceptance, measured range or a reliability
+rate. Firmware, tests, build settings and hardware remain unchanged; development
+stays paused and the saved v2 restart point stands. The unrelated VS Code setting
+remains excluded from the media documentation commit.
