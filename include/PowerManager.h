@@ -4,12 +4,12 @@
 #include "Protocol.h"
 
 // Single owner: Arduino setup()/loop(), never the Wi-Fi callback.
-// This checkpoint models power state only; it cannot suspend radio or CPU.
+// Owns power policy; SleepRuntime and CC1101WakeRecovery execute physical sleep.
 namespace PowerManager
 {
     enum class LocalState : uint8_t
     {
-        // RAM-only; retain existing values for the remaining states.
+        // RAM-only; value 1 belonged to removed IDLE. Keep the v1 numeric values.
         ACTIVE = 0, SLEEP_NEGOTIATING = 2, SLEEPING = 3, WAKING = 4
     };
 

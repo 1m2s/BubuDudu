@@ -106,8 +106,8 @@ namespace CC1101WakeTx
             if (!strobe(SIDLE, started) || !waitState(1, started)) return TxResult::Failed;
             if (!inspect(status, started)) return TxResult::Failed;
             if (pending(status)) return TxResult::Busy;
-            // Minimum proven ece6879 / retained-wake ACK TX sequence. Keep the
-            // verified boot recovery independent of this wake sender.
+            // Flush only TX, set PATABLE and fill the TX FIFO before STX.
+            // Keep retained-packet recovery independent of this wake sender.
             if (!strobe(SFTX, started) || !select(started)) return TxResult::Failed;
             SPI.transfer(0x3E); SPI.transfer(0x60); releaseBus(); // PATABLE
             if (!select(started)) return TxResult::Failed;

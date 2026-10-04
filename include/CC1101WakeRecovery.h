@@ -30,7 +30,7 @@ namespace CC1101WakeRecovery
     // Validated EVENT -> application dedup/history -> receipt packet for CC1101.
     using EventHandler = Protocol::Message (*)(const Protocol::Message&, bool& processed);
     // Inspect retained radio on ANY deep wake. Healthy empty RX is valid on
-    // motion/timer wake; a coincident real RF packet is preserved/processed.
+    // motion/button wake; coincident RF is preserved. Product sleep has no timer.
     Report recover(bool historyRestored, Protocol::DeviceId peer, EventHandler handler);
     using ReceiveHandler = void (*)(const Protocol::Message&);
     enum class SubmitResult { Accepted, Busy, Failed };

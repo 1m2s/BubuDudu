@@ -6,7 +6,7 @@
 
 namespace ESPNowRadio
 {
-    // Local diagnostics only; never transmitted or used for protocol delivery.
+    // RSSI input for local diagnostics/proximity; classification can select transport.
     struct RssiObservation
     {
         Protocol::Message message;
@@ -16,13 +16,10 @@ namespace ESPNowRadio
     };
     bool takeRssiObservation(RssiObservation& observation);
 
-    // Application observations only; counters are shared with Wi-Fi callbacks.
+    // Sleep-drain observations; counters are shared with Wi-Fi callbacks.
     unsigned txInFlight();
     bool receiveCallbackActive();
-    // Function type used when ESP-NOW receives data.
-    //
-    // Another part of the program can give ESPNowRadio
-    // a function matching this shape.
+    // Registered receive handler runs in the Wi-Fi task and queues packet bytes.
     using ReceiveHandler =
         void (*)(
             const uint8_t* data,

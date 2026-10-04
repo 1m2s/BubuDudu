@@ -1,35 +1,25 @@
 # Host tests and firmware builds
 
-**v1 is paused with incomplete hardware acceptance.** These commands remain a
-reproducible software baseline for a future return; no additional physical tests
-are required for closure. The [final findings](../../FINAL_FIRMWARE_TEST.md)
-record unreliable proximity/radio transitions despite passing software checks.
-
-During the 4 October 2026 closure, [GitHub run 37152115281](https://github.com/1m2s/BubuDudu/actions/runs/37152115281)
-was verified successful for the user-reported upload target `ecd9d4f`: the
-complete host suite with ASan/UBSan, sequential Bubu and Dudu builds, whitespace
-and tracked-file checks. Later documentation commits preserve the firmware,
-tests and build inputs. See [live runs](https://github.com/1m2s/BubuDudu/actions/workflows/firmware-ci.yml)
-and the appended [DEVLOG](../../DEVLOG.md) for closure validation.
-
-Run the complete suite from any working directory with Bash and a C++11 compiler:
+From the repository root, run the complete suite with Bash and a C++11 compiler:
 
 ```sh
 CXX=clang++ bash tests/host/run.sh
 ```
 
 The runner enables AddressSanitizer and UndefinedBehaviorSanitizer, treats warnings
-as errors and stops on sanitizer findings. It supports macOS Bash 3.2 and Linux
-Bash; empty per-identity flag arrays are expanded without the Bash 3.2 `nounset`
-pitfall. Each binary is saved in the temporary directory printed at completion.
+as errors and stops on sanitizer findings. These tools detect invalid memory
+access and undefined program operations in the exercised paths. The runner
+supports macOS Bash 3.2 and Linux Bash. Binaries are saved in the temporary
+directory printed at completion.
 Python 3 runs the port-selection guard test. GitHub Actions uses the same runner
 with `clang++-18`, with no separate CI test selection.
 
 ## Production-loop suites
 
 Every `suites/*_test.cpp` is discovered and run for **both identities**. There are
-15 suites containing the former monolith's 92 unchanged test functions and 1,558
-assertions. Parameterized CLOSE/FAR cases run for both classifications.
+15 suites containing 92 cases, each run for both identities. Parameterized
+CLOSE/FAR cases exercise both classifications. Standalone suites below are
+additional to that count.
 
 | Suite | Coverage |
 | --- | --- |
@@ -50,9 +40,18 @@ assertions. Parameterized CLOSE/FAR cases run for both classifications.
 | `serial_input` | Former serial commands remain inert across twelve real-loop scenarios |
 
 `fixtures/production_app.h` includes the actual extracted `.cpp` implementations
-and `main.cpp` for white-box assertions. Firmware compiles those modules as
-separate translation units. No production logic is reproduced in the harness.
-`runtime_doubles.h` supplies deterministic hardware observations;
+and `main.cpp`. The tests use **white-box assertions**: they inspect and set
+internal state directly, so internal renames can require test changes. Firmware
+compiles those modules separately.
+
+`runtime_doubles.h` replaces `ESPNowRadio`, `CC1101SleepArm`,
+`CC1101WakeRecovery`, `CC1101WakeTx`, `Motion` and `Display` with deterministic
+**test doubles**, substitutes whose responses the test controls. GPIO, time,
+queues, Serial and peripheral libraries also use host substitutes. The application
+loop/policy, PowerManager, RTC logic and LED state machine execute real code;
+this is not a hardware simulation of the entire device.
+
+`runtime_doubles.h` records interactions;
 `runtime_fixture.h` owns reset and real-loop scheduling helpers;
 `scenario_helpers.h` contains helpers used by multiple suites. Helpers used by
 only one suite stay beside its cases. `observed_led.h` counts requests while
@@ -85,6 +84,21 @@ consumer and LED, including queue exhaustion, preserved unread FIFO packets,
 failed RX recovery and a stopped awake driver. Motion and display driver tests
 execute their real implementations against Wire/U8g2/GPIO recorders.
 
+## Limits
+
+The production-loop harness runs one device against a scripted peer. It does
+not model two independently running devices where only one moves away and
+returns. `testKnownHeartbeatRechecks` in `proximity_startup_test.cpp` explicitly
+expects a timed-out check to retain the old classification. Passing that case
+confirms the implemented policy; it does not establish that the policy keeps
+stationary-peer state useful. That is the central gap exposed by the
+[physical findings](../../FINAL_FIRMWARE_TEST.md).
+
+Real-driver suites exercise additional boundaries, but host results cannot
+establish RF reliability, hardware scheduling, motion/RSSI calibration, visible
+OLED/LED behavior or power consumption. No test changes are part of the v1
+documentation cleanup.
+
 ## Reproducible build inputs and CI
 
 The pinned working versions are PlatformIO Core 6.2.0, Espressif32 7.1.2,
@@ -114,6 +128,6 @@ The [workflow](../../.github/workflows/firmware-ci.yml) runs on pull requests an
 all branch pushes, including integration and main. It checks the relevant diff,
 runs the entire host suite, builds Bubu then Dudu with `-j 1`, and checks that
 builds left tracked files unchanged. Download caches do not contain port settings
-or compiled firmware. Live run links and evidence belong in [DEVLOG](../../DEVLOG.md).
-Software checks do not establish RF reliability, rare hardware sleep recovery,
-physical LED acceptance, OLED visibility or battery performance.
+or compiled firmware. The [README version map](../../README.md#which-code-was-tested) links the verified
+v1 CI run. [Upload and monitor instructions](../../INTERFACES.md#upload-and-serial-monitor)
+describe the separate hardware workflow.

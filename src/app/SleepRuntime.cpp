@@ -158,7 +158,7 @@ namespace SleepRuntime
             rtcRestored = RadioRuntime::restoreRtcHistory();
             if (!rtcRestored) RtcState::invalidate();
             // GPIO mask identifies the wake SOURCE, not whether FIFO data exists.
-            // Inspect retained RX even for motion/timer (empty is normal); never
+            // Inspect retained RX even for motion/button (empty is normal); never
             // reset away a coincident packet. All GPIO wake inputs use this same path.
             wakeReport = CC1101WakeRecovery::recover(rtcRestored, PEER_DEVICE, RadioRuntime::handleWakeEvent);
             CC1101WakeRecovery::printReport(bootInfo, rtcRestored, wakeReport);

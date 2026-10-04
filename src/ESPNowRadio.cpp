@@ -122,6 +122,7 @@ namespace
                           result, disabled);
             return;
         }
+        // Legacy log wording: these observations also drive local proximity/radio selection.
         Serial.println("ESPNOW RSSI | OBSERVER READY | diagnostics only");
     }
 
@@ -199,7 +200,7 @@ namespace
             length
         );
 
-        // Forward bytes only; the loop-owned consumer validates and dispatches packets.
+        // After logging above, forward bytes; the loop validates and dispatches packets.
         if (
             applicationReceiveHandler !=
             nullptr

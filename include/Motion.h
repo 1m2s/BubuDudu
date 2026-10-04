@@ -2,9 +2,7 @@
 
 #include <Arduino.h>
 
-// ======================================================
-// Events that the Motion module can report
-// ======================================================
+// Activity/inactivity events reported by the ADXL345.
 
 enum class MotionEvent
 {
@@ -14,20 +12,8 @@ enum class MotionEvent
 };
 
 
-// ======================================================
-// Motion
-//
-// Responsible for:
-// - ADXL345 configuration
-// - activity/inactivity detection
-// - ADXL345 interrupt handling
-//
-// NOT responsible for:
-// - putting ESP32 to sleep
-// - LEDs
-// - ESP-NOW
-// - system state
-// ======================================================
+// Owns ADXL345 configuration and interrupt handling. Application modules own
+// power policy, radio delivery and presentation.
 
 class Motion
 {
@@ -59,7 +45,7 @@ public:
     // Useful after deep-sleep wake.
     MotionEvent getStartupEvent() const;
 
-    // Needed by the power code for deep-sleep wake.
+    // Configured interrupt pin, exposed for startup diagnostics.
     uint8_t getInterruptPin() const;
 
     // Temporarily stop normal awake ISR handling.

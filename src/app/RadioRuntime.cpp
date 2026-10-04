@@ -385,7 +385,7 @@ namespace RadioRuntime
         return true;
     }
 
-    // Wi-Fi task: copy bytes only. loop() owns all application state.
+    // Called after Wi-Fi RX logging: queue bytes; loop() owns protocol/policy state.
     void queueReceivedData(const uint8_t *data, size_t length)
     {
         if (length != sizeof(Protocol::Message))

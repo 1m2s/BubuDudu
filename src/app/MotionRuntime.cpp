@@ -315,7 +315,7 @@ namespace MotionRuntime
     }
     void serviceRssiObservations()
     {
-        // Best-effort diagnostics only, after all normal protocol/sleep/motion work.
+        // Bounded RSSI diagnostics and proximity input; classification can select transport.
         // Never drain indefinitely or include this backlog in sleep-entry guards.
         for (unsigned i = 0; i < 2; ++i)
         {

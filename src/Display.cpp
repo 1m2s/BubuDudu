@@ -57,6 +57,7 @@ void Display::showDeepSleep(const char* deviceName)
     oled.drawStr(0, 25, "STATUS:");
     oled.drawStr(0, 35, "DEEP SLEEP");
     oled.drawStr(0, 50, "WAKE:");
+    // Frozen v1 caption omits button wake; GPIO5 LOW is also enabled.
     oled.drawStr(0, 60, "MOTION / PEER");
     oled.sendBuffer();
 }

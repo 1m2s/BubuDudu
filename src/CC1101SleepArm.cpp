@@ -7,8 +7,8 @@ namespace CC1101SleepArm
 {
     namespace
     {
-        // Pin mapping, SPI mode/rate, reset sequence and RX profile adapted
-        // from ece6879: CC1101Radio::begin/reset/configureForPacketTest.
+        // Shared bus pins/settings and the retained CC1101 packet profile.
+        // Cold boot configures the radio; deep wake preserves its unread FIFO.
         using namespace CC1101Bus;
         constexpr uint8_t IOCFG0 = 0x02, PARTNUM = 0x30, VERSION = 0x31;
         constexpr uint8_t MARCSTATE = 0x35, RXBYTES = 0x3B;

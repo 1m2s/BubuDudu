@@ -60,13 +60,14 @@ namespace CC1101WakeRecovery
         bool wakeRetryTx = false;
         bool receiptTx = false;
 
+        // Packet transmitter used for receipt ACKs and awake EVENTs.
         bool startAck(const Protocol::Message& ack)
         {
             const uint32_t started = micros();
             if (!strobe(SIDLE, started) || !waitState(1, started) || !strobe(SFTX, started))
                 return false;
-            // The receive-only arm checkpoint omitted TX power. Proven ece6879
-            // PATABLE=0x60 is installed here, AFTER the wake packet was copied.
+            // Install TX power (PATABLE 0x3E, value 0x60) before FIFO TX.
+            // The caller preserves any received packet before this sequence.
             if (!select(started)) return false;
             SPI.transfer(0x3E); SPI.transfer(0x60); releaseBus();
             if (!select(started)) return false;
@@ -81,7 +82,7 @@ namespace CC1101WakeRecovery
         bool transmitAck(const Protocol::Message& ack)
         {
             if (!startAck(ack)) return false;
-            delayMicroseconds(1000); // Proven TX/calibration settling interval.
+            delayMicroseconds(1000); // TX/calibration settling interval retained from bring-up.
             const uint32_t txStarted = micros();
             while (uint32_t(micros() - txStarted) < 200000)
             {
@@ -177,7 +178,7 @@ namespace CC1101WakeRecovery
             report.reason = "EMPTY_FIFO";
             if (state == 0x0D && report.radio.gdo == LOW)
             {
-                report.rxReady = true; // Timer fallback in healthy RX: leave alone.
+                report.rxReady = true; // Healthy empty RX on deep wake needs no recovery.
                 return report;
             }
         }

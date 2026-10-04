@@ -3,30 +3,22 @@
 **Closed development period: 4 October 2026 (Europe/Berlin).** v1 is a partially
 working integrated prototype. Development is paused until free time is available,
 possibly during a holiday; no v2 date is promised. The [final physical findings](../FINAL_FIRMWARE_TEST.md)
-are the acceptance record. Calling this milestone v1 does not convert missing
-evidence into passes, and no further physical tests are required to close it.
+are the acceptance record. The evidence levels and remaining limitations are defined there.
 
 ## Learning context
 
 I am an Electrical Engineering & IT student at RWU Ravensburg-Weingarten,
 entering semester 4. I completed an embedded-systems course from the University
-of Colorado Boulder and tried to apply what I learned, to the best of my
-understanding. I am not claiming that this project was assessed by that
-university or that I am affiliated with it.
+of Colorado Boulder and used this project to practise embedded design.
 
-Development was AI-assisted, including implementation and documentation work.
-The source, commits and tests show what exists and what was checked; they do not
-prove that I independently understand every C++ detail. I want to become better
-at explaining, tracing and modifying the implementation myself. A useful next
-exercise is to follow one button request from input to queue, packet, ACK and
+Development was AI-assisted, including implementation and documentation. I want
+to become better at explaining, tracing and modifying the implementation myself.
+A useful next exercise is to follow one button request from input to queue, packet, ACK and
 receiver animation, then explain each timeout and failure path without relying
 on generated explanations.
 
-I estimate approximately **14 active working days** during limited summer
-availability. This is my estimate, not a verified activity count or an hours
-claim. The DEVLOG spans September 7 to October 4, and Git activity records
-checkpoints rather than time worked. The limited window helps explain the pause
-and scope choices; the unresolved defects still matter.
+The development records span 7 September–4 October 2026. This date range does
+not estimate working days or hours.
 
 ## Concepts I tried to put into practice
 
@@ -35,7 +27,7 @@ and scope choices; the unresolved defects still matter.
 | Shared firmware configuration | [PlatformIO identities](../platformio.ini) and [Config.h](../include/Config.h) build Bubu and Dudu from the same source. Identity differences need not become two diverging programs. |
 | Hardware interfaces | [Interfaces](../INTERFACES.md) maps shared I²C, CC1101 SPI and GPIO wake inputs. Motion initializes I²C once before the OLED uses it. A bus ACK alone cannot establish correct application behavior. |
 | Structured messages and reliability | [Protocol.h](../include/Protocol.h) defines an eight-byte message. [RadioRuntime](../src/app/RadioRuntime.cpp) matches ACKs, limits retries and keeps a retry's ID stable; duplicates can be acknowledged without replaying an action. Failure remains possible after the budget. |
-| Callbacks and queues | Wi-Fi callbacks copy packets into a bounded queue; the cooperative loop processes them and owns protocol state. This separates arrival from decisions about retries, peer state and output. |
+| Callbacks and queues | The ESP-NOW receive callback logs metadata and copies packets into a bounded queue; the cooperative loop processes them and owns protocol state. This separates arrival from decisions about retries, peer state and output. |
 | State machines and non-blocking output | [PowerManager](../src/PowerManager.cpp) separates sleep agreement from execution. [LED.cpp](../src/LED.cpp) advances animation with time so normal loop servicing can continue. The active application does not create FreeRTOS application tasks. |
 | Sleep/wake and retained state | [SleepRuntime](../src/app/SleepRuntime.cpp), [RtcState](../include/RtcState.h) and CC1101 wake modules distinguish boot evidence, retained messages, semantic agreement and guarded physical entry. Waking the peer and delivering its user event require different acknowledgements. |
 | Debugging, version control and testing | Serial output, bus captures, host fault injection, sanitizer checks, builds and dated Git checkpoints answer different questions. A screenshot or a passing suite is useful only within that evidence's limits. |
@@ -105,11 +97,9 @@ deferring final hysteresis. Neither establishes real comparator behavior or a
 finished analog power subsystem. The physical comparator indicator, reference
 generation and MOSFET power gating were not completed.
 
-Battery supply assembly and basic battery-powered operation were separately
-reported on October 3, with about 3.9 V per cell and 4.99–5.02 V at the booster
-output. Those historical user measurements do not supply current consumption,
-battery runtime or charging-under-load characterization. The simulation cannot
-fill that evidence gap.
+On October 3 I assembled the battery supply and operated both devices from it.
+I measured about 3.9 V per cell and 4.99–5.02 V at the booster output. I did not
+measure current consumption, runtime or charging under load.
 
 ## Aspirations for a possible v2
 
@@ -126,12 +116,11 @@ None of these items is already implemented or purchased as part of this closure.
 
 ## Saved restart point
 
-1. Read [final findings](../FINAL_FIRMWARE_TEST.md) and the final
-   [DEVLOG entry](../DEVLOG.md#2026-10-04--v1-prototype-closure-and-development-pause).
-   Start from the v1 documentation checkpoint on `main`. The reported installed
-   firmware target is `ecd9d4f`; `edd622f` and this closure are later documentation
-   changes with the same firmware sources. Upload transcripts/version readback
-   were not supplied.
+1. Read [final findings](../FINAL_FIRMWARE_TEST.md) and the
+   [v1 closure record](../DEVLOG.md#2026-10-04--v1-prototype-closure-and-development-pause).
+   Use the [README version map](../README.md#which-code-was-tested) to distinguish
+   the frozen `v1` tag from later documentation/comment cleanup on `main`.
+   Review the [audit disposition](V1_AUDIT_RESOLUTION.md) before any code changes.
 2. Inspect the then-current Git status and remote history before doing new work.
    Preserve the unrelated editor setting, historical branches, stashes, backups,
    original images and simulation. Do not restore an abandoned patch merely
@@ -146,7 +135,5 @@ None of these items is already implemented or purchased as part of this closure.
    compare software results with repeated physical observations. Keep calibration,
    state refresh and radio recovery as distinct questions.
 
-These are instructions for a future return, not unfinished tasks for this
-closure. The previous request for three more wake tests, and the earlier
-immediate repeat-demonstration instruction, are superseded by the development
-pause. No additional test, hardware purchase or firmware change is required now.
+This is a future restart plan. v1 firmware development and physical testing are
+complete for this development period, with the limitations recorded above.

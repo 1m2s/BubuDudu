@@ -1,5 +1,8 @@
 # BubuDudu Development Log
 
+> Dated development records; current guidance is in [README](README.md),
+> [Architecture](ARCHITECTURE.md) and [Interfaces](INTERFACES.md). Earlier instructions and paths describe their recorded checkpoints.
+
 ## 2026-09-07
 
 ### Completed
@@ -4440,3 +4443,61 @@ recordings without claiming full acceptance, measured range or a reliability
 rate. Firmware, tests, build settings and hardware remain unchanged; development
 stays paused and the saved v2 restart point stands. The unrelated VS Code setting
 remains excluded from the media documentation commit.
+
+
+## 2026-10-04 — Documentation audit cleanup
+
+### Completed
+
+I rewrote the current documentation to describe the project directly and use
+first person for my observations. The README now owns the version map, including
+identical firmware at the PR merge, uploaded source and v1 tag. The hardware
+reference includes recorded supplies, passive connections, battery evidence,
+MAC selection and upload/monitor commands. Architecture explains actual module
+ownership, callback logging, proximity input and sleep deadlines.
+
+The old acceptance preparation and simulated-sleep procedure are in
+[docs/history](docs/history/README.md). Their text is retained with relative
+links adjusted for the move. Earlier dated DEVLOG entries remain unchanged;
+a note at the top points readers to current guidance.
+
+I shortened the button reference, corrected test coverage claims, documented
+test doubles and the stationary-peer coverage gap, and removed private paths
+and process narration from current media notes. The unverified working-day
+estimate is omitted. The GitHub description now describes heartbeat exchange,
+motion wake and coordinated sleep without implying measured power performance.
+
+[The audit disposition](docs/V1_AUDIT_RESOLUTION.md) accounts for F1–F22 and
+separates corrected documentation/comments from deferred code/hardware changes.
+Seventeen source/header files contain comment corrections only, covering RSSI,
+callback logging, current sleep behavior, dormant drivers and misleading names.
+
+### Verification and preserved state
+
+The compiler's raw-token output was compared before and after comment removal:
+all 28,052 non-comment C++ tokens match. Identifiers, values, operators and strings
+are unchanged. The complete host suite passed with ASan/UBSan for both identities,
+and sequential Bubu/Dudu build-only builds passed. Local document links, heading
+anchors, image hashes and whitespace checks passed.
+
+Tests, build settings, tools, workflow, original images and simulation are
+unchanged. Historical branches, stashes and the v1 tag are preserved. The
+unrelated editor setting remains outside the cleanup commit. No hardware was
+changed or flashed; the physical working state and open defects remain as
+recorded in [final findings](FINAL_FIRMWARE_TEST.md).
+
+### BubuDudu checkpoint
+
+- Completed: current documentation cleanup, archived procedures, corrected source
+  comments and one explicit disposition for every audit finding.
+- Files: README, Requirements, Architecture, Interfaces, Button Heartbeat, Final
+  Findings, reflection, media/test guides, this DEVLOG, audit/history documents
+  and the seventeen comment-only C++ files.
+- Git: commit subject `docs: resolve v1 audit without firmware changes` records
+  this checkpoint; `v1` remains at `d5acad1`.
+- Hardware: unchanged; no new physical test or acceptance pass.
+- Known issues: stationary-peer stale proximity/radio state, unresolved radio,
+  sleep and OLED observations, and missing calibration/power measurements.
+- Exact next step: development stays paused. If v2 resumes, define and test the
+  two-device separation-and-return scenario where only one device moves before
+  changing proximity or transport policy.

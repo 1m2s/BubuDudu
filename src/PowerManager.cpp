@@ -9,6 +9,7 @@ namespace PowerManager
         constexpr uint32_t HARD_TIMEOUT_MS = 5000;
         constexpr uint32_t PHASE_TIMEOUT_MS = 3000;
         constexpr uint32_t FAILURE_COOLDOWN_MS = 3000;
+        // Legacy name for the software WAKING transition; physical sleep is separate.
         constexpr uint32_t SIMULATED_WAKE_MS = 250;
 
         LocalState local = LocalState::ACTIVE;
@@ -435,8 +436,8 @@ namespace PowerManager
 
     void applicationEvent(uint32_t /*now*/)
     {
-        // Heartbeat is the only application EVENT. Periodic background traffic
-        // is not user activity and cannot revoke sleep intent or agreement.
+        // Heartbeat and UserHeartbeat reception update peer visibility here.
+        // Application receipt alone does not revoke sleep intent or agreement.
         notePeerSeen();
     }
 

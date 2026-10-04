@@ -18,11 +18,11 @@ namespace CC1101SleepArm
     };
 
     // One cold-boot initialization, before ESP-NOW starts. Resets/configures
-    // CC1101 only; NOT suitable for a future deep-wake boot with retained FIFO.
+    // CC1101 only; deep-wake boot uses attachRetained() to preserve the FIFO.
     Result begin();
     // MCU SPI/pins only, after releasing CS hold; no CC1101 writes/strobes.
     void attachRetained();
-    // Read-only readiness snapshot; never reset, flush, read FIFO or restart RX.
+    // Read-only readiness snapshot, also used awake; no reset/flush/FIFO read/RX restart.
     // At most 50 ms of radio polling, with no automatic recovery/retry episode.
     Report prepareForSleep();
     const char* toString(Result result);

@@ -1,10 +1,8 @@
 # BubuDudu Requirements
 
-v1 firmware status at the user-reported upload target `ecd9d4f`, unchanged by
-the later documentation checkpoints. Development is paused. “Implemented”
-describes the code; physical acceptance remains incomplete. [Architecture](ARCHITECTURE.md) explains
-runtime ownership, [testing](tests/host/README.md) preserves build/host commands,
-and [hardware acceptance](FINAL_FIRMWARE_TEST.md) records the remaining checks.
+This is the implemented v1 behavior. [Architecture](ARCHITECTURE.md) explains
+runtime ownership, [testing](tests/host/README.md) provides build/host commands,
+and [final findings](FINAL_FIRMWARE_TEST.md) records evidence and open defects.
 
 ## Implemented behavior
 
@@ -15,7 +13,7 @@ and [hardware acceptance](FINAL_FIRMWARE_TEST.md) records the remaining checks.
 | Event delivery | The eight-byte protocol has message types, IDs, matching ACKs, a 300 ms timeout and at most two same-ID retries. Receive callbacks queue packets; the cooperative loop handles protocol state, peer status and simultaneous traffic. Delivery can fail after the bounded attempts. |
 | Radio selection | Application traffic uses ESP-NOW for eligible CLOSE state and CC1101 for FAR, with deferred CC1101 fallback after ESP-NOW event retries exhaust. Fresh eligible CLOSE evidence permits return to ESP-NOW. Pending packets keep their selected transport; sleep controls stay on ESP-NOW. |
 | Motion and proximity | ADXL345 activity/inactivity drives movement/settling and motion wake. Proximity uses fresh ESP-NOW RSSI observations and provisional CLOSE/FAR hysteresis. The last completed classification persists while a new check is pending; UNKNOWN remains possible. |
-| Power | Awake devices stay ACTIVE. After 35 seconds of meaningful local inactivity, sleep admission still requires motion, button, proximity, transport and cooldown guards. REQUEST → READY → COMMIT → SLEEP_ACK establishes semantic agreement; physical entry additionally requires drain and sensor/radio preparation. Product sleep has no timer wake. |
+| Power | Awake devices stay ACTIVE. After 35 seconds of meaningful local inactivity, sleep admission still requires motion, button, proximity, transport and cooldown guards. REQUEST → READY → COMMIT → SLEEP_ACK establishes agreement between both devices to sleep; physical entry additionally requires drain and sensor/radio preparation. Product sleep has no timer wake. |
 | Wake and recovery | GPIO3 motion, GPIO4 CC1101 and GPIO5 button can wake the MCU. Startup preserves RTC protocol history and inspects retained radio packets. Motion/button-origin peer wake is bounded; button handoff requires a peer ACK and local RX readiness before user-event delivery. Failed sleep entry returns ACTIVE; its recovery measurement requires a new post-failure EVENT and matching ACK. |
 | Visual feedback | Loop-driven WS2812B animation is non-blocking. CLOSE/FAR background cadence is 2500/6000 ms, subject to current eligibility and user-animation priority. OLED frames contain identity, peer, distance classification, selected radio, status and motion, plus a sleep frame. |
 
@@ -25,8 +23,8 @@ receiver-only animation and the brief-pulse limitation at final sleep entry.
 
 ## Deferred defects and missing evidence
 
-- Proximity classification and automatic radio transitions were reported as
-  extremely unreliable. The stationary partner can remain FAR on CC1101 after
+- I observed extremely unreliable proximity classification and automatic radio
+  transitions. The stationary partner can remain FAR on CC1101 after
   the moved device returns; moving the stale device may be needed for refresh.
   This is an observed product limitation, not only a future calibration task.
 - Resolve or characterize initial `NOT_IN_RX`, persistent CC1101 `Stopped`, rare
