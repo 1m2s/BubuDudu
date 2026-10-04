@@ -4393,3 +4393,34 @@ purposeful MOSFET switching, a real comparator battery indicator and measured
 power/runtime. Optional gestures, battery telemetry and interface changes should
 serve a clear purpose. No future item is represented as purchased or completed;
 UWB accuracy is unpromised and a sensor alone cannot fix transition logic.
+
+### Closure follow-up: committed, pushed and verified
+
+The documentation/evidence checkpoint is
+[`be6e40917016136087a0a1ecb25a416af41045ee`](https://github.com/1m2s/BubuDudu/commit/be6e40917016136087a0a1ecb25a416af41045ee)
+— `docs: close v1 prototype development period`. It was pushed normally to
+`origin/main`, preserving and publishing the earlier `edd622f` observations too.
+Live [CI run 37222670400](https://github.com/1m2s/BubuDudu/actions/runs/37222670400)
+completed successfully for that exact commit: complete host suite with ASan/UBSan,
+Bubu then Dudu firmware builds, whitespace check and unchanged tracked files.
+
+Closure checks passed for 95 relative links/images and heading targets across
+11 Markdown documents, SVG XML, all screenshot provenance hashes, all 30 original
+image hashes and the original DEVLOG prefix. The five external links in current
+guidance returned HTTP 200. Local browser previews were reviewed for the README,
+final findings, reflection and evidence gallery; GitHub's rendered README also
+contains the expected two tables and three images.
+
+The intended change contains 11 Markdown files, one source-based SVG and one
+unchanged historical PNG. Comparison with `ecd9d4f` confirms no firmware,
+executable-test, tool, build/dependency, workflow or simulation change. Only
+`main` and `origin/main` advanced; historical refs and all eight stashes remain
+intact. The only working-tree modification after the checkpoint is the original,
+unstaged `.vscode/extensions.json`, still SHA-256
+`b14aaff9d2eaeb2c2d6e0893007079d33676ab6a1e8f9fc2a4bbfb706e14f846`.
+
+This log-only follow-up uses commit subject
+`docs: record verified v1 closure checkpoint`. It adds no hardware evidence or
+firmware changes. The final commit's own push-triggered CI remains visible in
+[the live workflow history](https://github.com/1m2s/BubuDudu/actions/workflows/firmware-ci.yml).
+The saved restart point above stands; the development period is closed.
