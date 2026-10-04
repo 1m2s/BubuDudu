@@ -1,6 +1,7 @@
 # BubuDudu Hardware Interfaces
 
-Current firmware assignments at main `3f6ae82`, shared by both ESP32-C3 identities.
+v1 firmware assignments at the reported upload target `ecd9d4f`, shared by both
+ESP32-C3 identities and unchanged by the later documentation checkpoints.
 This is a source map, not a new hardware-validation result. Earlier bring-up
 observations remain in [DEVLOG](DEVLOG.md); current physical checks remain in
 [hardware acceptance](FINAL_FIRMWARE_TEST.md).
@@ -48,8 +49,9 @@ CC1101 GDO0, and the product sleep policy has no timer fallback.
 
 ## Remaining hardware work and historical proposals
 
-OLED visibility, intermittent radio/sleep recovery, proximity calibration and
-power measurements remain open. Source assignments and bus ACKs are insufficient
+Development is paused. OLED visibility, intermittent radio/sleep recovery,
+unreliable proximity/radio transitions, calibration and power measurements
+remain open. Source assignments and bus ACKs are insufficient
 to close physical acceptance.
 
 MOSFET control and battery telemetry were design proposals. The
@@ -58,3 +60,6 @@ MOSFET control and battery telemetry were design proposals. The
 simulation references, not implemented firmware interfaces or measured battery
 performance. Existing battery-assembly observations remain historical evidence;
 current consumption, runtime and charging under load still need measurement.
+Possible future UWB ranging and purposeful MOSFET switching are
+[v2 aspirations](docs/V1_REFLECTION.md#aspirations-for-a-possible-v2), not components
+added to this pin map or purchases made during closure.

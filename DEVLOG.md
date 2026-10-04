@@ -4251,3 +4251,145 @@ demonstration a small counted number of times and record the local trigger,
 power arrangement, successes/failures and whether any reset was needed. Use that
 bounded result to support tomorrow's demonstration, with proximity/automatic
 radio transitions explicitly presented as unresolved.
+
+## 2026-10-04 — v1 prototype closure and development pause
+
+### Milestone and scope
+
+This entry closes the current development period as **v1: a partially working
+integrated prototype with documented limitations**. Development is paused until
+free time is available, possibly during a holiday; there is no promised v2 date.
+v1 names the project checkpoint, not full hardware acceptance or a change to
+`Protocol::VERSION`. The repository remains available for future work.
+
+The user's decision to close now supersedes the previous immediate instruction
+to perform three more wake tests and the preceding repeat-demonstration next step.
+No additional physical testing is a prerequisite for this closure. Earlier dated
+entries, including their then-current next steps, remain historical records.
+
+The integrated source includes shared Bubu/Dudu configuration, structured
+EVENT/ACK delivery with bounded retries and duplicate handling, two application
+radio paths, motion/settling, button heartbeat, non-blocking LED output, OLED
+status, coordinated sleep and motion/button/CC1101 wake. These are implemented
+capabilities with different levels of physical evidence, not blanket acceptance
+passes.
+
+### Final user-reported physical findings
+
+After reporting uploads to both devices, the user described partial operation.
+Proximity classification and CLOSE/FAR ↔ ESP-NOW/CC1101 transitions are extremely
+unreliable. When one device moves away and returns, the stationary partner often
+does not refresh automatically and can remain on CC1101. One observed mismatch
+was Dudu at FAR / CC1101 while Bubu was CLOSE / ESP-NOW with its fast background
+heartbeat. Moving the stale device can be necessary to refresh its state.
+
+LED output and motion appeared to work. Sleep and CC1101 peer wake were among
+the stronger demonstrated behaviors: nearby peer wake worked reliably in the
+user's informal observations, including a successful test with a door between
+the devices. No numerical success rate, paired serial trace, precise separation
+or controlled radio-isolation test was supplied. A door does not prove ESP-NOW
+was unavailable. No complete acceptance case has been promoted to PASS.
+
+Source review, kept separate from those observations, confirms independent local
+classifications, samples accepted only during active checks, event-triggered
+refresh, no local check caused merely by replying to a peer probe, and retention
+of the previous classification on timeout/cancellation. This is consistent with
+stale state; it is not a confirmed diagnosis of every reported failure.
+
+The [final findings](FINAL_FIRMWARE_TEST.md) retain initial `NOT_IN_RX`, persistent
+CC1101 `Stopped`, rare failed-sleep recovery, OLED anomalies/visibility, provisional
+motion/proximity thresholds, uncaptured deferred-traffic overlap, brief-button-
+pulse limitations and dormant-driver concerns. Current consumption, battery
+runtime and charging under load remain unmeasured. Observed failures, unverified
+behavior and optional unfinished features are now explicitly distinguished.
+
+### Learning and unfinished electronics
+
+The author is an Electrical Engineering & IT student at RWU Ravensburg-Weingarten,
+entering semester 4, and reports completing a University of Colorado Boulder
+embedded-systems course. The project is an attempt to apply that learning to the
+best of the author's understanding; no course title, certificate, grade, instructor,
+affiliation with Colorado Boulder or assessment of this project is claimed.
+Development was AI-assisted. Repository artifacts do not establish independent
+mastery of every C++ implementation detail; deeper programming understanding
+remains a learning objective.
+
+The estimate of approximately 14 active working days during limited summer
+availability is the author's estimate, not verified hours or a count inferred
+from Git or the broader DEVLOG date range. Time limits explain scope and the
+pause without dismissing defects. The [reflection](docs/V1_REFLECTION.md) ties
+incremental checkpoints, callback/queue ownership, bounded failures, preserved
+working versions and software/hardware evidence to actual source and history.
+It also discusses ambitious scope, integration regressions, insufficient
+transition testing, provisional calibration and the limits of adding complexity.
+
+The analog ambitions were not completed physically. The Falstad model and
+screenshot remain idealized simulation evidence, separate from the later reported
+battery supply assembly. A measured comparator indicator, purposeful MOSFET
+switching/power gating and current/runtime characterization remain future work.
+
+### Repository state, files and validation
+
+Before editing, local `main` was `edd622f`, one documentation commit ahead of
+freshly fetched `origin/main` at `ecd9d4fb9920d876e0acea3a3579429e222af718`.
+The sole pre-existing working-tree change was `.vscode/extensions.json`.
+The reported installed firmware target remains `ecd9d4f`; no upload transcript
+or embedded version readback was supplied. `edd622f` and the v1 closure change
+only documentation/evidence relative to that target, not the firmware tested.
+
+The presentation checkpoint uses commit subject
+`docs: close v1 prototype development period`. Files changed:
+
+- `README.md`: concise purpose, milestone, capabilities, evidence limits, system
+  graphic, learning context and links.
+- `FINAL_FIRMWARE_TEST.md`: final findings, evidence categories, source attribution,
+  pause and explicit historical-procedure boundary.
+- `docs/V1_REFLECTION.md`: learning reflection, unfinished electronics, possible
+  v2 aspirations and saved restart instructions.
+- `ARCHITECTURE.md`, `REQUIREMENTS.md`, `INTERFACES.md`, `BUTTON_HEARTBEAT.md`,
+  `SLEEP_HANDSHAKE_TEST.md` and `tests/host/README.md`: current guidance reconciled
+  with v1 and deferred acceptance, without replacing historical procedures.
+- `docs/images/README.md`, `docs/images/v1-system-flow.svg` and
+  `docs/images/platformio-bringup-environment.png`: expanded provenance/gallery,
+  source-based diagram and one unchanged historical screenshot. All 30 supplied
+  images were inspected; the three existing selections were reused.
+- `DEVLOG.md`: this append; previous entries preserved byte-for-byte.
+
+Documentation validation covers relative links and heading anchors, Markdown
+rendering and images, SVG structure, image SHA-256 provenance, wording against
+source/history and `git diff --check`. The firmware, headers, executable tests,
+build/dependency configuration, CI workflow, tools and simulation remain unchanged
+from the reported target. No local host suite or firmware build is needed to
+validate prose-only changes, and neither was rerun locally for this closure.
+
+Live GitHub [run 37152115281](https://github.com/1m2s/BubuDudu/actions/runs/37152115281)
+was verified successful for `ecd9d4f`: complete host suite with ASan/UBSan,
+sequential Bubu/Dudu builds, whitespace and tracked-file checks. Push/CI evidence
+for the documentation checkpoint is recorded in the closure follow-up below.
+Software checks do not establish physical acceptance or resolve reported defects.
+
+The unrelated `.vscode/extensions.json` edit remains unchanged and outside commits.
+Historical branches, eight stashes, backups, original images and the simulation
+are preserved. No history rewrite, force push, tag replacement or repository
+archival is part of closure. No firmware, threshold, driver or dependency change
+was made. No device was flashed by the agent. No wiring, component or power
+configuration changed during this documentation work.
+
+### Saved restart point
+
+Start a possible v2 from this documented `main` checkpoint after inspecting the
+then-current working tree and remote history. Do not automatically restore the
+abandoned experimental stashes. The first useful investigation is the stationary
+partner's stale state after separation and return: identify the actual firmware
+on both devices, capture paired traces and screen/LED observations when work
+resumes, then compare triggers, samples, cancellation/timeout and transport choice
+before choosing one focused change.
+
+The [restart plan](docs/V1_REFLECTION.md#saved-restart-point) preserves that
+sequence and the host/build baseline. Aspirations include hopefully purchasing
+and evaluating suitable ultra-wideband (UWB) ranging hardware, deeper programming
+understanding, better state ownership/refresh/recovery and integration tests,
+purposeful MOSFET switching, a real comparator battery indicator and measured
+power/runtime. Optional gestures, battery telemetry and interface changes should
+serve a clear purpose. No future item is represented as purchased or completed;
+UWB accuracy is unpromised and a sensor alone cannot fix transition logic.

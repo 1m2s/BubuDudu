@@ -1,5 +1,9 @@
 # BubuDudu System Architecture
 
+**v1 source map, 4 October 2026.** Development is paused with incomplete physical
+acceptance. The reported upload target is `ecd9d4f`; later documentation changes
+leave its firmware intact. See [final findings](FINAL_FIRMWARE_TEST.md).
+
 Both ESP32-C3 identities run the same cooperative firmware. `DEVICE_BUBU` and
 `DEVICE_DUDU` select identity and peer configuration. `src/main.cpp` contains
 startup and the ordered loop; it does not create FreeRTOS application tasks.
@@ -81,6 +85,23 @@ I2C initialization, and OLED uses the same bus at 100 kHz. Sleep uses GPIO3/4 HI
 and GPIO5 LOW (mask `0x38`), with the product timer OFF. A successful deep sleep
 reboots; returning from the entry function always means failure and restores
 awake sensing. Display attempts do not establish physical OLED visibility.
+
+## Classification freshness and the v1 limitation
+
+Each device retains its own RAM-only CLOSE/FAR classification. An active check
+accepts fresh eligible RSSI observations; startup, local movement/settling and
+specific peer/recovery events can trigger checks. There is no general periodic
+refresh of a known result. Answering a peer's proximity probe does not itself
+start a local check. Cancellation or timeout clears the measurement but keeps
+the previous classification. A completed classification can request radio
+selection, subject to fallback and busy-state guards.
+
+This source behavior is consistent with the reported stationary partner staying
+FAR on CC1101 after its peer returns. It is not a confirmed diagnosis of every
+transition failure. The [final observations](FINAL_FIRMWARE_TEST.md#october-4-demonstration-checkpoint)
+remain separate from that interpretation. See the [system graphic](docs/images/v1-system-flow.svg)
+for a compact overview and [v2 restart point](docs/V1_REFLECTION.md#saved-restart-point)
+for future investigation.
 
 See [host testing](tests/host/README.md) for the suite map and
 [acceptance/evidence](FINAL_FIRMWARE_TEST.md) for unresolved hardware observations.

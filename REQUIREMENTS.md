@@ -1,7 +1,8 @@
 # BubuDudu Requirements
 
-Current firmware status at main `3f6ae82`. “Implemented” describes the code;
-physical acceptance remains incomplete. [Architecture](ARCHITECTURE.md) explains
+v1 firmware status at the user-reported upload target `ecd9d4f`, unchanged by
+the later documentation checkpoints. Development is paused. “Implemented”
+describes the code; physical acceptance remains incomplete. [Architecture](ARCHITECTURE.md) explains
 runtime ownership, [testing](tests/host/README.md) preserves build/host commands,
 and [hardware acceptance](FINAL_FIRMWARE_TEST.md) records the remaining checks.
 
@@ -22,21 +23,30 @@ and [hardware acceptance](FINAL_FIRMWARE_TEST.md) records the remaining checks.
 receiver-only animation and the brief-pulse limitation at final sleep entry.
 [Interfaces](INTERFACES.md) records the current GPIO and bus assignments.
 
-## Remaining work and evidence
+## Deferred defects and missing evidence
 
+- Proximity classification and automatic radio transitions were reported as
+  extremely unreliable. The stationary partner can remain FAR on CC1101 after
+  the moved device returns; moving the stale device may be needed for refresh.
+  This is an observed product limitation, not only a future calibration task.
 - Resolve or characterize initial `NOT_IN_RX`, persistent CC1101 `Stopped`, rare
   failed-sleep hardware recovery and OLED visibility. Host recovery tests and
   attempted framebuffer transfers do not close these hardware questions.
 - Physically evaluate the trial awake Motion threshold of 0.625 g; the separate
   sleep threshold remains 3 g. Calibrate proximity against repeatable conditions;
   CLOSE/FAR is not measured distance.
-- Complete the paired-device acceptance sequence, including radio fallback,
-  button/wake behavior and exact deferred-traffic overlap. Preserve earlier
-  observations with their original dates and conditions.
+- The paired-device acceptance sequence remains incomplete, including radio
+  fallback, button/wake behavior and exact deferred-traffic overlap. LED/motion
+  and nearby sleep/peer-wake observations provide partial evidence, with no
+  whole-case passes or measured success rate. Retain their dates and conditions.
 - Measure battery current, runtime and charging under load. No battery-life or
   charging-performance claim follows from the existing assembly notes or simulation.
 
-## Historical plans
+These items are deferred, not prerequisites for closing v1. Current results and
+known implementation limits are in [final findings](FINAL_FIRMWARE_TEST.md);
+future priorities are in the [v2 restart plan](docs/V1_REFLECTION.md#saved-restart-point).
+
+## Optional unfinished features
 
 The original requirements proposed gesture recognition (double tap, shake and
 orientation), battery telemetry, additional OLED RSSI/message-ID/ACK fields,

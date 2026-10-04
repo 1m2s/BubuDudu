@@ -1,50 +1,96 @@
 # BubuDudu
 
-Bubu and Dudu are two ESP32-C3 companion devices running shared firmware.
-A button press sends a heartbeat request to the other device, whose WS2812B
-plays a double pulse. Motion sensing supports wake and proximity checks;
-ESP-NOW and CC1101 carry events and coordinated sleep/wake traffic. RSSI-based
-CLOSE/FAR estimates control background heartbeat timing and radio selection.
-The OLED code presents device, peer, radio, motion and power status.
+**Two companion devices, one shared embedded firmware.**
 
-## Things learnt
+Bubu and Dudu are ESP32-C3 prototypes for exchanging a small physical signal:
+press a button on one device and its partner plays a heartbeat on a WS2812B LED.
+The project brings together motion sensing, two radio paths, OLED feedback and
+coordinated sleep/wake in a compact embedded-systems learning project.
 
-- Copy received packets into a queue; let the loop own protocol state.
-- Keep retry IDs stable and acknowledge duplicates without replaying their action.
-- Separate packet receipts from sleep agreement and physical sleep entry.
-- Inspect the retained CC1101 FIFO before reboot initialization can erase it.
-- Give shared I²C one initializer; address ACKs do not prove visible OLED output.
+**v1 checkpoint · development paused · 4 October 2026**
 
-Software checks pass at the recorded integration checkpoint. Hardware acceptance
-remains incomplete: initial `NOT_IN_RX`, persistent CC1101 `Stopped`, intermittent
-sleep recovery and OLED visibility remain unresolved or unverified. Awake motion
-sensitivity is a trial setting; battery runtime is unmeasured.
+v1 is a **partially working integrated prototype**, with incomplete hardware
+acceptance. It closes this development period; it does not mean every feature
+passed. Sleep and CC1101 peer wake are among the stronger user-reported behaviors.
+The major limitation is **extremely unreliable proximity classification and
+automatic ESP-NOW/CC1101 transitions**: a stationary partner can retain stale
+state until it is moved.
 
-October 4 user testing after reflashing reports unreliable proximity/radio
-transitions: one device can remain FAR on CC1101 while its partner shows CLOSE
-on ESP-NOW, with refresh often requiring local movement. LED and motion behavior
-and CC1101 peer wake were reported working, including a wake through a door;
-trial counts and paired logs were not captured in the report. See the
-[current observations](FINAL_FIRMWARE_TEST.md#october-4-demonstration-checkpoint)
-for evidence limits. This is a partially working prototype, not a fully accepted release.
+[Final findings & limitations](FINAL_FIRMWARE_TEST.md) ·
+[Learning & possible v2](docs/V1_REFLECTION.md) ·
+[Architecture](ARCHITECTURE.md) · [Builds & tests](tests/host/README.md)
 
-[Architecture](ARCHITECTURE.md) · [Builds and tests](tests/host/README.md) ·
-[Remaining hardware acceptance](FINAL_FIRMWARE_TEST.md) · [Development history](DEVLOG.md)
+## How it fits together
 
-## Selected evidence
+![Bubu and Dudu run shared ESP32-C3 firmware with independent local state. ESP-NOW carries application events and sleep controls; CC1101 carries application events and peer wake. ESP-NOW callbacks queue packets for the cooperative loop.](docs/images/v1-system-flow.svg)
 
-![Historical CC1101 SPI debugging capture with decoded MOSI and MISO transfers](docs/images/cc1101-spi-debug-capture.png)
+*Source-based system overview, not a wiring schematic or proof of acceptance.
+Each device owns its own proximity estimate; RSSI is not measured distance.*
 
-*Historical CC1101 SPI debugging capture: chip-select, clock and decoded transfers.
-It does not establish correct register values, RF delivery or current firmware acceptance.*
+| Capability in the firmware | Implementation |
+| --- | --- |
+| Symmetric companions | `bubu` and `dudu` PlatformIO identities share one source tree. |
+| Button heartbeat | Debounced request, receiver-only priority double pulse, duplicate suppression. |
+| Bounded message delivery | Eight-byte messages, matching ACKs, 300 ms timeout and up to two same-ID retries. |
+| Motion and radio policy | ADXL345 movement/settling; provisional CLOSE/FAR RSSI classification; ESP-NOW and CC1101 event transport. |
+| Sleep and wake | ESP-NOW sleep agreement followed by guarded deep sleep; motion, button and CC1101 wake inputs. |
+| Local feedback | Non-blocking LED output and OLED status; CLOSE/FAR background cadence of 2.5/6 seconds when eligible. |
 
-![I²C debugging capture showing Address read: 69 and an ACK](docs/images/i2c-address-69-debug-capture.png)
+These are implemented paths, not a table of hardware passes. See the
+[requirements](REQUIREMENTS.md), [GPIO and buses](INTERFACES.md) and
+[button behavior](BUTTON_HEARTBEAT.md) for details.
 
-*Historical I²C decoder view labelled “Address read: 69,” followed by an ACK.
-This is not successful ADXL345/OLED validation or proof of visible display output.*
+## What the evidence supports
 
-![Falstad battery-indicator simulation with resistor dividers, comparators and LEDs](docs/images/falstad-battery-indicator-simulation.png)
+After flashing both devices, I observed partial operation: LED output
+and motion appeared to work, sleep functioned, and nearby CC1101 peer wake worked
+reliably in my informal observations, including with a door between the devices.
+No counted success rate, paired serial trace, precise separation or controlled
+radio-isolation test was supplied. A door does not establish that ESP-NOW was
+unavailable. These observations do not complete any whole acceptance case.
 
-*Falstad battery-indicator candidate using dividers, comparators and LEDs.
-Simulation only; it does not establish assembled-circuit performance, charging behavior
-or battery runtime. [Image provenance](docs/images/README.md).*
+In one mismatch, Dudu showed **FAR / CC1101**, while Bubu showed **CLOSE / ESP-NOW**
+and continued its fast background heartbeat. The [final record](FINAL_FIRMWARE_TEST.md)
+separates these observations from the source-based explanation and retains the
+other radio, sleep-recovery, OLED, calibration and power-measurement limitations.
+
+The reported firmware upload target was [`ecd9d4f`](https://github.com/1m2s/BubuDudu/commit/ecd9d4fb9920d876e0acea3a3579429e222af718).
+Later commits document the findings and v1 closure without changing that firmware.
+The [verified CI run for that checkpoint](https://github.com/1m2s/BubuDudu/actions/runs/37152115281)
+passed the complete host suite with sanitizers and both firmware builds.
+[Live CI](https://github.com/1m2s/BubuDudu/actions/workflows/firmware-ci.yml)
+is software evidence; it cannot establish reliable physical radio transitions,
+visible OLED output or battery runtime.
+
+## A view of the work
+
+| Hardware debugging | Analog exploration |
+| --- | --- |
+| ![Historical SPI capture with decoded MOSI and MISO transfers](docs/images/cc1101-spi-debug-capture.png) | ![Falstad battery-indicator candidate with dividers, comparator stages and LEDs](docs/images/falstad-battery-indicator-simulation.png) |
+| CC1101 SPI debugging history. This capture does not prove RF delivery or final-firmware acceptance. | Idealized Falstad simulation. The analog indicator was not assembled and measured. |
+
+The [evidence gallery and provenance](docs/images/README.md) also include the I²C
+debugging capture and early PlatformIO environment. Original images and the
+[simulation export](simulations/battery_indicator_v1.txt) are preserved.
+
+## Learning context and pause
+
+I am an Electrical Engineering & IT student at RWU Ravensburg-Weingarten,
+entering semester 4. I tried to apply what I learned from a University of Colorado
+Boulder embedded-systems course that I completed, to the best of my understanding.
+This is a personal project, not a claim of university assessment or endorsement.
+Development was AI-assisted; the repository does not prove that I independently
+understand every C++ implementation detail. Deepening that understanding is part
+of the next learning step.
+
+I estimate about **14 active working days** during limited summer availability.
+That is my estimate, not a verified count of days or hours. The broader DEVLOG
+date range is not a timesheet, and limited time does not dismiss the defects.
+Development is paused until I have free time, possibly during a holiday, with
+no promised v2 date.
+
+The [reflection and saved restart point](docs/V1_REFLECTION.md) cover integration
+lessons, a possible ultra-wideband (UWB) ranging evaluation, purposeful power
+switching, a physical comparator indicator and power measurements. These are
+future aspirations. The dated [development log](DEVLOG.md) preserves both the
+working checkpoints and the setbacks.

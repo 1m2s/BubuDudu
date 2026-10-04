@@ -1,5 +1,11 @@
 # Awake button heartbeat
 
+**v1 implementation reference.** Development is paused. The checks below are
+deferred reference procedures, not additional work required for closure.
+Reported LED and wake observations do not establish every button timing or
+handoff case; see the [final findings and limits](FINAL_FIRMWARE_TEST.md).
+The project milestone v1 does not change the existing wire-protocol version.
+
 Both identities use the shared eight-byte `Protocol::Message` and its existing
 EVENT/ACK reliability rules. The EVENT enum now explicitly distinguishes:
 

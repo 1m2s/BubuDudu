@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="476" viewBox="0 0 1040 476" role="img" aria-labelledby="title desc">
+  <title id="title">BubuDudu v1 system overview</title>
+  <desc id="desc">Two ESP32-C3 devices run shared firmware with independent local state. ESP-NOW carries application events and sleep controls. CC1101 carries application events and peer wake. ESP-NOW callbacks copy packets into a queue for a cooperative loop that owns protocol and output decisions. This is an implementation overview, not a hardware acceptance result.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8Z" fill="#476079"/></marker>
+  </defs>
+  <rect width="1040" height="476" rx="20" fill="#f6f8fb"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#182b42">
+    <text x="32" y="43" font-size="26" font-weight="700">BubuDudu / v1 system</text>
+    <text x="32" y="73" font-size="17" fill="#53657b">Shared firmware · independent local state · incomplete hardware acceptance</text>
+    <rect x="32" y="100" width="276" height="248" rx="14" fill="#fff4e8" stroke="#e4cbb0"/>
+    <rect x="732" y="100" width="276" height="248" rx="14" fill="#eaf4fa" stroke="#b7d3e2"/>
+    <text x="54" y="140" font-size="26" font-weight="700">BUBU</text>
+    <text x="754" y="140" font-size="26" font-weight="700">DUDU</text>
+    <g font-size="18">
+      <text x="54" y="172">ESP32-C3 · shared runtime</text>
+      <text x="754" y="172">ESP32-C3 · shared runtime</text>
+      <text x="54" y="214">Button + ADXL345 motion</text>
+      <text x="754" y="214">Button + ADXL345 motion</text>
+      <text x="54" y="245">WS2812B LED + OLED</text>
+      <text x="754" y="245">WS2812B LED + OLED</text>
+      <text x="54" y="289" font-weight="700">Own CLOSE / FAR estimate</text>
+      <text x="754" y="289" font-weight="700">Own CLOSE / FAR estimate</text>
+      <text x="54" y="321" fill="#53657b">Motion / button / radio wake</text>
+      <text x="754" y="321" fill="#53657b">Motion / button / radio wake</text>
+    </g>
+    <g text-anchor="middle">
+      <text x="520" y="149" font-size="22" font-weight="700">ESP-NOW</text>
+      <text x="520" y="177" font-size="18">Application events + sleep controls</text>
+      <path d="M330 196 H710" fill="none" stroke="#476079" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+      <text x="520" y="252" font-size="22" font-weight="700">CC1101</text>
+      <text x="520" y="280" font-size="18">Application events + peer wake</text>
+      <path d="M330 300 H710" fill="none" stroke="#476079" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    </g>
+    <rect x="32" y="370" width="976" height="72" rx="12" fill="#182b42"/>
+    <g fill="#fff" text-anchor="middle" font-size="18">
+      <text x="142" y="399">ESP-NOW callback</text><text x="142" y="423" font-size="15" fill="#c6d5e6">copy packets</text>
+      <text x="266" y="411" font-size="26">→</text>
+      <text x="369" y="411">RX queue</text>
+      <text x="472" y="411" font-size="26">→</text>
+      <text x="605" y="399">Cooperative loop</text><text x="605" y="423" font-size="15" fill="#c6d5e6">owns protocol state</text>
+      <text x="745" y="411" font-size="26">→</text>
+      <text x="880" y="399">Messages + output</text><text x="880" y="423" font-size="15" fill="#c6d5e6">ACKs, LED, OLED</text>
+    </g>
+  </g>
+</svg>

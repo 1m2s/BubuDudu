@@ -1,4 +1,36 @@
-# Final firmware acceptance
+# v1 final findings and acceptance record
+
+## v1 closure — 4 October 2026
+
+**Partially working integrated prototype; development paused.** v1 closes this
+development period with incomplete hardware acceptance. No whole acceptance case
+is promoted to PASS. Further physical testing is deferred until development
+resumes; the previous instruction to repeat three wake tests or extend the
+demonstration is superseded. See [learning and the saved v2 restart point](docs/V1_REFLECTION.md).
+
+| Checkpoint | Meaning |
+| --- | --- |
+| `ecd9d4fb9920d876e0acea3a3579429e222af718` | User-reported source target uploaded to both devices. No upload transcript or embedded version readback was supplied. |
+| `edd622f` | Later local documentation commit recording the October 4 observations; firmware sources unchanged. |
+| v1 closure on `main` | Documentation/evidence checkpoint after `edd622f`; no firmware, protocol version, build configuration or hardware changes. v1 is a project milestone, not a new wire-protocol version. |
+
+The [live CI run for `ecd9d4f`](https://github.com/1m2s/BubuDudu/actions/runs/37152115281)
+was checked during closure: complete host suite with ASan/UBSan and both sequential
+firmware builds passed. These checks do not establish physical reliability.
+
+### Remaining limitations by evidence type
+
+| Type | v1 status |
+| --- | --- |
+| Reported failures | Extremely unreliable CLOSE/FAR classification and ESP-NOW/CC1101 transitions; stationary-partner stale state. Earlier initial `NOT_IN_RX`, persistent CC1101 `Stopped`, intermittent failed-sleep behavior and OLED anomalies remain unresolved. |
+| Incomplete or missing verification | Rare failed-sleep recovery and consistent OLED visibility; trial motion/proximity thresholds; actual automatic fallback under demonstrated ESP-NOW failure; exact physical deferred-traffic overlap; full button/sleep/wake acceptance. Current consumption, battery runtime and charging under load are unmeasured. |
+| Known implementation limits | A brief complete button press/release between final sleep-entry polls can be missed. Dormant `RadioTask`/`CC1101Radio` are not started by the application; the older driver's FIFO bound/RX-restart concerns remain and require an audit before reuse. |
+| Optional unfinished features | Gesture recognition, battery telemetry, extra UI/status features, MOSFET switching/power gating and a physically built comparator battery indicator. The Falstad model remains simulation evidence. |
+
+Informal successful sleep/peer-wake observations below are among the stronger
+demonstrated behaviors. They do not erase the earlier intermittent problems or
+supply a numerical reliability claim. See [button limits](BUTTON_HEARTBEAT.md),
+[interfaces](INTERFACES.md) and [requirements](REQUIREMENTS.md).
 
 ## October 4 demonstration checkpoint
 
@@ -6,8 +38,9 @@
 The user reports flashing both Bubu and Dudu after the October 4 source check.
 The source tree was still at that commit when this report was recorded; no
 upload transcripts or embedded version readback were supplied. Attribution is
-therefore based on the user's upload report. Development is frozen for the
-October 5 demonstration; this update changes documentation only.
+therefore based on the user's upload report. These findings are retained as the
+final physical observations for v1; the closure above supersedes the earlier
+demonstration-only freeze.
 
 These are user-reported physical observations, not an instrumented acceptance
 run. Paired serial logs, trial counts, measured separation, timing, power source
@@ -16,7 +49,7 @@ passed by this report.
 
 | Observation | Expected behavior | Reported result / evidence limit |
 | --- | --- | --- |
-| Devices move apart and return near one another | Eligible fresh proximity evidence should restore appropriate radio selection without requiring the stationary partner to be moved. | Unreliable. The other device can keep its old classification and remain on CC1101; moving it is reported to be needed for refresh. |
+| Devices move apart and return near one another | Eligible fresh proximity evidence should restore appropriate radio selection without requiring the stationary partner to be moved. | Reported extremely unreliable. The stationary partner often does not update automatically and can remain on CC1101; moving that stale device can be necessary for refresh. |
 | Simultaneous state observation | Each device's classification and heartbeat should remain useful under the current physical conditions. | Dudu showed FAR / CC1101 while Bubu showed CLOSE / ESP-NOW and a fast heartbeat. Duration and logs were not supplied. |
 | LED and motion behavior | Visible LED output and response to movement. | Reported working. Exact user-pulse timing, receiver-only behavior, sensor initialization and settling sequence were not separately recorded. |
 | Sleep and CC1101 peer wake | A local wake can wake the sleeping peer. | Sleep was reported functioning and nearby peer wake described as reliable; a wake with a door between the devices also succeeded. No counted success rate or matching-ACK trace was supplied. |
@@ -53,11 +86,20 @@ establish that ESP-NOW was unavailable or isolate radio propagation. The source
 uses CC1101 for the peer-wake transaction; this observation does not prove
 automatic ESP-NOW failure fallback, proximity accuracy or measured range.
 
-For the demonstration, describe LED/motion/sleep/wake observations alongside
-the unreliable proximity and automatic radio transitions. Preserve the tested
-firmware. The next small evidence step is a count of repeat attempts of the
-same previously successful sleep/peer-wake demonstration, recording trigger,
-power arrangement, successes, failures and any reset needed.
+For presentations, describe LED/motion/sleep/wake observations alongside the
+unreliable proximity and automatic radio transitions. Preserve the tested
+firmware and report missing evidence explicitly. Additional counted wake trials
+are a possible future evidence step, not a condition of this closure.
+
+## Earlier integration and acceptance procedure
+
+**Historical material below.** The October 1 baseline, upload instructions,
+Pending table, unpinned-dependency warning and merge restrictions describe that
+preparation session. They are not current instructions or a new acceptance run.
+Integration later reached main with pinned builds and live CI. For v1 status,
+use the closure and final observations above; use the [host guide](tests/host/README.md)
+for current build inputs. The retained procedures can inform a future test plan
+after their firmware attribution is updated. No tests or uploads are requested now.
 
 > **2026-10-03 integration update.** The implementation now uses the runtime
 > modules in [Architecture](ARCHITECTURE.md), and the complete split host suite

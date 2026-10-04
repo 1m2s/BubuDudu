@@ -1,6 +1,6 @@
 # ESP-NOW sleep-handshake checkpoint
 
-> **Historical procedure for `baea754` (simulated sleep).** The final firmware candidate performs real deep sleep after a successful handshake. The awake-only expectations and serial `a` wake procedure below do not apply to sleeping hardware. Use [Final firmware acceptance](FINAL_FIRMWARE_TEST.md) for the current candidate. This document preserves the earlier checkpoint and its failure analysis.
+> **Historical procedure for `baea754` (simulated sleep).** v1 performs real deep sleep after a successful handshake. The IDLE state and serial bench commands below are obsolete for v1. The awake-only expectations and serial `a` wake procedure do not apply to sleeping hardware. Development is paused; no flashing or tests are requested now. Use [v1 final findings](FINAL_FIRMWARE_TEST.md) for current evidence and [Architecture](ARCHITECTURE.md) for current behavior. This document preserves the earlier checkpoint and its failure analysis.
 
 Both ESP32s remain physically awake, including in simulated `SLEEPING`.
 Only ESP-NOW and PowerManager are active in this experiment. Flash both matching

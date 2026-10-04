@@ -1,5 +1,17 @@
 # Host tests and firmware builds
 
+**v1 is paused with incomplete hardware acceptance.** These commands remain a
+reproducible software baseline for a future return; no additional physical tests
+are required for closure. The [final findings](../../FINAL_FIRMWARE_TEST.md)
+record unreliable proximity/radio transitions despite passing software checks.
+
+During the 4 October 2026 closure, [GitHub run 37152115281](https://github.com/1m2s/BubuDudu/actions/runs/37152115281)
+was verified successful for the user-reported upload target `ecd9d4f`: the
+complete host suite with ASan/UBSan, sequential Bubu and Dudu builds, whitespace
+and tracked-file checks. Later documentation commits preserve the firmware,
+tests and build inputs. See [live runs](https://github.com/1m2s/BubuDudu/actions/workflows/firmware-ci.yml)
+and the appended [DEVLOG](../../DEVLOG.md) for closure validation.
+
 Run the complete suite from any working directory with Bash and a C++11 compiler:
 
 ```sh
