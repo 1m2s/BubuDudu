@@ -4501,3 +4501,26 @@ recorded in [final findings](FINAL_FIRMWARE_TEST.md).
 - Exact next step: development stays paused. If v2 resumes, define and test the
   two-device separation-and-return scenario where only one device moves before
   changing proximity or transport policy.
+
+
+## 2026-10-04 — Coursework connections
+
+Added my RWU Computer Technology and Digital Electronics subjects, including
+both labs, alongside the University of Colorado Boulder course in the README
+and reflection. The reflection connects binary representation, memory/registers,
+interrupts, bit masks, Boolean logic, state machines and timed LED output to
+specific BubuDudu modules. It identifies the lecture/lab editions and distinguishes
+ARM assembly and FPGA/VHDL coursework from the ESP32-C3 C++ implementation.
+
+The Digital Electronics lab's heartbeat-style LED pattern and PWM exercises
+provide a concrete connection to the project's timed visual output. The source
+PDFs remain reference material; the repository contains the topic summary and
+bibliographic references.
+
+BubuDudu checkpoint: README, reflection and this appended DEVLOG entry changed.
+Firmware, tests, build inputs, hardware and the v1 tag are unchanged. Validation
+covers the documentation diff, relative links and unchanged non-document files.
+Commit subject: `docs: connect RWU coursework to BubuDudu learning`.
+The current physical state and known issues remain as recorded in final findings.
+Development stays paused; a future restart still begins with the stationary-peer
+separation-and-return scenario.

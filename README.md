@@ -105,6 +105,15 @@ the early PlatformIO environment. Original images and the
 I am an Electrical Engineering & IT student at RWU Ravensburg-Weingarten,
 entering semester 4. I completed an embedded-systems course from the University
 of Colorado Boulder and used this project to practise embedded design.
+Alongside that course, my RWU **Computer Technology** and **Digital Electronics**
+subjects and their labs gave me foundations in binary data, registers, bit masks,
+interrupts, Boolean logic, state machines and timing. I connected those ideas to
+BubuDudu's packet fields, sensor configuration, wake inputs, sleep negotiation
+and LED heartbeat. The Digital Electronics lab also includes heartbeat-style
+LED patterns and PWM dimming, useful background for thinking about timed output.
+The [coursework connections](docs/V1_REFLECTION.md#what-my-rwu-subjects-contributed)
+explain the specific links to this project.
+
 Development was AI-assisted. I want to improve my ability to trace, explain and
 modify the C++ implementation independently.
 

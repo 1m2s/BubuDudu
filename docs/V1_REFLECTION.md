@@ -9,7 +9,9 @@ are the acceptance record. The evidence levels and remaining limitations are def
 
 I am an Electrical Engineering & IT student at RWU Ravensburg-Weingarten,
 entering semester 4. I completed an embedded-systems course from the University
-of Colorado Boulder and used this project to practise embedded design.
+of Colorado Boulder and used this project to practise embedded design. My RWU
+Computer Technology and Digital Electronics subjects and labs supplied further
+foundations, described in the [coursework connections](#what-my-rwu-subjects-contributed) below.
 
 Development was AI-assisted, including implementation and documentation. I want
 to become better at explaining, tracing and modifying the implementation myself.
@@ -19,6 +21,43 @@ on generated explanations.
 
 The development records span 7 September–4 October 2026. This date range does
 not estimate working days or hours.
+
+## What my RWU subjects contributed
+
+Alongside the University of Colorado Boulder course, I drew on **Computer
+Technology (Rechnertechnologie)** and **Digital Electronics**, including their
+labs at RWU. These subjects gave me foundations that I wanted to apply in a
+complete embedded project.
+
+| Subject | What I learned and practised | Connection to BubuDudu |
+| --- | --- | --- |
+| **Computer Technology — lecture** | Binary/hexadecimal representation, data sizes, registers and memory, byte ordering, and interrupts: hardware requests for the processor's attention. | These concepts help me reason about the fixed-width fields in the eight-byte [message](../include/Protocol.h) and the ADXL345 [interrupt path](../src/Motion.cpp), which records a notification before the loop reads the sensor's event register. |
+| **Computer Technology — lab** | ARM assembly load/store operations (reading/writing memory), condition flags, bit masks (selecting individual bits), and Linux/Make build tools. | Bit operations connect directly to sensor register settings and the [GPIO wake masks](../src/CC1101WakeRecovery.cpp). Understanding compilation and linking helps me follow how PlatformIO turns the shared source into the two firmware builds. |
+| **Digital Electronics — lecture** | Boolean logic and truth tables, logic levels, combinational/sequential circuits, and finite state machines: behavior described by states and transitions. | I applied this way of thinking to the conditions that permit sleep, active-HIGH/LOW inputs, the [power state machine](../src/PowerManager.cpp) and the [LED animation phases](../src/LED.cpp). |
+| **Digital Electronics — lab** | VHDL hardware descriptions for an FPGA, logic from function tables, timed LED bit patterns including a heartbeat-style pattern, and pulse-width modulation (PWM), which varies a signal's on-time. | The LED exercises gave me useful practice thinking about output sequences, timing and brightness. BubuDudu's heartbeat uses a C++ state machine that sends colour values to a WS2812B through the NeoPixel library. |
+
+The Computer Technology lab uses ARM assembly; BubuDudu runs C++ on the
+ESP32-C3's RISC-V processor. The Digital Electronics lab uses FPGA/VHDL
+hardware designs; BubuDudu implements its state machines in software. I am
+applying the underlying ideas across those platforms. Lab preparation,
+measurement and report writing also connect to the project's dated observations
+and the separation between expected behavior and recorded results.
+
+### Course material references
+
+The topic mapping above uses the lecture/lab materials by **Prof. Dr.-Ing.
+A. Siggelkow, Hochschule Ravensburg-Weingarten**. Dates identify the material
+editions, not the dates I completed a subject.
+
+- *Computer Technology*, 23 March 2026: sections 3.1–3.2 (data and addressing),
+  4.6 (logical operations), 4.12 (compilation/linking) and 6.2.1 (interrupts).
+- *Rechnertechnologie: Labor*, 14 February 2024: sections 2.3–2.6 (Linux and build
+  tools), chapter 3 (load/store), chapter 4 (flags) and chapter 5 (bit masks).
+- *Digital Electronics*, 30 September 2025: chapters 2–4 (numbers, Boolean and
+  combinational logic), chapter 6 (sequential logic), chapter 7 (state machines)
+  and chapter 8 (VHDL).
+- *Digital Electronics: Lab Notes*, 22 October 2025: chapters 2–4 (VHDL and logic
+  design), chapter 5 (LED bit patterns) and chapter 6 (PWM dimming).
 
 ## Concepts I tried to put into practice
 
