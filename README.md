@@ -20,6 +20,14 @@ remains incomplete: initial `NOT_IN_RX`, persistent CC1101 `Stopped`, intermitte
 sleep recovery and OLED visibility remain unresolved or unverified. Awake motion
 sensitivity is a trial setting; battery runtime is unmeasured.
 
+October 4 user testing after reflashing reports unreliable proximity/radio
+transitions: one device can remain FAR on CC1101 while its partner shows CLOSE
+on ESP-NOW, with refresh often requiring local movement. LED and motion behavior
+and CC1101 peer wake were reported working, including a wake through a door;
+trial counts and paired logs were not captured in the report. See the
+[current observations](FINAL_FIRMWARE_TEST.md#october-4-demonstration-checkpoint)
+for evidence limits. This is a partially working prototype, not a fully accepted release.
+
 [Architecture](ARCHITECTURE.md) · [Builds and tests](tests/host/README.md) ·
 [Remaining hardware acceptance](FINAL_FIRMWARE_TEST.md) · [Development history](DEVLOG.md)
 

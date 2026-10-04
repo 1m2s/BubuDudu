@@ -1,5 +1,64 @@
 # Final firmware acceptance
 
+## October 4 demonstration checkpoint
+
+**Firmware target: `main` at `ecd9d4fb9920d876e0acea3a3579429e222af718`.**
+The user reports flashing both Bubu and Dudu after the October 4 source check.
+The source tree was still at that commit when this report was recorded; no
+upload transcripts or embedded version readback were supplied. Attribution is
+therefore based on the user's upload report. Development is frozen for the
+October 5 demonstration; this update changes documentation only.
+
+These are user-reported physical observations, not an instrumented acceptance
+run. Paired serial logs, trial counts, measured separation, timing, power source
+and exact wake trigger were not supplied. No complete acceptance case is marked
+passed by this report.
+
+| Observation | Expected behavior | Reported result / evidence limit |
+| --- | --- | --- |
+| Devices move apart and return near one another | Eligible fresh proximity evidence should restore appropriate radio selection without requiring the stationary partner to be moved. | Unreliable. The other device can keep its old classification and remain on CC1101; moving it is reported to be needed for refresh. |
+| Simultaneous state observation | Each device's classification and heartbeat should remain useful under the current physical conditions. | Dudu showed FAR / CC1101 while Bubu showed CLOSE / ESP-NOW and a fast heartbeat. Duration and logs were not supplied. |
+| LED and motion behavior | Visible LED output and response to movement. | Reported working. Exact user-pulse timing, receiver-only behavior, sensor initialization and settling sequence were not separately recorded. |
+| Sleep and CC1101 peer wake | A local wake can wake the sleeping peer. | Sleep was reported functioning and nearby peer wake described as reliable; a wake with a door between the devices also succeeded. No counted success rate or matching-ACK trace was supplied. |
+
+**Acceptance impact:** proximity transitions and automatic return to ESP-NOW
+failed in the reported use (relevant to cases 2 and 5). The full procedures for
+those cases remain incomplete. Sleep/wake observations provide partial evidence
+for cases 7–9, not full passes. Other unobserved requirements remain pending.
+The sequence below retains its historical procedure; current observations here
+take precedence over an unqualified reading of its Pending statuses.
+
+### Source interpretation, separate from physical evidence
+
+At the tested source checkpoint, each device stores its own classification.
+`MotionRuntime::sampleProximity()` accepts classification samples only while a
+check is active. Checks start on eligible startup, local movement followed by
+settling, certain first-contact/peer-recovery events, or failed-sleep recovery.
+There is no general periodic refresh of an already-known classification.
+Responding to the peer's proximity probe does not itself start a local check.
+Timeout or cancellation retains the last completed classification; it does not
+expire that result to UNKNOWN. `RadioRuntime::serviceAutomaticTransportSelection()`
+uses fresh local classification completion to request a selection change, with
+separate fallback and busy-state guards.
+
+This provides a plausible explanation for a stationary device retaining an old
+result while its moved partner updates. It is not a confirmed diagnosis of all
+reported transition failures. RSSI is received signal strength, not measured
+distance; calibration quality and failure to refresh are separate questions.
+A temporary difference between the two local estimates alone does not prove a
+defect, but the reported persistent stale behavior is a product limitation.
+
+The door-separated wake is useful physical evidence. A door alone does not
+establish that ESP-NOW was unavailable or isolate radio propagation. The source
+uses CC1101 for the peer-wake transaction; this observation does not prove
+automatic ESP-NOW failure fallback, proximity accuracy or measured range.
+
+For the demonstration, describe LED/motion/sleep/wake observations alongside
+the unreliable proximity and automatic radio transitions. Preserve the tested
+firmware. The next small evidence step is a count of repeat attempts of the
+same previously successful sleep/peer-wake demonstration, recording trigger,
+power arrangement, successes, failures and any reset needed.
+
 > **2026-10-03 integration update.** The implementation now uses the runtime
 > modules in [Architecture](ARCHITECTURE.md), and the complete split host suite
 > and build workflow are described in [Testing](tests/host/README.md). Awake

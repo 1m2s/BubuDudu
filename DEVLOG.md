@@ -4194,3 +4194,60 @@ before testing. Then capture paired serial logs and direct observations of
 both screens using the existing verified bench wiring and power arrangement.
 Record pass, fail or missing evidence explicitly before moving to case 2 or
 making another firmware change.
+
+## 2026-10-04 — Demonstration freeze and reported transition failures
+
+### Completed and current state
+
+Local main and the live GitHub main head were checked at
+`ecd9d4fb9920d876e0acea3a3579429e222af718`. The user then reported flashing both
+devices and testing them. Upload transcripts and paired serial logs were not
+supplied; the installed-source attribution follows that report. No host test or
+firmware build was rerun for these documentation changes.
+
+The user froze further firmware development ahead of the October 5 professor
+demonstration. Both devices work partially: LEDs and motion were reported
+working, sleep was reported functioning, and CC1101 peer wake was described as
+reliable nearby, including a successful wake with a door between the devices.
+There are no trial counts or measured range/reliability claims.
+
+The main reported failure is proximity/radio transition behavior. After physical
+separation and return, the other device can retain its old classification and
+stay on CC1101 until it is moved. One simultaneous observation was Dudu at
+FAR / CC1101 and Bubu at CLOSE / ESP-NOW with a fast heartbeat. The user described
+transitions as frequently failing; no numerical failure rate was measured.
+
+### Interpretation and acceptance
+
+Source inspection found independent local classifications, samples gated by an
+active check, event-triggered checks without general periodic refresh, no local
+check triggered merely by answering a peer probe, and retention of the last
+classification after timeout/cancellation. This is consistent with the observed
+movement-dependent refresh, but paired traces are needed to establish the exact
+failed path. No root cause or firmware repair is declared complete.
+
+The latest observation section in `FINAL_FIRMWARE_TEST.md` records these failures
+and evidence limits. Cases 2 and 5 have reported transition failures; the full
+procedures remain incomplete. No whole acceptance case has been promoted to
+PASS. Door-separated wake does not prove ESP-NOW was unavailable or demonstrate
+automatic radio fallback. Earlier radio startup/Stopped, OLED, rare sleep-entry,
+brief-button-pulse, calibration and power-measurement issues remain open.
+
+### Files, commits and hardware
+
+- Updated `README.md`, `FINAL_FIRMWARE_TEST.md` and this appended DEVLOG entry.
+- Firmware, build settings and tests are unchanged; the tested firmware source
+  remains `ecd9d4f` despite this later documentation checkpoint.
+- The user performed the reported uploads; the agent performed no upload or
+  hardware operation. No wiring or power-configuration change was reported.
+- The unrelated `.vscode/extensions.json` modification remains excluded.
+- Documentation checkpoint: `docs: record demo observations and transition limitations`.
+  No bug fix, release tag or fully accepted release is implied.
+
+### Exact next step
+
+Keep the firmware frozen. Repeat the same previously successful sleep/peer-wake
+demonstration a small counted number of times and record the local trigger,
+power arrangement, successes/failures and whether any reset was needed. Use that
+bounded result to support tomorrow's demonstration, with proximity/automatic
+radio transitions explicitly presented as unresolved.
