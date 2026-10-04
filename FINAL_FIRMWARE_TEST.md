@@ -1,92 +1,72 @@
-# v1 final findings and acceptance record
+# Final results and known problems
 
 ## v1 closure — 4 October 2026
 
-**Partially working integrated prototype; development paused.** I am closing
-this development period with incomplete two-device acceptance. No whole
-acceptance case is marked PASS. Physical testing and firmware development are
-over for v1; remaining investigations belong to a possible v2.
-The [README version map](README.md#which-code-was-tested) identifies the uploaded
-source, release tag and software checks.
+v1 is a partly working prototype. Development and device testing are paused.
+The full two-device test plan was not completed. The
+[README](README.md#which-code-was-tested) identifies the flashed code and software checks.
 
 ## Evidence levels
 
 | Label | Meaning |
 | --- | --- |
-| **Observed** | Behavior or measurements I recorded during physical use. Conditions and missing measurements are stated with the observation. |
-| **Host-tested** | Software exercised on a computer with simulated hardware or a successful firmware build. It does not establish physical behavior. |
-| **Source-only** | Behavior inferred from source inspection or a design/simulation record, without a corresponding physical acceptance result. |
-| **Not done** | A test, measurement or feature remains incomplete. |
+| **Observed** | Something I saw or measured on the devices. |
+| **Host-tested** | Checked on a computer with hardware substitutes, or built successfully. |
+| **Source-only** | Read from the code or a design/simulation. |
+| **Not done** | Still missing or unfinished. |
 
-A demonstration is an observation, not a full acceptance pass. A full pass would
-need the complete case, matching firmware, stated conditions and recorded results.
+A demo shows one result. It does not prove every planned test passed.
 
 ## October 4 demonstration checkpoint
 
-I flashed both devices from the source identified in the README. I did not save
-upload logs, and the firmware has no version readback. The observations below
-come from informal use, without paired serial logs, trial counts, measured
-separation or timing; I did not record the exact power source and wake trigger
-for each episode.
+I flashed both devices from the code listed in the README. I did not save upload
+logs or paired serial logs, count trials or measure range/timing. The power source
+and wake trigger were not recorded for each demo.
 
-| Observation | Expected behavior | Observed result |
-| --- | --- | --- |
-| Devices separate and return | Useful proximity/radio state on both devices without moving the stationary partner. | Extremely unreliable. The stationary partner often stays on CC1101 until I move it. |
-| Simultaneous state | Each device's display and heartbeat reflect useful current local state. | Dudu showed FAR / CC1101 while Bubu showed CLOSE / ESP-NOW and a fast heartbeat. |
-| LED and motion | Visible LED output and response to movement. | Both worked in informal use. I did not separately measure the pulse or settling timing. |
-| Coordinated sleep and peer wake | A local wake can wake the sleeping peer. | Sleep and nearby CC1101 peer wake worked, including one wake through a closed door. I did not count trials or capture matching ACK logs. |
+| What I tried | What I saw |
+| --- | --- |
+| Move one device away and bring it back | Very unreliable. The stationary device often stayed on CC1101 until I moved it. |
+| Compare both screens | Dudu showed FAR / CC1101 while Bubu showed CLOSE / ESP-NOW and a fast heartbeat. |
+| LED output and motion | Both worked in informal use. I did not measure the exact timing. |
+| Sleep and peer wake | Worked nearby, including once through a closed door. I did not measure a success rate. |
 
-The proximity failures affect cases 2 and 5 of the
-[archived acceptance plan](docs/history/2026-10-01-acceptance-prep.md#physical-acceptance-sequence).
-Sleep/wake observations provide partial evidence for cases 7–9. None of those
-procedures was completed as a whole-case pass. A door does not establish that
-ESP-NOW was unavailable, so that wake does not demonstrate automatic fallback.
+A door does not prove ESP-NOW had failed, so that demo does not establish automatic
+fallback. The proximity failures relate to cases 2 and 5 of the
+[old test plan](docs/history/2026-10-01-acceptance-prep.md#physical-acceptance-sequence).
+Sleep/wake demos cover parts of cases 7–9, not complete passes.
 
-### Source interpretation, separate from physical evidence
+### What the code suggests
 
-**Source-only:** each device stores its own classification.
-`MotionRuntime::sampleProximity()` accepts samples only during an active check.
-Startup, local movement followed by settling, certain peer-contact/recovery
-events and failed-sleep recovery can trigger checks. There is no general
-periodic refresh of a known classification. Answering a peer's probe does not
-start a local check. Timeout or cancellation keeps the last completed result;
-it does not expire it to UNKNOWN.
+Each device keeps its own proximity result. It takes signal-strength samples
+only during a check. Movement, startup and some partner/recovery events can
+start checks, but known results have no regular refresh. Answering a partner's
+probe does not start a local check. A timeout keeps the old result.
 
-`RadioRuntime::serviceAutomaticTransportSelection()` uses fresh local
-classification completion to request a transport change, subject to fallback
-and busy-state guards. This is consistent with the stationary device retaining
-old state while its moved partner updates. It is a plausible explanation,
-not a confirmed diagnosis of every failure. RSSI calibration and state freshness
-are separate questions; brief differences between local estimates are expected,
-whereas the persistent stale behavior is a product limitation.
+That could explain the stationary device's stale state. It is not a confirmed
+diagnosis of every failure. Signal-strength calibration and refreshing old
+results are separate problems. [Architecture](ARCHITECTURE.md) explains the path.
 
 ## Remaining limitations
 
-| Evidence | Limitation |
-| --- | --- |
-| Observed | Unreliable proximity and radio switching; stationary-peer stale state. Earlier initial `NOT_IN_RX`, persistent CC1101 `Stopped`, intermittent failed-sleep behavior and OLED anomalies remain unresolved. |
-| Host-tested | Modeled recovery, ACK/retry, button, sleep and retained-packet paths pass software checks. The [test guide](tests/host/README.md#limits) explains the single-device model, test substitutes and retained-classification policy. |
-| Source-only | A complete button press/release between final entry polls can be missed. Legacy diagnostic text omits button wake or refers to simulated sleep; the [architecture](ARCHITECTURE.md#legacy-names-and-visible-diagnostics) explains the actual behavior. |
-| Source-only | Dormant `RadioTask`/`CC1101Radio` are not started. The older driver lacks an explicit 64-byte FIFO read bound and ignores some RX-restart results; it must be audited before reuse. |
-| Not done | Full button/sleep/wake acceptance; controlled automatic fallback under demonstrated ESP-NOW failure; physical capture of deferred-traffic overlap; reliable OLED visibility and rare failed-entry recovery. |
-| Not done | Validation of the trial 0.625 g awake motion threshold, proximity calibration, current consumption, battery runtime and charging under load. The sleep motion threshold remains 3 g. |
-| Not done | Gestures, battery telemetry, additional UI fields/animations, MOSFET power gating and an assembled comparator battery indicator. |
+- **Observed:** proximity/radio switching failures, earlier `NOT_IN_RX` and
+  `Stopped` radio errors, occasional sleep failures and OLED issues.
+- **Host-tested:** reply/retry, button, sleep and recovery cases pass in the
+  software model. [Test limits](tests/host/README.md#limits) explain what it misses.
+- **Source-only:** a very short button press between the last sleep checks can
+  be missed. Some [old messages](ARCHITECTURE.md#legacy-names-and-visible-diagnostics)
+  are misleading. The unused `CC1101Radio` driver lacks a 64-byte FIFO read check
+  and ignores some receive-restart failures; review it before reuse.
+- **Not done:** full button/sleep/wake tests, controlled radio fallback, hardware
+  logs of overlapping wake traffic, reliable OLED checks and rare sleep recovery.
+- **Not done:** motion/proximity calibration, current draw, battery life and
+  charging-under-load measurements. Motion thresholds remain 0.625 g awake and
+  3 g asleep.
+- **Not done:** gestures, battery readings, extra UI features, MOSFET switching
+  and a physical comparator battery indicator.
 
-Battery assembly and basic operation are **Observed** in the
-[3 October record](DEVLOG.md#2026-10-03), including approximately 3.9 V per cell
-and 4.99–5.02 V at the booster output. The Falstad battery indicator remains a
-simulation. Neither supplies the missing current/runtime measurements.
+On [3 October](DEVLOG.md#2026-10-03), both devices ran from batteries. I measured
+about 3.9 V per cell and 4.99–5.02 V at the booster. The Falstad battery indicator
+is only a simulation; there are no current or runtime measurements.
 
-## Historical records and future work
-
-The [October 1 preparation](docs/history/2026-10-01-acceptance-prep.md) and
-[September simulated-sleep procedure](docs/history/2026-09-23-sleep-handshake-procedure.md)
-are archived. Their commands, counts, dependency warnings and policy descriptions
-belong to older checkpoints. Current [interfaces](INTERFACES.md),
-[architecture](ARCHITECTURE.md) and [requirements](REQUIREMENTS.md) take precedence.
-
-The [audit disposition](docs/V1_AUDIT_RESOLUTION.md) records what was corrected
-without changing firmware behavior and what requires future code/hardware work.
-The [saved restart point](docs/V1_REFLECTION.md#saved-restart-point) begins with
-the stationary-peer return problem. No further physical test is required for
-this closure.
+[Old test records](docs/history/README.md) · [Cleanup checklist](docs/V1_AUDIT_RESOLUTION.md) ·
+[Future restart](docs/V1_REFLECTION.md#saved-restart-point)

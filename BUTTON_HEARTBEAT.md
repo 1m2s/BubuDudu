@@ -1,112 +1,83 @@
-# Button heartbeat and wake behavior
+# Button heartbeat
 
-This is the v1 behavior reference. [Final findings](FINAL_FIRMWARE_TEST.md)
-records physical evidence and open limits; further device testing is deferred.
+Press one device's button and its partner plays a double pulse.
+[Final results](FINAL_FIRMWARE_TEST.md) record what was tested on hardware.
 
 ## Messages and awake input
 
-Both devices use the eight-byte `Protocol::Message`. Its event field distinguishes:
+Both devices use the same eight-byte message and must run matching firmware.
+Adding UserHeartbeat did not change the message size or protocol version.
+Older firmware rejects that event value.
 
-| Event | Meaning | LED behavior |
-| --- | --- | --- |
-| `Heartbeat = 1` | Background event or peer wake | Background pulse when locally ACTIVE and CLOSE/FAR. |
-| `UserHeartbeat = 2` | Physical button request | Receiver plays a priority 700 ms double pulse; no added sender animation. |
+| Event | Use |
+| --- | --- |
+| `Heartbeat = 1` | Background pulse or partner wake. |
+| `UserHeartbeat = 2` | Button request; only the receiver gets the extra animation. |
 
-UserHeartbeat was added without changing message size or `Protocol::VERSION`.
-Both devices must run matching firmware; earlier firmware rejects the new event
-value. ESP-NOW and awake/retained CC1101 paths accept both values. Peer wake uses
-plain Heartbeat and has its own acknowledgement, separate from user delivery.
+The button connects GPIO5 to ground. A LOW level lasting 30 ms counts as a press;
+this filters switch bounce. Only one request can wait. It cancels a proximity
+check, waits for current radio work and sends. UNKNOWN proximity uses CC1101.
 
-GPIO5 uses an internal pull-up and a button to ground. A stable LOW press is
-debounced for 30 ms; release rearms it. **Debounce** filters rapid electrical
-changes so one physical press becomes one request. At most one request waits.
-It cancels a running proximity check, waits for in-flight work and uses the
-shared outbox: 300 ms ACK timeout, up to two retries with the same message ID.
-UNKNOWN sends through CC1101 without inventing a proximity result. An ACK means
-the packet was acknowledged; retries and ACKs never create an animation or echo
-EVENT.
+A reply (ACK) must arrive within 300 ms. Otherwise the sender retries up to twice
+with the same ID. ACKs and retries do not create extra animations.
 
 ## Receiver animation and duplicates
 
-A fresh UserHeartbeat replaces the receiver's background pulse. Its two pulses
-last 700 ms total: two 130 ms phases, a 70 ms gap and two 185 ms phases.
-Background requests during that animation are discarded. Another distinct user
-event restarts the pulse; there is one animation slot, not a queue. The sender's
-background animation continues without an extra user pulse.
+The user pulse lasts 700 ms: 130 ms up, 130 ms down, a 70 ms gap, then 185 ms up
+and 185 ms down. It replaces background output. Background requests during it
+are dropped; a new, distinct user event restarts it. The sender's background
+animation continues normally.
 
-Duplicate EVENTs are acknowledged again without replaying their action. An
-awake cache of eight user IDs also catches retries interleaved with newer events;
-entries expire after ten seconds and the cache resets on reboot. RTC memory
-separately retains the latest accepted-event history through deep sleep.
+Repeated event copies get another ACK but no repeated action. While awake, the
+receiver remembers eight recent user IDs for ten seconds. That cache clears on
+reboot; separate RTC memory keeps the latest event history through deep sleep.
 
-Animation is non-blocking: updates advance it while input/radio work continues.
-After completion, the next scheduled background request uses current state;
-CLOSE cadence is 2500 ms, FAR 6000 ms, and UNKNOWN suppresses background output.
-Incoming and outgoing FAR events share a visual clock. Sleep cancels LED output.
+After the user pulse, normal background output uses the current state: 2500 ms
+in CLOSE, 6000 ms in FAR, none in UNKNOWN. FAR sends/receives share one pulse
+clock. Animation updates leave time for input and radio work. Sleep turns it off.
 
 ## Button wake and peer handoff
 
-Deep-sleep wake uses GPIO3/4 HIGH and GPIO5 LOW, combined mask `0x38`, with no
-timer. The pinned SDK accumulates wake masks and preserves per-pin pull modes,
-so each pin keeps its fixed polarity. GPIO5's sleep pull-up supports the button
-to ground. [Interfaces](INTERFACES.md) owns the complete pin reference.
+GPIO5 LOW wakes the ESP32. Startup saves that wake reason, so an early button
+release does not lose the request. A held button does not count twice; a stable
+HIGH for 30 ms allows the next press. Button wake resets the 35-second inactivity
+clock. [Interfaces](INTERFACES.md) lists all wake pins and their fixed levels.
 
-The earliest wake mask seeds one UserHeartbeat even if the button is released
-before initialization. A held wake cannot create another press; stable HIGH for
-30 ms rearms input. Wake intent counts as local activity and resets the
-35-second inactivity timer.
+After startup, the request waits up to 3 seconds for radio work and any received
+user pulse to finish. It then tries to wake the partner over CC1101 using a plain
+Heartbeat with a new ID. There are three attempts, 300 ms reply waits and at most
+one receive-mode recovery attempt.
 
-After retained-radio recovery and runtime initialization, the intent waits up
-to 3 seconds for transport/control work and any received user pulse. It then
-runs one CC1101 peer-wake episode using Heartbeat with a fresh ID. Combined
-motion/button wake uses this one episode; combined radio/button wake recovers
-incoming packets first.
+Only a matching reply **and** a working local receiver allow the UserHeartbeat
+to be sent with another new ID. The wake reply does not confirm user-event delivery.
+If wake fails, times out or leaves the receiver unavailable, the request clears.
+Another attempt needs a release and new press. A stopped radio needs a reboot.
+Combined motion/button wake uses one wake attempt sequence; radio/button wake
+handles incoming packets first.
 
-Only an acknowledged wake **and** healthy local receive readiness release the
-user request. It then enters the reliable UserHeartbeat outbox with another
-fresh ID, using CC1101 while proximity is UNKNOWN. A peer-wake ACK alone does not
-confirm UserHeartbeat delivery.
+## Other packets during wake
 
-The wake episode has three same-ID attempts, 300 ms ACK waits and at most one
-RX recovery. Failure, a 3-second drain timeout or unavailable runtime clears
-the held request with delivery unconfirmed. A new episode requires release and
-a new debounced press. Held LOW cannot retry, and a stopped radio stays stopped
-until reboot.
+While waiting for the wake reply, other valid events wait in an eight-packet
+queue. They do not extend the deadline or count as that reply. After the wake
+attempt, the loop handles them one at a time and sends their ACKs. A full queue
+stops the attempt before another packet is read; unread data stays in the radio.
 
-## Concurrent and retained events
-
-During the synchronous wake ACK wait, validated application EVENTs enter an
-eight-packet deferred queue. They do not satisfy the wake ACK or extend its
-deadline. Once wake transmission returns, normal CC1101 processing drains them
-one at a time, waiting for each receipt transmission. A full queue stops the
-episode before reading another complete FIFO packet. Unread packets are
-preserved; no uncopied packet is acknowledged.
-
-A copied event can still be delivered if RX restoration fails, although its
-receipt may fail and the sender retains its normal retry limit. Queued work
-blocks sleep and new wake episodes until drained.
-
-A new retained UserHeartbeat records one animation obligation before its receipt
-ACK. After LED initialization it is consumed once, without replaying delivery
-or allocating another message ID. Duplicates and invalid-RTC rejection create
-no obligation. Local button wake waits for this received pulse to finish before
-starting synchronous peer wake.
+A saved event can still be handled if receive-mode recovery fails, though its
+ACK may fail. Queued events block sleep and new wake attempts until handled.
+A user event found after deep sleep saves one LED request before its ACK, then
+plays once after LED setup. Duplicates or rejected RTC history add no animation.
 
 ## Sleep guard and known limit
 
-Raw LOW and pending button work block sleep admission and final entry. Once
-work clears and the button is released, normal inactivity and other guards
-control coordinated sleep. LOW spanning an entry check prevents sleep; LOW
-spanning actual sleep triggers wake. A complete press/release between the final
-polls, including the SDK's interrupt-disabled interval, can be missed. There is
-no interrupt capture guaranteeing every such pulse.
+A held button or waiting button work blocks sleep. A complete press and release
+between the final sleep checks can be missed, including during the SDK's short
+interrupt-disabled entry period. There is no extra capture mechanism for that gap.
 
 ## Implementation and verification
 
-[ButtonRuntime](src/app/ButtonRuntime.cpp) owns input and wake intent;
-[RadioRuntime](src/app/RadioRuntime.cpp) owns delivery, retries and duplicate
-history; [Presentation](src/app/Presentation.cpp) owns LED requests;
-[SleepRuntime](src/app/SleepRuntime.cpp) owns boot and sleep policy.
-The [host suite map](tests/host/README.md) covers those paths.
-[Historical acceptance cases 3–10](docs/history/2026-10-01-acceptance-prep.md#physical-acceptance-sequence)
-retain the planned physical checks; they are not additional closure tasks.
+[ButtonRuntime](src/app/ButtonRuntime.cpp) handles input;
+[RadioRuntime](src/app/RadioRuntime.cpp) handles delivery;
+[Presentation](src/app/Presentation.cpp) controls output;
+[SleepRuntime](src/app/SleepRuntime.cpp) handles startup and sleep checks.
+See [software tests](tests/host/README.md) and the
+[old physical test plan](docs/history/2026-10-01-acceptance-prep.md#physical-acceptance-sequence).

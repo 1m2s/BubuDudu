@@ -1,58 +1,40 @@
-# BubuDudu Requirements
+# Features and remaining work
 
-This is the implemented v1 behavior. [Architecture](ARCHITECTURE.md) explains
-runtime ownership, [testing](tests/host/README.md) provides build/host commands,
-and [final findings](FINAL_FIRMWARE_TEST.md) records evidence and open defects.
+This page describes the v1 code. [Final results](FINAL_FIRMWARE_TEST.md) explain
+what worked on the devices and what is still unreliable.
 
 ## Implemented behavior
 
-| Area | Current behavior |
+| Feature | Behavior |
 | --- | --- |
-| Device symmetry | Bubu and Dudu share one source tree. PlatformIO identity flags select local/peer configuration; either device can send and receive. |
-| Button interaction | A debounced press queues one UserHeartbeat. The receiver plays a priority 700 ms double pulse; the sender gets no additional user animation. Duplicate events are re-ACKed without repeating the action. |
-| Event delivery | The eight-byte protocol has message types, IDs, matching ACKs, a 300 ms timeout and at most two same-ID retries. Receive callbacks queue packets; the cooperative loop handles protocol state, peer status and simultaneous traffic. Delivery can fail after the bounded attempts. |
-| Radio selection | Application traffic uses ESP-NOW for eligible CLOSE state and CC1101 for FAR, with deferred CC1101 fallback after ESP-NOW event retries exhaust. Fresh eligible CLOSE evidence permits return to ESP-NOW. Pending packets keep their selected transport; sleep controls stay on ESP-NOW. |
-| Motion and proximity | ADXL345 activity/inactivity drives movement/settling and motion wake. Proximity uses fresh ESP-NOW RSSI observations and provisional CLOSE/FAR hysteresis. The last completed classification persists while a new check is pending; UNKNOWN remains possible. |
-| Power | Awake devices stay ACTIVE. After 35 seconds of meaningful local inactivity, sleep admission still requires motion, button, proximity, transport and cooldown guards. REQUEST → READY → COMMIT → SLEEP_ACK establishes agreement between both devices to sleep; physical entry additionally requires drain and sensor/radio preparation. Product sleep has no timer wake. |
-| Wake and recovery | GPIO3 motion, GPIO4 CC1101 and GPIO5 button can wake the MCU. Startup preserves RTC protocol history and inspects retained radio packets. Motion/button-origin peer wake is bounded; button handoff requires a peer ACK and local RX readiness before user-event delivery. Failed sleep entry returns ACTIVE; its recovery measurement requires a new post-failure EVENT and matching ACK. |
-| Visual feedback | Loop-driven WS2812B animation is non-blocking. CLOSE/FAR background cadence is 2500/6000 ms, subject to current eligibility and user-animation priority. OLED frames contain identity, peer, distance classification, selected radio, status and motion, plus a sleep frame. |
+| Shared firmware | Bubu and Dudu use the same source. Either can send and receive. |
+| Button heartbeat | One stable press creates one request. The partner plays a 700 ms double pulse. Repeated copies do not repeat the action. |
+| Delivery | Eight-byte messages with IDs and reply matching. Wait 300 ms, retry up to twice using the same ID, then give up. |
+| Radio choice | CLOSE normally uses ESP-NOW; FAR uses CC1101. Failed ESP-NOW attempts can lead to CC1101. A fresh CLOSE result can switch back. A message being sent keeps its radio; sleep messages use ESP-NOW. |
+| Motion/proximity | ADXL345 detects movement and inactivity. ESP-NOW signal strength gives a rough CLOSE/FAR result. A failed check keeps the previous result; UNKNOWN is also possible. |
+| Sleep | After 35 seconds of local inactivity, both devices must agree to sleep. Movement, button input and unfinished work can delay entry. There is no timer wake. |
+| Wake | Motion on GPIO3, CC1101 on GPIO4 or the button on GPIO5 wakes the ESP32. Startup checks saved message history and unread radio packets. |
+| Output | LED animations run without long waits. Background pulses repeat every 2.5 s in CLOSE or 6 s in FAR when allowed. The OLED shows device, partner, proximity, radio, status and motion. |
 
-[Button behavior](BUTTON_HEARTBEAT.md) describes debounce, wake intent,
-receiver-only animation and the brief-pulse limitation at final sleep entry.
-[Interfaces](INTERFACES.md) records the current GPIO and bus assignments.
+[Button details](BUTTON_HEARTBEAT.md) · [Code layout](ARCHITECTURE.md) ·
+[Hardware](INTERFACES.md)
 
-## Deferred defects and missing evidence
+## Problems and missing tests
 
-- I observed extremely unreliable proximity classification and automatic radio
-  transitions. The stationary partner can remain FAR on CC1101 after
-  the moved device returns; moving the stale device may be needed for refresh.
-  This is an observed product limitation, not only a future calibration task.
-- Resolve or characterize initial `NOT_IN_RX`, persistent CC1101 `Stopped`, rare
-  failed-sleep hardware recovery and OLED visibility. Host recovery tests and
-  attempted framebuffer transfers do not close these hardware questions.
-- Physically evaluate the trial awake Motion threshold of 0.625 g; the separate
-  sleep threshold remains 3 g. Calibrate proximity against repeatable conditions;
-  CLOSE/FAR is not measured distance.
-- The paired-device acceptance sequence remains incomplete, including radio
-  fallback, button/wake behavior and exact deferred-traffic overlap. LED/motion
-  and nearby sleep/peer-wake observations provide partial evidence, with no
-  whole-case passes or measured success rate. Retain their dates and conditions.
-- Measure battery current, runtime and charging under load. No battery-life or
-  charging-performance claim follows from the existing assembly notes or simulation.
+- Proximity and radio switching are unreliable. The stationary device can stay
+  FAR after its partner returns.
+- CC1101 startup/stopped-radio errors, some sleep failures and OLED problems
+  remain unresolved.
+- The 0.625 g awake motion setting and proximity thresholds need proper testing.
+- Full two-device tests, reliable fallback and overlapping wake/button traffic
+  are not fully checked on hardware.
+- Current draw, battery life and charging under load were not measured.
 
-These items are deferred, not prerequisites for closing v1. Current results and
-known implementation limits are in [final findings](FINAL_FIRMWARE_TEST.md);
-future priorities are in the [v2 restart plan](docs/V1_REFLECTION.md#saved-restart-point).
+## Ideas not built
 
-## Optional unfinished features
+Gestures, battery readings, extra screen fields, more LED status patterns,
+MOSFET power switching and a physical comparator battery indicator remain ideas.
+Motion detection is implemented; gesture recognition is not.
 
-The original requirements proposed gesture recognition (double tap, shake and
-orientation), battery telemetry, additional OLED RSSI/message-ID/ACK fields,
-and a broader set of LED status animations. These remain ideas rather than
-completed capabilities. The implemented activity detector is not a gesture
-classifier. Optional MOSFET power gating is also unimplemented.
-
-ESP-NOW delivery, CC1101 fallback, heartbeat animation and motion wake have moved
-from those original plans into firmware. The dated [DEVLOG](DEVLOG.md) and older
-branch documents retain the development sequence and historical hardware results;
-their future-tense plans do not redefine the current implementation.
+Development is paused. The [restart plan](docs/V1_REFLECTION.md#saved-restart-point)
+starts with the stationary-device problem.

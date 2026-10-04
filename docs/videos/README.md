@@ -1,27 +1,18 @@
-# v1 demonstration recordings
+# Demo videos
 
-These three MOV recordings were added on 4 October 2026 as downloadable
-[v1 prototype pre-release assets](https://github.com/1m2s/BubuDudu/releases/tag/v1).
-Hosting them with the release keeps approximately 168 MiB of video out of source
-clones. The video data is unchanged.
-
-| File | Demonstration | Size |
+| Video | Shows | Size |
 | --- | --- | --- |
-| [ClosePeerWake.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/ClosePeerWake.mov) | Nearby devices: local wake and peer wake. | 58,572,763 bytes (55.9 MiB) |
-| [FarPeerWake.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/FarPeerWake.mov) | Separated devices: peer wake. | 80,839,637 bytes (77.1 MiB) |
-| [MovingBehavior.mov](https://github.com/1m2s/BubuDudu/releases/download/v1/MovingBehavior.mov) | Moving → settling → checking status and button interaction. | 36,482,969 bytes (34.8 MiB) |
+| [▶ Nearby wake](https://github.com/1m2s/BubuDudu/releases/download/v1/ClosePeerWake.mov) | Local and partner wake nearby. | 58,572,763 bytes (55.9 MiB) |
+| [▶ Wake farther apart](https://github.com/1m2s/BubuDudu/releases/download/v1/FarPeerWake.mov) | Partner wake with more separation. | 80,839,637 bytes (77.1 MiB) |
+| [▶ Motion and button](https://github.com/1m2s/BubuDudu/releases/download/v1/MovingBehavior.mov) | Movement, status and button use. | 36,482,969 bytes (34.8 MiB) |
 
-I use these as selected demonstrations. I did not record a measured range,
-counted success rate or paired serial trace. “Close” and “Far” are names, not
-calibrated distances. See [final findings](../../FINAL_FIRMWARE_TEST.md) for
-observations and limitations, and the [README version map](../../README.md#which-code-was-tested)
-for firmware attribution.
+Original MOV files, added to the [v1 release](https://github.com/1m2s/BubuDudu/releases/tag/v1)
+on 4 October 2026. They are unchanged; only `.MOV` in the first filename became
+`.mov`. “Close” and “Far” are names, not measured distances. I did not count
+success rates. [Known problems](../../FINAL_FIRMWARE_TEST.md) ·
+[Code version](../../README.md#which-code-was-tested).
 
-## Integrity
-
-The original `ClosePeerWake.MOV` has its filename extension lowercased for the
-release; its contents are identical. The other filenames are unchanged.
-These SHA-256 hashes identify the original video data:
+## File checks
 
 | File | SHA-256 |
 | --- | --- |

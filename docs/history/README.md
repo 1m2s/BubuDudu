@@ -1,15 +1,13 @@
-# Historical procedures
+# Old test records
 
-These records describe earlier firmware and are preserved for development history.
-Their commands, pin references, dependency warnings and acceptance statuses are
-not current instructions. Only relative Markdown links were adjusted when the
-records moved here; the October 1 record also has an archive preface.
+These records describe earlier firmware. Their commands and results belong to
+those versions. Keep them for history; use the [README](../../README.md) and
+[final results](../../FINAL_FIRMWARE_TEST.md) for v1.
 
-| Record | Scope |
+| Record | What it covers |
 | --- | --- |
-| [23 September sleep handshake](2026-09-23-sleep-handshake-procedure.md) | Simulated sleep at `baea754`; obsolete serial controls and IDLE state. |
-| [1 October acceptance preparation](2026-10-01-acceptance-prep.md) | Candidate `fece5af`, integration decisions and planned cases 1–10, with its later historical warning. |
+| [23 September sleep test](2026-09-23-sleep-handshake-procedure.md) | Simulated sleep at `baea754`, before real sleep and before serial controls were removed. |
+| [1 October test preparation](2026-10-01-acceptance-prep.md) | Candidate `fece5af`, integration choices and planned tests 1–10. |
 
-Use the [README](../../README.md), [architecture](../../ARCHITECTURE.md),
-[interfaces](../../INTERFACES.md) and [final findings](../../FINAL_FIRMWARE_TEST.md)
-for v1. The dated [DEVLOG](../../DEVLOG.md) preserves the wider development record.
+Original text is kept. Links were adjusted when the files moved here, and the
+October record has a short archive note. More history is in [DEVLOG](../../DEVLOG.md).

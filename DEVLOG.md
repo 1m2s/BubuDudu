@@ -1,7 +1,8 @@
 # BubuDudu Development Log
 
-> Dated development records; current guidance is in [README](README.md),
-> [Architecture](ARCHITECTURE.md) and [Interfaces](INTERFACES.md). Earlier instructions and paths describe their recorded checkpoints.
+> These are the original session notes. Old instructions describe old versions.
+> Start with the [demos](README.md), [final results](FINAL_FIRMWARE_TEST.md) or
+> [code guide](ARCHITECTURE.md) for the current project.
 
 ## 2026-09-07
 
@@ -4524,3 +4525,20 @@ Commit subject: `docs: connect RWU coursework to BubuDudu learning`.
 The current physical state and known issues remain as recorded in final findings.
 Development stays paused; a future restart still begins with the stationary-peer
 separation-and-return scenario.
+
+
+## 2026-10-04 — Demos first and simpler writing
+
+Moved all three demo videos directly below the README title. Shortened the
+current guides by about 37%, cut repeated explanations and used simpler English.
+The coursework section stays, with shorter links to the project. Original dated
+notes and old test records remain as history.
+
+Files: README, architecture, features, hardware, button, results, reflection,
+cleanup checklist, media/test guides, history index and this log. Checked links,
+headings, video placement and media hashes. Firmware, tests and build settings
+are unchanged; no hardware was changed or flashed.
+
+Commit: `docs: lead with demos and simplify project guides`.
+Next step: development stays paused. The known proximity/radio problem remains;
+a future v2 starts with the one-moving-device test.
