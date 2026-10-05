@@ -11,9 +11,15 @@
 
 ## The idea
 
-Press a button on Bubu and Dudu plays a heartbeat. It works the other way too.
-Both devices use an ESP32-C3 and the same firmware, with motion sensing, two
-radios, an OLED screen and a WS2812B LED.
+BubuDudu is a pair of symmetric wireless embedded devices built to explore reliable communication, low-power operation and multi-radio system design.
+
+Both devices run the same firmware on an ESP32-C3 and can communicate bidirectionally using two wireless technologies: **ESP-NOW as the primary low-latency link** and a **CC1101 433 MHz radio as a secondary communication and wake-up path**.
+
+The devices can detect motion, enter low-power sleep states, wake when moved, and wake their sleeping peer over radio. An OLED provides live diagnostic information such as connection state, radio status, proximity, message activity and power state.
+
+User interactions are built on top of this system. For example, pressing a button on one device sends an event to its peer, which responds with a heartbeat animation on its WS2812B LED.
+
+The project is therefore not just about remotely triggering an LED—it is about building and testing a small distributed embedded system with **bidirectional communication, dual-radio operation, peer wake-up, motion-based power management, diagnostics and reliable event delivery**.
 
 **v1 prototype · development paused · 4 October 2026.** LED output, motion,
 sleep and peer wake worked in my demos. The main problem is unreliable proximity
