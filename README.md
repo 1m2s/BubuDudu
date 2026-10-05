@@ -29,11 +29,17 @@ is incomplete. See [results and known problems](FINAL_FIRMWARE_TEST.md).
 
 ## What it does
 
-- Sends button heartbeats over ESP-NOW or CC1101.
-- Waits for a reply, retries twice if needed, and ignores duplicate actions.
-- Uses motion and signal strength to choose CLOSE/FAR and a radio.
-- Agrees with the other device before sleeping; wakes by motion, button or radio.
-- Shows status on an OLED and runs LED animations while other work continues.
+- Provides **bidirectional wireless communication** between two identical ESP32-C3 devices.
+- Uses **ESP-NOW as the primary radio** and a **CC1101 433 MHz link as a secondary communication and wake-up path**.
+- Adds an application-level reliability layer with **message IDs, acknowledgements, timeouts, limited retries and duplicate detection**.
+- Measures ESP-NOW signal strength to classify the peer as **CLOSE or FAR** and uses that information as part of the radio-selection logic.
+- Supports **automatic fallback between radios** when the preferred communication path is unavailable.
+- Monitors movement using an **ADXL345 accelerometer** and uses motion information as part of the device's power-management system.
+- Coordinates sleep between both devices through a **peer sleep handshake** instead of allowing either device to disappear unexpectedly.
+- Supports waking from **local motion, button input and a wireless peer-wake request**.
+- Displays live system information on an **OLED**, including connectivity, proximity, active radio, message activity and power state.
+- Drives **non-blocking WS2812B animations**, allowing visual feedback to run without stopping communication, sensing or system-state handling.
+- Includes button-triggered heartbeat events as one example application running on top of the communication system.
 
 ![Two devices share firmware, but keep their own state and radio choice](docs/images/v1-system-flow.svg)
 
